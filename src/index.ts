@@ -1,0 +1,227 @@
+import "dotenv/config";
+import { randomUUID } from "crypto";
+import express from "express";
+import cors from "cors";
+import helmet from "helmet";
+import compression from "compression";
+import rateLimit from "express-rate-limit";
+import authRoutes from "./routes/auth.js";
+import productRoutes from "./routes/products.js";
+import customerRoutes from "./routes/customers.js";
+import invoiceRoutes from "./routes/invoices.js";
+import paymentRoutes from "./routes/payments.js";
+import vendorRoutes from "./routes/vendors.js";
+import purchaseBillRoutes from "./routes/purchaseBills.js";
+import reportRoutes from "./routes/reports.js";
+import companyRoutes from "./routes/company.js";
+import storeConfigRoutes from "./routes/storeConfig.js";
+import fcmTokenRoutes from "./routes/fcmTokens.js";
+import { publicCategoryRouter, adminCategoryRouter } from "./routes/categories.js";
+import { publicCatalogRouter, adminCatalogRouter } from "./routes/catalog.js";
+import { publicBannerRouter, adminBannerRouter } from "./routes/banners.js";
+import cartRoutes from "./routes/cart.js";
+import { appCouponRouter, adminCouponRouter } from "./routes/coupons.js";
+import orderRoutes from "./routes/orders.js";
+import ownerOrderRoutes from "./routes/ownerOrders.js";
+import adminOrderRoutes from "./routes/adminOrders.js";
+import deliveryRoutes from "./routes/delivery.js";
+import ownerCatalogRoutes from "./routes/ownerCatalog.js";
+import appUserRoutes from "./routes/appUser.js";
+import { authMiddleware } from "./middleware/auth.js";
+import { auditLoggerMiddleware } from "./middleware/auditLogger.js";
+import { globalErrorHandler } from "./middleware/errorHandler.js";
+import { initFirebase } from "./lib/firebase.js";
+import { startOrderExpirySweeper } from "./services/orderExpiry.js";
+import { startAbandonedCartSweeper } from "./services/abandonedCart.js";
+import prisma from "./lib/prisma.js";
+
+const app = express();
+const PORT = process.env.PORT || 4000;
+
+// Behind Nginx/Cloud load balancer: trust the first proxy so req.ip and
+// express-rate-limit see the real client IP (not the proxy's).
+app.set("trust proxy", 1);
+
+// ─── Security headers + gzip ────────────────────────────────────────
+
+app.use(helmet());
+app.use(compression()); // gzip JSON responses (~70% smaller over mobile networks)
+
+// ─── CORS ───────────────────────────────────────────────────────────
+// Allowed origins come from env (comma-separated) so production dashboard
+// domains work without code changes. Falls back to local dev origins.
+
+const allowedOrigins = (process.env.ALLOWED_ORIGINS
+  ? process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean)
+  : ["http://localhost:5173", "http://localhost:3000"]);
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow same-origin/non-browser clients (no Origin header) and whitelisted origins.
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
+}));
+
+app.use(express.json({ limit: "10mb" }));
+
+// ─── Request ID + structured access log ────────────────────────────
+// Assigns/propagates a request id and emits one JSON line per request on finish
+// (method, path, status, latency). Enables tracing a request across logs.
+
+app.use((req, res, next) => {
+  const reqId = (req.headers["x-request-id"] as string) || randomUUID();
+  (req as any).id = reqId;
+  res.setHeader("X-Request-Id", reqId);
+  const start = Date.now();
+  res.on("finish", () => {
+    console.log(JSON.stringify({
+      level: "info",
+      reqId,
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      ms: Date.now() - start,
+    }));
+  });
+  next();
+});
+
+// ─── Firebase Admin SDK ────────────────────────────────────────────
+
+initFirebase();
+
+// ─── Rate Limiting ──────────────────────────────────────────────────
+
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: { code: "RATE_LIMITED", message: "Too many requests, try again later", details: [] } },
+});
+
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: { code: "RATE_LIMITED", message: "Too many login attempts, try again later", details: [] } },
+});
+
+const writeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: { code: "RATE_LIMITED", message: "Too many write operations, slow down", details: [] } },
+});
+
+app.use("/api", generalLimiter);
+
+// ─── Health (no auth) ───────────────────────────────────────────────
+
+app.get("/api/health", (_req, res) => {
+  res.json({ status: "ok", version: "2.0.0", timestamp: new Date().toISOString() });
+});
+
+// ─── App routes (public or Firebase-auth) ──────────────────────────
+
+app.use("/api/app/config", storeConfigRoutes);
+app.use("/api/app/me/fcm-token", fcmTokenRoutes);
+
+// Public app endpoints (no auth)
+app.use("/api/app/categories", publicCategoryRouter);
+app.use("/api/app/products", publicCatalogRouter);
+app.use("/api/app/banners", publicBannerRouter);
+app.use("/api/app/cart", cartRoutes);
+app.use("/api/app/coupons", appCouponRouter);
+app.use("/api/app/orders", orderRoutes);
+app.use("/api/app/owner/orders", ownerOrderRoutes);
+app.use("/api/app/owner/catalog", ownerCatalogRoutes);
+app.use("/api/app/delivery/orders", deliveryRoutes);
+app.use("/api/app/me", appUserRoutes);
+
+// ─── Auth routes (no auth middleware) ───────────────────────────────
+
+app.use("/api/auth/login", authLimiter);
+app.use("/api/auth", authRoutes);
+
+// ─── Protected routes ───────────────────────────────────────────────
+
+app.use("/api", authMiddleware as any);
+app.use("/api", auditLoggerMiddleware as any);
+
+app.use("/api/company", companyRoutes);
+app.use("/api/categories", adminCategoryRouter);
+app.use("/api/catalog", adminCatalogRouter);
+app.use("/api/banners", adminBannerRouter);
+app.use("/api/coupons", adminCouponRouter);
+app.use("/api/orders", adminOrderRoutes);
+app.use("/api/products", productRoutes);
+app.use("/api/customers", customerRoutes);
+app.use("/api/invoices", writeLimiter, invoiceRoutes);
+app.use("/api/payments", writeLimiter, paymentRoutes);
+app.use("/api/vendors", vendorRoutes);
+app.use("/api/purchase-bills", purchaseBillRoutes);
+app.use("/api/reports", reportRoutes);
+
+// ─── Audit Log viewer endpoint ──────────────────────────────────────
+
+app.get("/api/audit-logs", async (req, res) => {
+  try {
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
+    const entityType = (req.query.entityType as string || "").slice(0, 50) || undefined;
+    const userId = (req.query.userId as string || "").slice(0, 100) || undefined;
+    const fromDate = req.query.fromDate as string | undefined;
+    const toDate = req.query.toDate as string | undefined;
+
+    const where: any = {};
+    if (entityType) where.entityType = entityType;
+    if (userId) where.userId = { contains: userId, mode: "insensitive" };
+    if (fromDate || toDate) {
+      where.timestamp = {};
+      if (fromDate) where.timestamp.gte = new Date(fromDate);
+      if (toDate) {
+        const to = new Date(toDate);
+        to.setHours(23, 59, 59, 999);
+        where.timestamp.lte = to;
+      }
+    }
+
+    const [data, total] = await Promise.all([
+      prisma.auditLog.findMany({
+        where,
+        orderBy: { timestamp: "desc" },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      prisma.auditLog.count({ where }),
+    ]);
+
+    res.json({
+      success: true,
+      data,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ success: false, error: { code: "INTERNAL_ERROR", message: "Failed to fetch audit logs", details: [] } });
+  }
+});
+
+// ─── Global error handler (must be last) ────────────────────────────
+
+app.use(globalErrorHandler as any);
+
+// ─── Start ──────────────────────────────────────────────────────────
+
+app.listen(PORT, () => {
+  console.log(`Billing server running on http://localhost:${PORT}`);
+  // Periodically release stock held by unpaid/abandoned online orders.
+  startOrderExpirySweeper();
+  // Nudge users who left items in cart (every 15 min, max 1 push per user per 24h).
+  startAbandonedCartSweeper();
+});

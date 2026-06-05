@@ -1,0 +1,1 @@
+﻿import { PrismaClient } from '@prisma/client'; const prisma = new PrismaClient(); const r = await prisma.user.updateMany({ where: { firebaseUid: 'u2P6pTcq8sdzPcF81kPPZz43lgU2' }, data: { role: 'OWNER' } }); console.log('Updated:', r.count); process.exit(0);

@@ -1,0 +1,5 @@
+-- AlterTable
+ALTER TABLE "CatalogProduct" ADD COLUMN     "cessRate" DECIMAL(5,2) NOT NULL DEFAULT 0,
+ADD COLUMN     "isBranded" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN     "isExempt" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN     "isTaxInclusive" BOOLEAN NOT NULL DEFAULT true;

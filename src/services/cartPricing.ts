@@ -1,0 +1,178 @@
+import prisma from "../lib/prisma.js";
+import { toAppFormat } from "../utils/looseUnitConverter.js";
+
+function round2(n: number): number {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+export interface CartLineItem {
+  variantId: string;
+  quantity: number;
+  unitPrice: number;
+  effectiveUnitPrice: number;
+  lineTotal: number;
+  gstRate: number;
+  taxableValue: number;
+  cgst: number;
+  sgst: number;
+  isBulk: boolean;
+}
+
+export interface CartTotals {
+  items: CartLineItem[];
+  subtotal: number;
+  discount: number;
+  couponCode: string | null;
+  deliveryCharge: number;
+  taxableValue: number;
+  totalCgst: number;
+  totalSgst: number;
+  totalTax: number;
+  totalAmount: number;
+}
+
+interface CartItemWithVariant {
+  id: string;
+  variantId: string;
+  quantity: number;
+  variant: {
+    id: string;
+    productId: string;
+    sellingPrice: any;
+    mrp: any;
+    bulkMinQty: number;
+    bulkPrice: any;
+    gstRateOverride: any;
+    packageSize: any;
+    packageUnit: string;
+    product: {
+      productType: string;
+      gstRate: any;
+      hsnCode: string | null;
+      isPackaged: boolean;
+      categoryId: string;
+    };
+  };
+}
+
+function resolveGstRate(item: CartItemWithVariant): number {
+  if (item.variant.gstRateOverride != null) return Number(item.variant.gstRateOverride);
+  if (item.variant.product.gstRate != null) return Number(item.variant.product.gstRate);
+  return 0;
+}
+
+function isLooseType(productType: string): boolean {
+  return productType === "LOOSE" || productType === "PRODUCE";
+}
+
+export async function calculateCartTotals(
+  cartItems: CartItemWithVariant[],
+  couponCode?: string | null,
+  userId?: string | null,
+): Promise<CartTotals> {
+  const lines: CartLineItem[] = [];
+
+  for (const item of cartItems) {
+    const isLoose = isLooseType(item.variant.product.productType);
+    const converted = toAppFormat(item.variant, isLoose);
+    const unitPrice = converted.sellingPrice;
+
+    const isBulk = item.variant.bulkMinQty > 0 &&
+      item.quantity >= item.variant.bulkMinQty &&
+      converted.bulkPrice != null;
+
+    const effectiveUnitPrice = isBulk ? converted.bulkPrice! : unitPrice;
+    const lineTotal = round2(effectiveUnitPrice * item.quantity);
+    const gstRate = resolveGstRate(item);
+
+    // GST-inclusive back-calculation: taxable = gross / (1 + rate)
+    const taxableValue = gstRate > 0 ? round2(lineTotal / (1 + gstRate / 100)) : lineTotal;
+    const totalItemTax = round2(lineTotal - taxableValue);
+    const cgst = round2(totalItemTax / 2);
+    const sgst = round2(totalItemTax - cgst);
+
+    lines.push({
+      variantId: item.variantId,
+      quantity: item.quantity,
+      unitPrice,
+      effectiveUnitPrice,
+      lineTotal,
+      gstRate,
+      taxableValue,
+      cgst,
+      sgst,
+      isBulk,
+    });
+  }
+
+  const subtotal = round2(lines.reduce((sum, l) => sum + l.lineTotal, 0));
+
+  // Coupon
+  let discount = 0;
+  let appliedCoupon: string | null = null;
+
+  if (couponCode) {
+    const coupon = await prisma.coupon.findUnique({ where: { code: couponCode.toUpperCase() } });
+    if (coupon && coupon.isActive) {
+      const now = new Date();
+      const inRange = (!coupon.validFrom || coupon.validFrom <= now) &&
+        (!coupon.validUntil || coupon.validUntil >= now);
+      const meetsMin = subtotal >= Number(coupon.minOrder);
+      const underLimit = !coupon.usageLimit || coupon.usageCount < coupon.usageLimit;
+      // Per-user cap: how many times this customer has already redeemed it.
+      let underPerUser = true;
+      if (coupon.perUserLimit && userId) {
+        const usedByUser = await prisma.couponRedemption.count({
+          where: { couponId: coupon.id, userId },
+        });
+        underPerUser = usedByUser < coupon.perUserLimit;
+      }
+
+      if (inRange && meetsMin && underLimit && underPerUser) {
+        appliedCoupon = coupon.code;
+        if (coupon.couponType === "PERCENT") {
+          discount = round2(subtotal * Number(coupon.value) / 100);
+          if (coupon.maxDiscount) discount = Math.min(discount, Number(coupon.maxDiscount));
+        } else if (coupon.couponType === "FLAT") {
+          discount = Math.min(Number(coupon.value), subtotal);
+        }
+        // FREE_DELIVERY handled below
+      }
+    }
+  }
+
+  // Delivery charge
+  const storeConfig = await prisma.storeConfig.findFirst();
+  const freeDeliveryAbove = storeConfig ? Number(storeConfig.freeDeliveryAbove) : 500;
+  const standardDelivery = storeConfig ? Number(storeConfig.deliveryCharge) : 30;
+  const isFreeDelivery = appliedCoupon &&
+    (await prisma.coupon.findUnique({ where: { code: appliedCoupon } }))?.couponType === "FREE_DELIVERY";
+
+  let deliveryCharge = 0;
+  if (subtotal < freeDeliveryAbove && !isFreeDelivery) {
+    deliveryCharge = standardDelivery; // single source of truth: store config
+  }
+
+  const afterDiscount = round2(subtotal - discount);
+
+  // Recalculate totals
+  const totalTaxable = round2(lines.reduce((sum, l) => sum + l.taxableValue, 0));
+  const totalCgst = round2(lines.reduce((sum, l) => sum + l.cgst, 0));
+  const totalSgst = round2(lines.reduce((sum, l) => sum + l.sgst, 0));
+  const totalTax = round2(totalCgst + totalSgst);
+
+  const totalAmount = round2(afterDiscount + deliveryCharge);
+
+  return {
+    items: lines,
+    subtotal,
+    discount,
+    couponCode: appliedCoupon,
+    deliveryCharge,
+    taxableValue: totalTaxable,
+    totalCgst,
+    totalSgst,
+    totalTax,
+    totalAmount,
+  };
+}

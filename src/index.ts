@@ -75,15 +75,27 @@ app.use((req, res, next) => {
   (req as any).id = reqId;
   res.setHeader("X-Request-Id", reqId);
   const start = Date.now();
+
+  // Capture response body for error responses (4xx/5xx) so logs show what went wrong.
+  const originalJson = res.json.bind(res);
+  (res as any).json = (body: any) => {
+    (res as any)._body = body;
+    return originalJson(body);
+  };
+
   res.on("finish", () => {
-    console.log(JSON.stringify({
-      level: "info",
+    const logEntry: any = {
+      level: res.statusCode >= 400 ? "error" : "info",
       reqId,
       method: req.method,
-      path: req.path,
+      url: req.originalUrl,
       status: res.statusCode,
       ms: Date.now() - start,
-    }));
+    };
+    if (res.statusCode >= 400 && (res as any)._body) {
+      logEntry.error = (res as any)._body;
+    }
+    console.log(JSON.stringify(logEntry));
   });
   next();
 });

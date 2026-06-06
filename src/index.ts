@@ -36,7 +36,7 @@ import { startAbandonedCartSweeper } from "./services/abandonedCart.js";
 import prisma from "./lib/prisma.js";
 
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = parseInt(process.env.PORT || "4000", 10);
 
 // Behind Nginx/Cloud load balancer: trust the first proxy so req.ip and
 // express-rate-limit see the real client IP (not the proxy's).
@@ -218,8 +218,8 @@ app.use(globalErrorHandler as any);
 
 // ─── Start ──────────────────────────────────────────────────────────
 
-app.listen(PORT, () => {
-  console.log(`Billing server running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Billing server running on http://0.0.0.0:${PORT}`);
   // Periodically release stock held by unpaid/abandoned online orders.
   startOrderExpirySweeper();
   // Nudge users who left items in cart (every 15 min, max 1 push per user per 24h).

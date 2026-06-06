@@ -323,14 +323,14 @@ export async function generateInvoicePdf(invoiceId: string): Promise<Buffer> {
     hsnCode: li.hsnCode,
     qty: Number(li.quantity).toString(),
     unit: li.unit,
-    rate: fmt(li.unitPrice),
-    discount: fmt(li.discountAmount),
-    taxableValue: fmt(li.taxableValue),
+    rate: fmt(Number(li.unitPrice)),
+    discount: fmt(Number(li.discountAmount)),
+    taxableValue: fmt(Number(li.taxableValue)),
     cgstRate: Number(li.cgstRate).toFixed(1),
-    cgstAmount: fmt(li.cgstAmount),
+    cgstAmount: fmt(Number(li.cgstAmount)),
     sgstRate: Number(li.sgstRate).toFixed(1),
-    sgstAmount: fmt(li.sgstAmount),
-    total: fmt(li.totalAmount),
+    sgstAmount: fmt(Number(li.sgstAmount)),
+    total: fmt(Number(li.totalAmount)),
   }));
 
   // Tax breakup — group by GST rate
@@ -400,12 +400,12 @@ export async function generateInvoicePdf(invoiceId: string): Promise<Buffer> {
 
     lineItems,
 
-    subtotal: fmt(invoice.subtotal),
-    totalCgst: fmt(invoice.totalCgst),
-    totalSgst: fmt(invoice.totalSgst),
-    totalCess: fmt(invoice.totalCess),
-    roundOff: fmt(invoice.roundOff),
-    grandTotal: fmt(invoice.totalAmount),
+    subtotal: fmt(Number(invoice.subtotal)),
+    totalCgst: fmt(Number(invoice.totalCgst)),
+    totalSgst: fmt(Number(invoice.totalSgst)),
+    totalCess: fmt(Number(invoice.totalCess)),
+    roundOff: fmt(Number(invoice.roundOff)),
+    grandTotal: fmt(Number(invoice.totalAmount)),
     amountInWords: invoice.amountInWords,
 
     taxBreakup,
@@ -449,7 +449,7 @@ export async function generateInvoicePdf(invoiceId: string): Promise<Buffer> {
 
   try {
     const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "networkidle0", timeout: 15000 });
+    await page.setContent(html, { waitUntil: "domcontentloaded", timeout: 15000 });
 
     const pdfBuffer = await page.pdf({
       format: "A4",

@@ -92,8 +92,9 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       if (!address) throw new NotFoundError("Address", addressId);
     }
 
-    // Calculate totals (reuses the cart pricing service)
-    const totals = await calculateCartTotals(cartItems as any, couponCode, userId);
+    // Calculate totals (reuses the cart pricing service). Pass fulfillmentType so
+    // pickup orders are not charged delivery (matches the /cart/quote preview exactly).
+    const totals = await calculateCartTotals(cartItems as any, couponCode, userId, fulfillmentType);
 
     // Determine payment status. Every order starts PENDING; online orders flip to
     // PAID only after Razorpay verification in /:id/pay (which also arms the OTP).

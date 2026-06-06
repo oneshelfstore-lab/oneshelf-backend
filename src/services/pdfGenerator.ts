@@ -1,4 +1,4 @@
-import puppeteer from "puppeteer";
+import PDFDocument from "pdfkit";
 import prisma from "../lib/prisma.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
@@ -73,219 +73,336 @@ interface InvoiceData {
 
 function fmt(n: number | string): string {
   const num = typeof n === "string" ? parseFloat(n) : n;
-  return num.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return (isNaN(num) ? 0 : num).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 function fmtDate(d: Date): string {
   return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-function escHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+function num(s: string): number {
+  return Number(String(s).replace(/,/g, "").replace("−", "-")) || 0;
 }
 
-// ─── HTML Template ───────────────────────────────────────────────────
+// ─── Colours / layout constants ──────────────────────────────────────
 
-function buildInvoiceHtml(data: InvoiceData): string {
-  const lineRows = data.lineItems
-    .map(
-      (li) => `
-    <tr>
-      <td class="center">${li.sno}</td>
-      <td>${escHtml(li.description)}</td>
-      <td class="center">${li.hsnCode}</td>
-      <td class="right">${li.qty}</td>
-      <td class="center">${li.unit}</td>
-      <td class="right">${li.rate}</td>
-      <td class="right">${li.discount}</td>
-      <td class="right">${li.taxableValue}</td>
-      <td class="center">${li.cgstRate}</td>
-      <td class="right">${li.cgstAmount}</td>
-      <td class="center">${li.sgstRate}</td>
-      <td class="right">${li.sgstAmount}</td>
-      <td class="right bold">${li.total}</td>
-    </tr>`,
-    )
-    .join("");
+const GREEN = "#2E7D32";
+const GREY = "#555555";
+const LIGHT = "#EEEEEE";
+const DARK = "#1A1A1A";
 
-  const taxBreakupRows = data.taxBreakup
-    .map(
-      (tb) => `
-    <tr>
-      <td class="center">${tb.rate}</td>
-      <td class="right">${tb.taxable}</td>
-      <td class="right">${tb.cgst}</td>
-      <td class="right">${tb.sgst}</td>
-      <td class="right bold">${tb.totalTax}</td>
-    </tr>`,
-    )
-    .join("");
+type Align = "left" | "right" | "center";
+interface Col {
+  text: string;
+  width: number;
+  align?: Align;
+}
 
-  const cnRef = data.originalInvoiceNumber
-    ? `<p style="margin:4px 0;font-size:11px;">Against Invoice: <strong>${escHtml(data.originalInvoiceNumber)}</strong></p>`
-    : "";
+// ─── PDF drawing ─────────────────────────────────────────────────────
 
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; color: #1a1a1a; padding: 24px 28px; }
+function drawInvoice(doc: PDFKit.PDFDocument, data: InvoiceData): void {
+  const LEFT = doc.page.margins.left;
+  const RIGHT = doc.page.width - doc.page.margins.right;
+  const CONTENT_W = RIGHT - LEFT;
+  const PAGE_BOTTOM = doc.page.height - doc.page.margins.bottom;
 
-  .header { display: flex; justify-content: space-between; border-bottom: 2px solid #2E7D32; padding-bottom: 12px; margin-bottom: 14px; }
-  .company-name { font-size: 20px; font-weight: 700; color: #2E7D32; }
-  .company-details { font-size: 10px; color: #555; line-height: 1.5; margin-top: 4px; }
-  .gstin-badge { display: inline-block; background: #E8F5E9; border: 1px solid #A5D6A7; border-radius: 3px; padding: 2px 8px; font-size: 11px; font-weight: 600; color: #2E7D32; margin-top: 4px; }
+  let y = doc.page.margins.top;
 
-  .invoice-title { text-align: center; font-size: 16px; font-weight: 700; text-transform: uppercase; letter-spacing: 2px; margin: 10px 0; padding: 6px; background: #F5F5F5; border: 1px solid #DDD; }
+  // ── Header ──────────────────────────────────────────────────────
+  doc.fillColor(GREEN).font("Helvetica-Bold").fontSize(20);
+  doc.text(data.companyName, LEFT, y, { width: CONTENT_W * 0.62 });
+  const afterName = doc.y;
 
-  .meta-row { display: flex; justify-content: space-between; margin-bottom: 14px; }
-  .meta-box { width: 48%; }
-  .meta-box h4 { font-size: 10px; text-transform: uppercase; color: #888; letter-spacing: 1px; margin-bottom: 4px; }
-  .meta-box p { font-size: 11px; line-height: 1.5; }
+  // Right-side invoice meta (drawn at the same top y)
+  doc.fillColor(GREEN).font("Helvetica-Bold").fontSize(13);
+  doc.text(data.invoiceNumber, LEFT + CONTENT_W * 0.62, y, {
+    width: CONTENT_W * 0.38,
+    align: "right",
+  });
+  doc.fillColor(DARK).font("Helvetica").fontSize(10);
+  doc.text(`Date: ${data.invoiceDate}`, LEFT + CONTENT_W * 0.62, doc.y + 2, {
+    width: CONTENT_W * 0.38,
+    align: "right",
+  });
+  doc.text(`State: ${data.companyState} (${data.companyStateCode})`, {
+    width: CONTENT_W * 0.38,
+    align: "right",
+  });
 
-  .inv-details { text-align: right; }
-  .inv-details p { font-size: 11px; line-height: 1.7; }
-  .inv-number { font-size: 13px; font-weight: 700; color: #2E7D32; }
+  // Company details (left, continuing below the name)
+  doc.fillColor(GREY).font("Helvetica").fontSize(9);
+  doc.text(data.companyAddress, LEFT, afterName + 2, { width: CONTENT_W * 0.62 });
+  doc.text(`Phone: ${data.companyPhone}   Email: ${data.companyEmail}`, {
+    width: CONTENT_W * 0.62,
+  });
+  doc.fillColor(GREEN).font("Helvetica-Bold").fontSize(10);
+  doc.text(
+    `GSTIN: ${data.companyGstin}    PAN: ${data.companyPan}`,
+    { width: CONTENT_W * 0.62 },
+  );
 
-  table { width: 100%; border-collapse: collapse; margin: 10px 0; }
-  table th { background: #2E7D32; color: white; font-size: 9px; text-transform: uppercase; letter-spacing: 0.5px; padding: 6px 4px; text-align: center; }
-  table td { padding: 5px 4px; border-bottom: 1px solid #EEE; font-size: 10px; }
-  .right { text-align: right; }
-  .center { text-align: center; }
-  .bold { font-weight: 600; }
+  y = Math.max(doc.y, afterName) + 6;
+  doc.moveTo(LEFT, y).lineTo(RIGHT, y).lineWidth(1.5).strokeColor(GREEN).stroke();
+  y += 10;
 
-  .totals { display: flex; justify-content: flex-end; margin: 8px 0; }
-  .totals-table { width: 320px; }
-  .totals-table tr td { padding: 4px 8px; font-size: 11px; }
-  .totals-table tr td:last-child { text-align: right; font-weight: 500; }
-  .grand-total td { font-size: 14px !important; font-weight: 700 !important; color: #2E7D32; border-top: 2px solid #2E7D32; border-bottom: 2px solid #2E7D32; padding: 8px !important; }
+  // ── Title bar ───────────────────────────────────────────────────
+  doc.rect(LEFT, y, CONTENT_W, 22).fillColor("#F5F5F5").fill();
+  doc.rect(LEFT, y, CONTENT_W, 22).lineWidth(0.5).strokeColor("#DDDDDD").stroke();
+  doc.fillColor(DARK).font("Helvetica-Bold").fontSize(14);
+  doc.text(data.invoiceTitle.toUpperCase(), LEFT, y + 4, {
+    width: CONTENT_W,
+    align: "center",
+    characterSpacing: 2,
+  });
+  y += 28;
 
-  .words { background: #FAFAFA; border: 1px solid #EEE; border-radius: 4px; padding: 8px 12px; margin: 8px 0; font-size: 11px; }
-  .words span { font-weight: 600; }
+  if (data.originalInvoiceNumber) {
+    doc.fillColor(DARK).font("Helvetica").fontSize(10);
+    doc.text(`Against Invoice: ${data.originalInvoiceNumber}`, LEFT, y);
+    y += 16;
+  }
 
-  .tax-breakup { margin: 12px 0; }
-  .tax-breakup h4 { font-size: 10px; text-transform: uppercase; color: #888; letter-spacing: 1px; margin-bottom: 6px; }
-  .tax-breakup table th { font-size: 9px; }
+  // ── Bill To / Supply Details ────────────────────────────────────
+  const colW = CONTENT_W / 2 - 6;
+  const billX = LEFT;
+  const supX = LEFT + CONTENT_W / 2 + 6;
+  const boxTop = y;
 
-  .footer { margin-top: 20px; border-top: 1px solid #DDD; padding-top: 12px; display: flex; justify-content: space-between; }
-  .footer-left { width: 55%; font-size: 9px; color: #777; line-height: 1.6; }
-  .footer-right { width: 40%; text-align: right; }
-  .signatory { margin-top: 40px; border-top: 1px solid #333; display: inline-block; padding-top: 4px; font-size: 10px; font-weight: 600; }
-  .computer-gen { text-align: center; font-size: 9px; color: #AAA; margin-top: 16px; }
-</style>
-</head>
-<body>
+  doc.fillColor("#888888").font("Helvetica-Bold").fontSize(9);
+  doc.text("BILL TO", billX, boxTop, { width: colW, characterSpacing: 1 });
+  doc.fillColor(DARK).font("Helvetica-Bold").fontSize(11);
+  doc.text(data.customerName, billX, doc.y + 2, { width: colW });
+  doc.font("Helvetica").fontSize(10);
+  if (data.customerAddress) doc.text(data.customerAddress, { width: colW });
+  if (data.customerGstin) doc.text(`GSTIN: ${data.customerGstin}`, { width: colW });
+  doc.text(`State: ${data.customerState} (${data.customerStateCode})`, { width: colW });
+  const billBottom = doc.y;
 
-<div class="header">
-  <div>
-    <div class="company-name">${escHtml(data.companyName)}</div>
-    <div class="company-details">
-      ${escHtml(data.companyAddress)}<br>
-      Phone: ${escHtml(data.companyPhone)} | Email: ${escHtml(data.companyEmail)}
-    </div>
-    <div class="gstin-badge">GSTIN: ${escHtml(data.companyGstin)}</div>
-    <span style="margin-left:8px;font-size:10px;color:#555;">PAN: ${escHtml(data.companyPan)}</span>
-  </div>
-  <div class="inv-details">
-    <p class="inv-number">${escHtml(data.invoiceNumber)}</p>
-    <p>Date: <strong>${escHtml(data.invoiceDate)}</strong></p>
-    <p>State: ${escHtml(data.companyState)} (${escHtml(data.companyStateCode)})</p>
-  </div>
-</div>
+  doc.fillColor("#888888").font("Helvetica-Bold").fontSize(9);
+  doc.text("SUPPLY DETAILS", supX, boxTop, { width: colW, characterSpacing: 1 });
+  doc.fillColor(DARK).font("Helvetica").fontSize(10);
+  doc.text(`Place of Supply: ${data.placeOfSupply}`, supX, doc.y + 2, { width: colW });
+  doc.text(`Reverse Charge: ${data.isReverseCharge ? "Yes" : "No"}`, { width: colW });
+  const supBottom = doc.y;
 
-<div class="invoice-title">${escHtml(data.invoiceTitle)}</div>
-${cnRef}
+  y = Math.max(billBottom, supBottom) + 12;
 
-<div class="meta-row">
-  <div class="meta-box">
-    <h4>Bill To</h4>
-    <p>
-      <strong>${escHtml(data.customerName)}</strong><br>
-      ${data.customerAddress ? escHtml(data.customerAddress) + "<br>" : ""}
-      ${data.customerGstin ? "GSTIN: <strong>" + escHtml(data.customerGstin) + "</strong><br>" : ""}
-      State: ${escHtml(data.customerState)} (${escHtml(data.customerStateCode)})
-    </p>
-  </div>
-  <div class="meta-box">
-    <h4>Supply Details</h4>
-    <p>
-      Place of Supply: <strong>${escHtml(data.placeOfSupply)}</strong><br>
-      Reverse Charge: <strong>${data.isReverseCharge ? "Yes" : "No"}</strong>
-    </p>
-  </div>
-</div>
+  // ── Line items table ────────────────────────────────────────────
+  // Column widths (sum must be <= CONTENT_W ~ 539 on A4)
+  const widths = {
+    sno: 16,
+    desc: 104,
+    hsn: 34,
+    qty: 28,
+    unit: 26,
+    rate: 42,
+    disc: 34,
+    taxable: 48,
+    cgstR: 30,
+    cgstA: 42,
+    sgstR: 30,
+    sgstA: 42,
+    total: 50,
+  };
 
-<table>
-  <thead>
-    <tr>
-      <th style="width:30px">#</th>
-      <th style="text-align:left">Description</th>
-      <th>HSN</th>
-      <th>Qty</th>
-      <th>Unit</th>
-      <th>Rate (₹)</th>
-      <th>Disc (₹)</th>
-      <th>Taxable (₹)</th>
-      <th>CGST %</th>
-      <th>CGST (₹)</th>
-      <th>SGST %</th>
-      <th>SGST (₹)</th>
-      <th>Total (₹)</th>
-    </tr>
-  </thead>
-  <tbody>
-    ${lineRows}
-  </tbody>
-</table>
+  const headerCols: Col[] = [
+    { text: "#", width: widths.sno, align: "center" },
+    { text: "Description", width: widths.desc, align: "left" },
+    { text: "HSN", width: widths.hsn, align: "center" },
+    { text: "Qty", width: widths.qty, align: "right" },
+    { text: "Unit", width: widths.unit, align: "center" },
+    { text: "Rate", width: widths.rate, align: "right" },
+    { text: "Disc", width: widths.disc, align: "right" },
+    { text: "Taxable", width: widths.taxable, align: "right" },
+    { text: "CGST%", width: widths.cgstR, align: "center" },
+    { text: "CGST", width: widths.cgstA, align: "right" },
+    { text: "SGST%", width: widths.sgstR, align: "center" },
+    { text: "SGST", width: widths.sgstA, align: "right" },
+    { text: "Total", width: widths.total, align: "right" },
+  ];
 
-<div class="totals">
-  <table class="totals-table">
-    <tr><td>Taxable Value</td><td>₹${data.subtotal}</td></tr>
-    <tr><td>CGST</td><td>₹${data.totalCgst}</td></tr>
-    <tr><td>SGST</td><td>₹${data.totalSgst}</td></tr>
-    ${Number(data.totalCess.replace(/,/g, "")) > 0 ? `<tr><td>Cess</td><td>₹${data.totalCess}</td></tr>` : ""}
-    ${Number(data.roundOff.replace(/,/g, "").replace("−", "-")) !== 0 ? `<tr><td>Round Off</td><td>₹${data.roundOff}</td></tr>` : ""}
-    <tr class="grand-total"><td>Grand Total</td><td>₹${data.grandTotal}</td></tr>
-  </table>
-</div>
+  const drawTableHeader = (atY: number): number => {
+    const h = 16;
+    doc.rect(LEFT, atY, CONTENT_W, h).fillColor(GREEN).fill();
+    doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(6.5);
+    let x = LEFT;
+    for (const c of headerCols) {
+      doc.text(c.text, x + 2, atY + 5, { width: c.width - 4, align: c.align ?? "left" });
+      x += c.width;
+    }
+    return atY + h;
+  };
 
-<div class="words">Amount in words: <span>${escHtml(data.amountInWords)}</span></div>
+  y = drawTableHeader(y);
 
-<div class="tax-breakup">
-  <h4>Tax Breakup</h4>
-  <table>
-    <thead>
-      <tr>
-        <th>GST Rate</th>
-        <th>Taxable Value (₹)</th>
-        <th>CGST (₹)</th>
-        <th>SGST (₹)</th>
-        <th>Total Tax (₹)</th>
-      </tr>
-    </thead>
-    <tbody>${taxBreakupRows}</tbody>
-  </table>
-</div>
+  doc.font("Helvetica").fontSize(7).fillColor(DARK);
+  for (const li of data.lineItems) {
+    const cells: Col[] = [
+      { text: String(li.sno), width: widths.sno, align: "center" },
+      { text: li.description, width: widths.desc, align: "left" },
+      { text: li.hsnCode, width: widths.hsn, align: "center" },
+      { text: li.qty, width: widths.qty, align: "right" },
+      { text: li.unit, width: widths.unit, align: "center" },
+      { text: li.rate, width: widths.rate, align: "right" },
+      { text: li.discount, width: widths.disc, align: "right" },
+      { text: li.taxableValue, width: widths.taxable, align: "right" },
+      { text: li.cgstRate, width: widths.cgstR, align: "center" },
+      { text: li.cgstAmount, width: widths.cgstA, align: "right" },
+      { text: li.sgstRate, width: widths.sgstR, align: "center" },
+      { text: li.sgstAmount, width: widths.sgstA, align: "right" },
+      { text: li.total, width: widths.total, align: "right" },
+    ];
 
-<div class="footer">
-  <div class="footer-left">
-    <strong>Terms & Conditions:</strong><br>
-    1. Goods once sold will not be taken back or exchanged.<br>
-    2. Interest @ 18% p.a. will be charged on overdue payments.<br>
-    3. Subject to ${escHtml(data.companyState)} jurisdiction only.
-  </div>
-  <div class="footer-right">
-    <p style="font-size:10px;">For <strong>${escHtml(data.companyName)}</strong></p>
-    <div class="signatory">Authorized Signatory</div>
-  </div>
-</div>
+    // Row height driven by the (potentially wrapping) description
+    const descH = doc.heightOfString(li.description, { width: widths.desc - 4 });
+    const rowH = Math.max(13, descH + 6);
 
-<div class="computer-gen">This is a computer-generated invoice and does not require a physical signature.</div>
+    // Page break if needed
+    if (y + rowH > PAGE_BOTTOM) {
+      doc.addPage();
+      y = doc.page.margins.top;
+      y = drawTableHeader(y);
+      doc.font("Helvetica").fontSize(7).fillColor(DARK);
+    }
 
-</body>
-</html>`;
+    let x = LEFT;
+    for (const c of cells) {
+      doc.text(c.text, x + 2, y + 3, { width: c.width - 4, align: c.align ?? "left" });
+      x += c.width;
+    }
+    y += rowH;
+    doc.moveTo(LEFT, y).lineTo(RIGHT, y).lineWidth(0.5).strokeColor(LIGHT).stroke();
+  }
+
+  y += 10;
+
+  // ── Totals (right aligned) ──────────────────────────────────────
+  const totalsW = 230;
+  const totalsX = RIGHT - totalsW;
+  const labelW = totalsW * 0.55;
+  const valW = totalsW * 0.45;
+
+  const totalRow = (label: string, value: string, opts?: { grand?: boolean }) => {
+    const rowH = opts?.grand ? 22 : 16;
+    if (y + rowH > PAGE_BOTTOM) {
+      doc.addPage();
+      y = doc.page.margins.top;
+    }
+    if (opts?.grand) {
+      doc.moveTo(totalsX, y).lineTo(RIGHT, y).lineWidth(1.2).strokeColor(GREEN).stroke();
+      doc.fillColor(GREEN).font("Helvetica-Bold").fontSize(13);
+      doc.text(label, totalsX, y + 5, { width: labelW });
+      doc.text(value, totalsX + labelW, y + 5, { width: valW, align: "right" });
+      doc.moveTo(totalsX, y + rowH).lineTo(RIGHT, y + rowH).lineWidth(1.2).strokeColor(GREEN).stroke();
+    } else {
+      doc.fillColor(DARK).font("Helvetica").fontSize(10);
+      doc.text(label, totalsX, y + 3, { width: labelW });
+      doc.text(value, totalsX + labelW, y + 3, { width: valW, align: "right" });
+    }
+    y += rowH;
+  };
+
+  totalRow("Taxable Value", `Rs. ${data.subtotal}`);
+  totalRow("CGST", `Rs. ${data.totalCgst}`);
+  totalRow("SGST", `Rs. ${data.totalSgst}`);
+  if (num(data.totalCess) > 0) totalRow("Cess", `Rs. ${data.totalCess}`);
+  if (num(data.roundOff) !== 0) totalRow("Round Off", `Rs. ${data.roundOff}`);
+  totalRow("Grand Total", `Rs. ${data.grandTotal}`, { grand: true });
+
+  y += 10;
+
+  // ── Amount in words ─────────────────────────────────────────────
+  if (y + 30 > PAGE_BOTTOM) {
+    doc.addPage();
+    y = doc.page.margins.top;
+  }
+  doc.rect(LEFT, y, CONTENT_W, 26).fillColor("#FAFAFA").fill();
+  doc.rect(LEFT, y, CONTENT_W, 26).lineWidth(0.5).strokeColor(LIGHT).stroke();
+  doc.fillColor(DARK).font("Helvetica").fontSize(10);
+  doc.text("Amount in words: ", LEFT + 8, y + 7, { continued: true });
+  doc.font("Helvetica-Bold").text(data.amountInWords, { width: CONTENT_W - 16 });
+  y += 36;
+
+  // ── Tax breakup ─────────────────────────────────────────────────
+  if (y + 60 > PAGE_BOTTOM) {
+    doc.addPage();
+    y = doc.page.margins.top;
+  }
+  doc.fillColor("#888888").font("Helvetica-Bold").fontSize(9);
+  doc.text("TAX BREAKUP", LEFT, y, { characterSpacing: 1 });
+  y += 14;
+
+  const tbWidths = [90, 130, 100, 100, 100]; // sum 520, fits
+  const tbHeaders = ["GST Rate", "Taxable (Rs.)", "CGST (Rs.)", "SGST (Rs.)", "Total Tax (Rs.)"];
+  const tbAligns: Align[] = ["center", "right", "right", "right", "right"];
+
+  const tbHeaderH = 15;
+  doc.rect(LEFT, y, tbWidths.reduce((a, b) => a + b, 0), tbHeaderH).fillColor(GREEN).fill();
+  doc.fillColor("#FFFFFF").font("Helvetica-Bold").fontSize(8);
+  let tx = LEFT;
+  tbHeaders.forEach((h, i) => {
+    doc.text(h, tx + 2, y + 4, { width: tbWidths[i] - 4, align: tbAligns[i] });
+    tx += tbWidths[i];
+  });
+  y += tbHeaderH;
+
+  doc.font("Helvetica").fontSize(9).fillColor(DARK);
+  for (const tb of data.taxBreakup) {
+    const cells = [tb.rate, tb.taxable, tb.cgst, tb.sgst, tb.totalTax];
+    if (y + 14 > PAGE_BOTTOM) {
+      doc.addPage();
+      y = doc.page.margins.top;
+    }
+    tx = LEFT;
+    cells.forEach((c, i) => {
+      doc.text(c, tx + 2, y + 3, { width: tbWidths[i] - 4, align: tbAligns[i] });
+      tx += tbWidths[i];
+    });
+    y += 14;
+    doc.moveTo(LEFT, y).lineTo(LEFT + tbWidths.reduce((a, b) => a + b, 0), y)
+      .lineWidth(0.5).strokeColor(LIGHT).stroke();
+  }
+
+  y += 20;
+
+  // ── Footer (terms + signatory) ──────────────────────────────────
+  if (y + 80 > PAGE_BOTTOM) {
+    doc.addPage();
+    y = doc.page.margins.top;
+  }
+  doc.moveTo(LEFT, y).lineTo(RIGHT, y).lineWidth(0.5).strokeColor("#DDDDDD").stroke();
+  y += 10;
+
+  const footTop = y;
+  doc.fillColor(GREY).font("Helvetica-Bold").fontSize(9);
+  doc.text("Terms & Conditions:", LEFT, footTop, { width: CONTENT_W * 0.55 });
+  doc.font("Helvetica").fontSize(8);
+  doc.text("1. Goods once sold will not be taken back or exchanged.", { width: CONTENT_W * 0.55 });
+  doc.text("2. Interest @ 18% p.a. will be charged on overdue payments.", { width: CONTENT_W * 0.55 });
+  doc.text(`3. Subject to ${data.companyState} jurisdiction only.`, { width: CONTENT_W * 0.55 });
+
+  doc.fillColor(DARK).font("Helvetica").fontSize(10);
+  doc.text(`For ${data.companyName}`, LEFT + CONTENT_W * 0.6, footTop, {
+    width: CONTENT_W * 0.4,
+    align: "right",
+  });
+  doc.font("Helvetica-Bold").fontSize(10);
+  doc.text("Authorized Signatory", LEFT + CONTENT_W * 0.6, footTop + 48, {
+    width: CONTENT_W * 0.4,
+    align: "right",
+  });
+
+  y = Math.max(doc.y, footTop + 60) + 14;
+  doc.fillColor("#AAAAAA").font("Helvetica").fontSize(8);
+  doc.text(
+    "This is a computer-generated invoice and does not require a physical signature.",
+    LEFT,
+    y,
+    { width: CONTENT_W, align: "center" },
+  );
 }
 
 // ─── PDF Generation ──────────────────────────────────────────────────
@@ -413,53 +530,25 @@ export async function generateInvoicePdf(invoiceId: string): Promise<Buffer> {
     originalInvoiceNumber: invoice.originalInvoiceNumber ?? undefined,
   };
 
-  const html = buildInvoiceHtml(data);
+  // ── Render with pdfkit (pure JS — no Chromium/Puppeteer needed) ──
+  return await new Promise<Buffer>((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({
+        size: "A4",
+        margins: { top: 28, bottom: 28, left: 28, right: 28 },
+        bufferPages: true,
+      });
 
-  // Launch Puppeteer — prefer system Chrome to avoid needing a separate download
-  const fs = await import("fs");
-  const platform = process.platform;
-  const systemChromePaths: string[] = [
-    ...(process.env.CHROME_PATH ? [process.env.CHROME_PATH] : []),
-    ...(platform === "win32" ? [
-      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-    ] : platform === "darwin" ? [
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    ] : [
-      "/usr/bin/google-chrome",
-      "/usr/bin/google-chrome-stable",
-      "/usr/bin/chromium-browser",
-      "/usr/bin/chromium",
-    ]),
-  ];
+      const chunks: Buffer[] = [];
+      doc.on("data", (chunk: Buffer) => chunks.push(chunk));
+      doc.on("end", () => resolve(Buffer.concat(chunks)));
+      doc.on("error", reject);
 
-  const launchOpts: Parameters<typeof puppeteer.launch>[0] = {
-    headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-  };
+      drawInvoice(doc, data);
 
-  for (const p of systemChromePaths) {
-    if (fs.existsSync(p)) {
-      launchOpts.executablePath = p;
-      break;
+      doc.end();
+    } catch (err) {
+      reject(err);
     }
-  }
-
-  const browser = await puppeteer.launch(launchOpts);
-
-  try {
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: "domcontentloaded", timeout: 15000 });
-
-    const pdfBuffer = await page.pdf({
-      format: "A4",
-      printBackground: true,
-      margin: { top: "10mm", bottom: "10mm", left: "8mm", right: "8mm" },
-    });
-
-    // Return as Buffer
-    return Buffer.from(pdfBuffer);
-  } finally {
-    await browser.close();
-  }
+  });
 }

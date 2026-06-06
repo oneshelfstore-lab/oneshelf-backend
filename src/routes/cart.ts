@@ -89,6 +89,65 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
+// ─── POST /api/app/cart/quote — preview totals (stateless) ───────────
+// Returns the EXACT totals the order will be charged (same calculateCartTotals as
+// placeOrder), so the checkout summary never drifts from what's actually billed.
+// Does NOT touch the persisted cart — the app sends its local cart contents.
+
+const quoteSchema = z.object({
+  items: z
+    .array(
+      z.object({
+        variantId: z.string().min(1),
+        quantity: z.number().int().min(1).max(10000),
+      }),
+    )
+    .max(200),
+  couponCode: z.string().max(40).optional().nullable(),
+  fulfillmentType: z.enum(["DELIVERY", "PICKUP"]).optional().nullable(),
+});
+
+router.post("/quote", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = quoteSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
+    const { items, couponCode, fulfillmentType } = parsed.data;
+    const userId = req.appUser!.id;
+
+    const emptyTotals = {
+      items: [], subtotal: 0, discount: 0, couponCode: null, deliveryCharge: 0,
+      taxableValue: 0, totalCgst: 0, totalSgst: 0, totalTax: 0, totalAmount: 0,
+    };
+
+    if (items.length === 0) {
+      return res.json({ success: true, data: emptyTotals });
+    }
+
+    // Load variants in one query, then build the pricing-input shape calculateCartTotals expects.
+    const variants = await prisma.productVariant.findMany({
+      where: { id: { in: items.map((i) => i.variantId) } },
+      include: {
+        product: {
+          select: { productType: true, gstRate: true, hsnCode: true, isPackaged: true, categoryId: true },
+        },
+      },
+    });
+    const byId = new Map(variants.map((v) => [v.id, v]));
+
+    const cartItems = items
+      .filter((i) => byId.has(i.variantId))
+      .map((i) => ({ id: i.variantId, variantId: i.variantId, quantity: i.quantity, variant: byId.get(i.variantId)! }));
+
+    const totals = cartItems.length > 0
+      ? await calculateCartTotals(cartItems as any, couponCode, userId, fulfillmentType)
+      : emptyTotals;
+
+    res.json({ success: true, data: totals });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // ─── POST /api/app/cart — add item ──────────────────────────────────
 
 const addSchema = z.object({

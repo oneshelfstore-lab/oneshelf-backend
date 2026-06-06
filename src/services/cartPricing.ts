@@ -69,6 +69,7 @@ export async function calculateCartTotals(
   cartItems: CartItemWithVariant[],
   couponCode?: string | null,
   userId?: string | null,
+  fulfillmentType?: string | null,
 ): Promise<CartTotals> {
   const lines: CartLineItem[] = [];
 
@@ -149,7 +150,10 @@ export async function calculateCartTotals(
     (await prisma.coupon.findUnique({ where: { code: appliedCoupon } }))?.couponType === "FREE_DELIVERY";
 
   let deliveryCharge = 0;
-  if (subtotal < freeDeliveryAbove && !isFreeDelivery) {
+  const isPickup = fulfillmentType === "PICKUP";
+  // Pickup never incurs a delivery charge. Otherwise charge the store's standard fee
+  // unless the order qualifies for free delivery (threshold or FREE_DELIVERY coupon).
+  if (!isPickup && subtotal < freeDeliveryAbove && !isFreeDelivery) {
     deliveryCharge = standardDelivery; // single source of truth: store config
   }
 

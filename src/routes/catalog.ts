@@ -71,7 +71,8 @@ publicCatalogRouter.get("/", async (req: Request, res: Response) => {
     }
 
     if (category) {
-      where.category = { slug: category };
+      // Accept either the category slug or its id (the app sometimes navigates by id).
+      where.category = { OR: [{ slug: category }, { id: category }] };
     }
 
     const [products, total] = await Promise.all([

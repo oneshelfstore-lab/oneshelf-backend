@@ -3,6 +3,7 @@ import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib/errors.js";
 import { requireRole } from "../middleware/auth.js";
+import { SUBCATEGORIES, slugifySub } from "../data/subcategories.js";
 
 // ─── Public router (no auth, mounted at /api/app/categories) ────────
 
@@ -15,6 +16,49 @@ publicCategoryRouter.get("/", async (_req: Request, res: Response) => {
       orderBy: { displayOrder: "asc" },
     });
     res.json({ success: true, data: categories });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// GET /api/app/categories/:slug/subcategories — canonical sub-categories for a
+// category, each with a live count of active products. Returns the curated list
+// (ordered) merged with any legacy/free-text values present in the data, so nothing
+// is hidden. Powers the category → sub-category browsing rail.
+publicCategoryRouter.get("/:slug/subcategories", async (req: Request, res: Response) => {
+  try {
+    const slug = req.params.slug!;
+    const category = await prisma.category.findUnique({ where: { slug }, select: { id: true } });
+    if (!category) return res.json({ success: true, data: [] });
+
+    const grouped = await prisma.catalogProduct.groupBy({
+      by: ["subcategory"],
+      where: { categoryId: category.id, isActive: true, subcategory: { not: null } },
+      _count: { _all: true },
+    });
+
+    // Sum counts by trimmed name (collapses "Rice" vs "Rice ").
+    const counts = new Map<string, number>();
+    for (const g of grouped) {
+      const name = (g.subcategory ?? "").trim();
+      if (name) counts.set(name, (counts.get(name) ?? 0) + g._count._all);
+    }
+
+    const canonical = SUBCATEGORIES[slug] ?? [];
+    const seen = new Set<string>();
+    const data: { slug: string; name: string; productCount: number }[] = [];
+
+    // Curated list first (preserves order), with live counts.
+    for (const name of canonical) {
+      seen.add(name);
+      data.push({ slug: slugifySub(name), name, productCount: counts.get(name) ?? 0 });
+    }
+    // Then any non-canonical values that exist in the data (legacy free-text).
+    for (const [name, count] of counts) {
+      if (!seen.has(name)) data.push({ slug: slugifySub(name), name, productCount: count });
+    }
+
+    res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);
   }

@@ -396,6 +396,69 @@ router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
+// ─── Order rating (post-delivery feedback) ──────────────────────────────
+
+const ratingSchema = z.object({
+  stars: z.coerce.number().int().min(1).max(5),
+  tags: z.array(z.string().max(40)).max(10).optional().default([]),
+  comment: z.string().max(1000).optional().nullable(),
+});
+
+// POST /api/app/orders/:id/rating — rate a delivered order (idempotent upsert)
+router.post("/:id/rating", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const parsed = ratingSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid rating", parsed.error.errors);
+
+    const order = await prisma.order.findFirst({
+      where: { id: req.params.id, customerId: userId },
+      select: { id: true, status: true },
+    });
+    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (order.status !== "DELIVERED") {
+      throw new ValidationError("Only delivered orders can be rated.");
+    }
+
+    const rating = await prisma.orderRating.upsert({
+      where: { orderId: order.id },
+      create: {
+        orderId: order.id,
+        userId,
+        stars: parsed.data.stars,
+        tags: parsed.data.tags ?? [],
+        comment: parsed.data.comment ?? null,
+      },
+      update: {
+        stars: parsed.data.stars,
+        tags: parsed.data.tags ?? [],
+        comment: parsed.data.comment ?? null,
+      },
+    });
+
+    res.status(201).json({ success: true, data: rating });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// GET /api/app/orders/:id/rating — fetch the user's rating for an order (or null)
+router.get("/:id/rating", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const order = await prisma.order.findFirst({
+      where: { id: req.params.id, customerId: userId },
+      select: { id: true },
+    });
+    if (!order) throw new NotFoundError("Order", req.params.id!);
+
+    const rating = await prisma.orderRating.findUnique({ where: { orderId: order.id } });
+    res.json({ success: true, data: rating });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // ─── GET /api/app/orders/:id/invoice/pdf — generate & download invoice PDF ──
 
 router.get("/:id/invoice/pdf", async (req: FirebaseAuthRequest, res: Response) => {

@@ -14,7 +14,7 @@ function isLooseType(productType: string): boolean {
   return productType === "LOOSE" || productType === "PRODUCE";
 }
 
-function formatProductForApp(product: any) {
+export function formatProductForApp(product: any) {
   const isLoose = isLooseType(product.productType);
   return {
     id: product.id,

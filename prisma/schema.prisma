@@ -219,6 +219,12 @@ model User {
   lastCartReminderAt  DateTime?
   cartReminderCount   Int       @default(0)
 
+  // Referral program (refer & earn)
+  referralCode     String?   @unique
+  referredById     String?
+  referredBy       User?     @relation("UserReferrals", fields: [referredById], references: [id])
+  referredUsers    User[]    @relation("UserReferrals")
+
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
@@ -228,6 +234,8 @@ model User {
   deliveryOrders     Order[]          @relation("DeliveryOrders")
   fcmTokens          FcmToken[]
   couponRedemptions  CouponRedemption[]
+  favorites          Favorite[]
+  orderRatings       OrderRating[]
 
   @@index([phone])
 }
@@ -290,10 +298,41 @@ model CatalogProduct {
   updatedAt       DateTime    @updatedAt
 
   variants        ProductVariant[]
+  favorites       Favorite[]
 
   @@index([categoryId])
   @@index([name])
   @@index([isActive])
+}
+
+// ─── Favorite (user's wishlist — product-level) ──────────────────────
+
+model Favorite {
+  id         String         @id @default(cuid())
+  userId     String
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId  String
+  product    CatalogProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt  DateTime       @default(now())
+
+  @@unique([userId, productId])
+  @@index([userId])
+}
+
+// ─── OrderRating (post-delivery feedback, one per order) ─────────────
+
+model OrderRating {
+  id        String   @id @default(cuid())
+  orderId   String   @unique
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  stars     Int      // 1..5
+  tags      String[] @default([]) // quick-tags e.g. "Fresh", "On time"
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
 }
 
 // ─── 4. ProductVariant (the sellable SKU — owns size, price, stock) ──
@@ -512,6 +551,7 @@ model Order {
 
   items                 OrderItem[]
   secret                OrderSecret?
+  rating                OrderRating?
 
   @@index([customerId])
   @@index([status])

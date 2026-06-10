@@ -7,6 +7,7 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { admin, isFirebaseInitialized } from "../lib/firebase.js";
+import { formatProductForApp } from "./catalog.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -173,6 +174,159 @@ router.delete("/addresses/:id", async (req: FirebaseAuthRequest, res: Response) 
 });
 
 // ═══════════════════════════════════════════════════════════════════════
+// Favorites (wishlist — product-level)
+// ═══════════════════════════════════════════════════════════════════════
+
+// GET /api/app/me/favorites → the user's favorited products (full app product shape)
+router.get("/favorites", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const favorites = await prisma.favorite.findMany({
+      where: { userId },
+      orderBy: { createdAt: "desc" },
+      include: {
+        product: {
+          include: {
+            variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
+            category: { select: { slug: true, name: true } },
+          },
+        },
+      },
+    });
+    // Only surface products that are still active.
+    const products = favorites
+      .map((f) => f.product)
+      .filter((p) => p && p.isActive)
+      .map(formatProductForApp);
+    res.json({ success: true, data: products });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+const favoriteSchema = z.object({ productId: z.string().min(1) });
+
+// POST /api/app/me/favorites { productId } → idempotent add
+router.post("/favorites", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const parsed = favoriteSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid favorite", parsed.error.errors);
+
+    const product = await prisma.catalogProduct.findUnique({ where: { id: parsed.data.productId } });
+    if (!product) throw new NotFoundError("Product", parsed.data.productId);
+
+    await prisma.favorite.upsert({
+      where: { userId_productId: { userId, productId: parsed.data.productId } },
+      create: { userId, productId: parsed.data.productId },
+      update: {},
+    });
+    res.status(201).json({ success: true, message: "Added to favorites" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// DELETE /api/app/me/favorites/:productId → idempotent remove
+router.delete("/favorites/:productId", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    await prisma.favorite.deleteMany({
+      where: { userId, productId: req.params.productId },
+    });
+    res.json({ success: true, message: "Removed from favorites" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// Referral program (refer & earn)
+// ═══════════════════════════════════════════════════════════════════════
+
+// Both referrer and referee get this. Surfaced to the app for display copy.
+const REFERRAL_REWARD_LABEL = "₹50 off";
+
+function genReferralCode(name: string): string {
+  const base = (name || "ONE").replace(/[^a-zA-Z]/g, "").toUpperCase().slice(0, 4) || "ONE";
+  const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
+  return `${base}${rand}`;
+}
+
+// GET /api/app/me/referral → the user's code (generated on first access) + stats
+router.get("/referral", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { referralCode: true },
+    });
+
+    let code = user?.referralCode ?? null;
+    if (!code) {
+      // Generate a unique code (retry a few times on the rare collision).
+      for (let i = 0; i < 6; i++) {
+        const candidate = genReferralCode(req.appUser!.name);
+        const taken = await prisma.user.findUnique({
+          where: { referralCode: candidate },
+          select: { id: true },
+        });
+        if (!taken) {
+          await prisma.user.update({ where: { id: userId }, data: { referralCode: candidate } });
+          code = candidate;
+          break;
+        }
+      }
+    }
+
+    const referredCount = await prisma.user.count({ where: { referredById: userId } });
+
+    res.json({
+      success: true,
+      data: { code, referredCount, reward: REFERRAL_REWARD_LABEL },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// POST /api/app/me/referral/apply { code } → link the referee to a referrer (once)
+const applyReferralSchema = z.object({ code: z.string().min(3).max(20) });
+
+router.post("/referral/apply", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const parsed = applyReferralSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid referral code", parsed.error.errors);
+    const code = parsed.data.code.trim().toUpperCase();
+
+    const me = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { referredById: true, referralCode: true },
+    });
+    if (me?.referredById) throw new ValidationError("You've already applied a referral code.");
+    if (me?.referralCode && me.referralCode === code) throw new ValidationError("You can't use your own code.");
+
+    const referrer = await prisma.user.findUnique({
+      where: { referralCode: code },
+      select: { id: true },
+    });
+    if (!referrer) throw new NotFoundError("Referral code", code);
+    if (referrer.id === userId) throw new ValidationError("You can't use your own code.");
+
+    await prisma.user.update({ where: { id: userId }, data: { referredById: referrer.id } });
+
+    res.json({
+      success: true,
+      message: "Referral applied! Enjoy your reward.",
+      data: { reward: REFERRAL_REWARD_LABEL },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
 // Account deletion (required by Google Play account-deletion policy)
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -190,6 +344,7 @@ router.delete("/", async (req: FirebaseAuthRequest, res: Response) => {
       await tx.address.deleteMany({ where: { userId } });
       await tx.cartItem.deleteMany({ where: { userId } });
       await tx.fcmToken.deleteMany({ where: { userId } });
+      await tx.favorite.deleteMany({ where: { userId } });
       await tx.user.update({
         where: { id: userId },
         data: {

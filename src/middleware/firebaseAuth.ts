@@ -53,16 +53,35 @@ export async function firebaseAuthMiddleware(
     });
 
     if (!user) {
-      user = await prisma.user.create({
-        data: {
-          firebaseUid: decoded.uid,
-          email: decoded.email ?? null,
-          name: decoded.name ?? decoded.phone_number ?? "App User",
-          phone: decoded.phone_number?.replace("+91", "") ?? null,
-          role: "CUSTOMER",
-          phoneVerified: !!decoded.phone_number,
-        },
-      });
+      // User.email is @unique, so a row may already hold this e-mail (a seeded
+      // dashboard user, or a phone-auth account that saved the same e-mail in its
+      // profile). A blind create would throw P2002 and surface as a bogus 401 on
+      // every request from this Firebase account.
+      const email = decoded.email ?? null;
+      const byEmail = email
+        ? await prisma.user.findUnique({ where: { email } })
+        : null;
+
+      if (byEmail && !byEmail.firebaseUid && decoded.email_verified) {
+        // The Google token proves ownership of the e-mail — link the Firebase
+        // account to the existing row (keeps role, orders, addresses).
+        user = await prisma.user.update({
+          where: { id: byEmail.id },
+          data: { firebaseUid: decoded.uid },
+        });
+      } else {
+        user = await prisma.user.create({
+          data: {
+            firebaseUid: decoded.uid,
+            // If the e-mail is taken by a row we can't link to, create without it.
+            email: byEmail ? null : email,
+            name: decoded.name ?? decoded.phone_number ?? "App User",
+            phone: decoded.phone_number?.replace("+91", "") ?? null,
+            role: "CUSTOMER",
+            phoneVerified: !!decoded.phone_number,
+          },
+        });
+      }
     }
 
     req.appUser = {
@@ -75,7 +94,9 @@ export async function firebaseAuthMiddleware(
     };
 
     next();
-  } catch {
+  } catch (e) {
+    // Not only bad tokens land here — DB failures during the auto-create do too.
+    console.error("firebaseAuthMiddleware error:", e);
     return res.status(401).json({
       success: false,
       error: {

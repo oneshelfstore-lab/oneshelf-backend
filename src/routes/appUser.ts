@@ -1,7 +1,7 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
 import prisma from "../lib/prisma.js";
-import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
+import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib/errors.js";
 import {
   firebaseAuthMiddleware,
   type FirebaseAuthRequest,
@@ -36,8 +36,19 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
 // PUT /api/app/me
 const updateProfileSchema = z.object({
   name: z.string().min(1).max(100).optional(),
-  email: z.string().email().optional().nullable(),
-  phone: z.string().regex(/^[6-9]\d{9}$/, "Phone must be 10 digits starting with 6-9").optional().nullable(),
+  // The app may send "" for an untouched optional field — treat it as null.
+  email: z.preprocess(
+    (v) => (v === "" ? null : v),
+    z.string().email().nullable().optional(),
+  ),
+  // Firebase Auth phones arrive as "+91XXXXXXXXXX" — normalize to bare 10 digits.
+  phone: z.preprocess(
+    (v) =>
+      typeof v === "string"
+        ? v.replace(/\D/g, "").replace(/^91(?=\d{10}$)/, "") || null
+        : v,
+    z.string().regex(/^[6-9]\d{9}$/, "Phone must be 10 digits starting with 6-9").nullable().optional(),
+  ),
   photoUrl: z.string().max(500).optional().nullable(),
 });
 
@@ -63,6 +74,10 @@ router.put("/", async (req: FirebaseAuthRequest, res: Response) => {
 
     res.json({ success: true, data: user });
   } catch (e) {
+    // email is @unique — another account may already use it.
+    if ((e as { code?: string })?.code === "P2002") {
+      return sendError(res, new ConflictError("This email is already used by another account."));
+    }
     sendError(res, e);
   }
 });

@@ -8,6 +8,8 @@ import {
 } from "../middleware/firebaseAuth.js";
 import { toAppFormat } from "../utils/looseUnitConverter.js";
 import { calculateCartTotals } from "../services/cartPricing.js";
+import { computeOrderEta } from "../services/orderEta.js";
+import { computeUserSavings } from "../services/savings.js";
 import { getNextOrderNumber } from "../services/orderNumbering.js";
 import { createRazorpayOrder, verifyPaymentSignature, isRazorpayConfigured, refundPayment } from "../services/razorpay.js";
 import { notifyNewOrder, notifyOrderStatusChange } from "../services/fcmNotifier.js";
@@ -53,6 +55,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     if (idempotencyKey) {
       const existing = await prisma.order.findUnique({ where: { idempotencyKey } });
       if (existing && existing.customerId === userId) {
+        const replayEta = await computeOrderEta(existing.fulfillmentType, existing.deliverySlot);
         return res.status(200).json({
           success: true,
           data: {
@@ -61,6 +64,8 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
             status: existing.status,
             paymentMethod: existing.paymentMethod,
             totalAmount: Number(existing.totalAmount),
+            savedAmount: Number(existing.savedAmount),
+            etaLabel: replayEta.etaLabel,
             razorpayOrderId: existing.razorpayOrderId,
             deliveryOtpRequired: existing.deliveryOtpRequired,
           },
@@ -100,6 +105,10 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     // PAID only after Razorpay verification in /:id/pay (which also arms the OTP).
     const initialPaymentStatus = "PENDING";
     const needsOtp = orderRequiresOtp(paymentMethod, initialPaymentStatus, totals.totalAmount);
+
+    // Honest ETA (range or chosen slot) — computed once, stored on the order, and echoed
+    // back so the celebration screen renders it without a second round-trip.
+    const eta = await computeOrderEta(fulfillmentType, deliverySlot);
 
     // Generate order number
     const orderNumber = await getNextOrderNumber();
@@ -146,6 +155,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           imageUrl: item.variant.product.imageUrls?.[0] ?? null,
           hsnCode: item.variant.product.hsnCode,
           unitPrice: effectivePrice,
+          mrp: pricingLine?.mrp ?? null,
           quantity: item.quantity,
           gstRate: pricingLine?.gstRate ?? 0,
           taxableValue: pricingLine?.taxableValue ?? lineTotal,
@@ -179,7 +189,9 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           taxableValue: totals.taxableValue,
           totalTax: totals.totalTax,
           totalAmount: totals.totalAmount,
+          savedAmount: totals.savedAmount,
           couponCode: totals.couponCode,
+          estimatedReadyAt: eta.estimatedReadyAt,
           deliveryOtpRequired: needsOtp,
           notes,
           idempotencyKey,
@@ -268,6 +280,8 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         status: order.status,
         paymentMethod,
         totalAmount: totals.totalAmount,
+        savedAmount: totals.savedAmount,
+        etaLabel: eta.etaLabel,
         razorpayOrderId,
         deliveryOtpRequired: order.deliveryOtpRequired,
       },
@@ -501,7 +515,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         skip: (page - 1) * limit,
         take: limit,
         include: {
-          items: { select: { productName: true, quantity: true, unitPrice: true, lineTotal: true, imageUrl: true, isLoose: true, stepSize: true, stepUnit: true, packageUnit: true, hsnCode: true, gstRate: true, variantId: true } },
+          items: { select: { productName: true, quantity: true, unitPrice: true, mrp: true, lineTotal: true, imageUrl: true, isLoose: true, stepSize: true, stepUnit: true, packageUnit: true, hsnCode: true, gstRate: true, variantId: true } },
         },
       }),
       prisma.order.count({ where: { customerId: userId } }),
@@ -511,6 +525,47 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
       success: true,
       data: orders,
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── GET /api/app/orders/:id/celebration — order-placed screen payload ──
+// Consolidated read for the celebration screen (re-entry + async hydration). Everything
+// here is real, computed data. scratch/freeSample stay null until later phases.
+
+router.get("/:id/celebration", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const order = await prisma.order.findFirst({
+      where: { id: req.params.id, customerId: userId },
+      select: {
+        id: true, status: true, fulfillmentType: true, deliverySlot: true,
+        savedAmount: true, totalAmount: true, estimatedReadyAt: true,
+      },
+    });
+    if (!order) throw new NotFoundError("Order", req.params.id!);
+
+    const [savings, eta] = await Promise.all([
+      computeUserSavings(userId),
+      computeOrderEta(order.fulfillmentType, order.deliverySlot),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        orderId: order.id,
+        status: order.status,
+        savedAmount: Number(order.savedAmount),
+        yearSavings: savings.yearToDate,
+        etaLabel: eta.etaLabel,
+        // Display-only trust card — confidence shown, not claimed. The real claim flow is Phase 4.
+        refundPromiseShown: true,
+        // Reserved for later phases — null keeps the client contract stable now.
+        scratch: null,
+        freeSample: null,
+      },
     });
   } catch (e) {
     sendError(res, e);

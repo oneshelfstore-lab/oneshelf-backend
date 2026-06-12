@@ -10,6 +10,7 @@ export interface CartLineItem {
   quantity: number;
   unitPrice: number;
   effectiveUnitPrice: number;
+  mrp: number;
   lineTotal: number;
   gstRate: number;
   taxableValue: number;
@@ -29,6 +30,8 @@ export interface CartTotals {
   totalSgst: number;
   totalTax: number;
   totalAmount: number;
+  // Total saved vs MRP: Σ max(0, mrp − price)×qty + coupon discount + delivery waived.
+  savedAmount: number;
 }
 
 interface CartItemWithVariant {
@@ -97,6 +100,7 @@ export async function calculateCartTotals(
       quantity: item.quantity,
       unitPrice,
       effectiveUnitPrice,
+      mrp: converted.mrp,
       lineTotal,
       gstRate,
       taxableValue,
@@ -167,6 +171,17 @@ export async function calculateCartTotals(
 
   const totalAmount = round2(afterDiscount + deliveryCharge);
 
+  // Savings vs MRP. Three honest components:
+  //  1. Per-line MRP gap: Σ max(0, mrp − effectiveUnitPrice) × qty (covers bulk pricing too).
+  //  2. Coupon discount (what the coupon knocked off).
+  //  3. Delivery waived: only a real saving on a DELIVERY order that would have been charged
+  //     but qualified for free delivery (threshold or coupon). Pickup never had a fee to save.
+  const mrpSavings = round2(
+    lines.reduce((sum, l) => sum + Math.max(0, l.mrp - l.effectiveUnitPrice) * l.quantity, 0),
+  );
+  const deliverySaved = !isPickup && deliveryCharge === 0 && standardDelivery > 0 ? standardDelivery : 0;
+  const savedAmount = round2(mrpSavings + discount + deliverySaved);
+
   return {
     items: lines,
     subtotal,
@@ -178,5 +193,6 @@ export async function calculateCartTotals(
     totalSgst,
     totalTax,
     totalAmount,
+    savedAmount,
   };
 }

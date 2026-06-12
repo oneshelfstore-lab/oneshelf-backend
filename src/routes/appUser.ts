@@ -8,6 +8,7 @@ import {
 } from "../middleware/firebaseAuth.js";
 import { admin, isFirebaseInitialized } from "../lib/firebase.js";
 import { formatProductForApp } from "./catalog.js";
+import { computeUserSavings } from "../services/savings.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -28,6 +29,16 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     });
     if (!user) throw new NotFoundError("User", req.appUser!.id);
     res.json({ success: true, data: user });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// GET /api/app/me/savings — cumulative savings (year-to-date + all-time)
+router.get("/savings", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const savings = await computeUserSavings(req.appUser!.id);
+    res.json({ success: true, data: savings });
   } catch (e) {
     sendError(res, e);
   }

@@ -525,6 +525,10 @@ model Order {
   taxableValue          Decimal            @default(0) @db.Decimal(12, 2)
   totalTax              Decimal            @default(0) @db.Decimal(10, 2)
   totalAmount           Decimal            @db.Decimal(12, 2)
+  // Total the customer saved on this order vs MRP (Σ (mrp−price)×qty + coupon discount
+  // + delivery waived). Snapshotted at placement so the celebration screen + year counter
+  // are immutable and truthful. 0 for pre-migration orders.
+  savedAmount           Decimal            @default(0) @db.Decimal(12, 2)
   couponCode            String?
 
   // Delivery
@@ -532,6 +536,9 @@ model Order {
   deliveryBoy           User?              @relation("DeliveryOrders", fields: [deliveryBoyId], references: [id])
   deliveryOtpRequired   Boolean            @default(false)
   deliveredAt           DateTime?
+  // Honest ETA: placedAt + StoreConfig.avg{Delivery,Pickup}Minutes. Rendered as a range/slot,
+  // never a hard minutes-promise. Null = fall back to the store's next-day schedule label.
+  estimatedReadyAt      DateTime?
 
   // Razorpay
   razorpayOrderId       String?
@@ -581,6 +588,9 @@ model OrderItem {
 
   // Snapshotted pricing
   unitPrice       Decimal        @db.Decimal(10, 2)
+  // MRP at sale time (per app-format unit/increment). Drives per-line savings + the invoice
+  // strike-through. Nullable: pre-migration items have none.
+  mrp             Decimal?       @db.Decimal(10, 2)
   quantity        Int
   gstRate         Decimal        @default(0) @db.Decimal(5, 2)
   taxableValue    Decimal        @default(0) @db.Decimal(12, 2)
@@ -657,6 +667,9 @@ model StoreConfig {
   operatingHoursStart   String?
   operatingHoursEnd     String?
   deliveryRadius        Decimal? @db.Decimal(5, 2)
+  // Average fulfillment time used to compute the honest order ETA (shown as a range).
+  avgDeliveryMinutes    Int      @default(40)
+  avgPickupMinutes      Int      @default(20)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 }

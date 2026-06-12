@@ -291,6 +291,9 @@ model CatalogProduct {
   isTaxInclusive  Boolean     @default(true)
   isExempt        Boolean     @default(false)
   isBranded       Boolean     @default(false)
+  // Owner opt-in: this product may be given as a free sample (Delight Phase 3B). Marking ≥1
+  // product eligible is what turns the sample engine on.
+  isSampleEligible Boolean    @default(false)
   imageUrls       String[]    @default([])
   searchKeywords  String[]    @default([])
   isActive        Boolean     @default(true)
@@ -571,6 +574,12 @@ model Order {
   // Honest ETA: placedAt + StoreConfig.avg{Delivery,Pickup}Minutes. Rendered as a range/slot,
   // never a hard minutes-promise. Null = fall back to the store's next-day schedule label.
   estimatedReadyAt      DateTime?
+  // Free sample (Delight Phase 3B). Rolled at placement; the customer sees the NAMED sample only
+  // after the owner confirms it's physically in the bag (freeSamplePacked) — never before.
+  freeSampleVariantId   String?
+  freeSampleName        String?
+  freeSampleImageUrl    String?
+  freeSamplePacked      Boolean            @default(false)
 
   // Razorpay
   razorpayOrderId       String?
@@ -711,6 +720,12 @@ model StoreConfig {
   scratchFreeDeliveryWeight Int     @default(30)
   scratchFlatOffWeight      Int     @default(15)
   scratchFlatOffValue       Int     @default(20)
+  // Free-sample engine (Phase 3B). sampleChancePct = % of orders that get a sample (gated also by
+  // having ≥1 eligible product + budget). sampleMaxValue caps the ₹ value of a giveaway item;
+  // monthlySampleBudget caps total monthly sample spend (conservative count×maxValue cap).
+  sampleChancePct           Int     @default(12)
+  sampleMaxValue            Int     @default(50)
+  monthlySampleBudget       Int     @default(500)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 }

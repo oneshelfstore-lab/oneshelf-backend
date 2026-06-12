@@ -9,6 +9,7 @@ import {
 } from "../middleware/firebaseAuth.js";
 import { notifyOrderStatusChange, notifyDeliveryAssignment } from "../services/fcmNotifier.js";
 import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orderInvoice.js";
+import { markSamplePacked } from "../services/freeSample.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -98,6 +99,19 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     if (!order) throw new NotFoundError("Order", req.params.id!);
 
     res.json({ success: true, data: order });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/owner/orders/:id/sample-packed — confirm the free sample is in the bag ──
+// Unlocks the customer's named reveal. The gate that keeps the sample feature honest.
+
+router.post("/:id/sample-packed", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const ok = await markSamplePacked(req.params.id!);
+    if (!ok) throw new NotFoundError("FreeSample", req.params.id!);
+    res.json({ success: true, data: { orderId: req.params.id, freeSamplePacked: true } });
   } catch (e) {
     sendError(res, e);
   }

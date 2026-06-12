@@ -11,6 +11,7 @@ import { calculateCartTotals } from "../services/cartPricing.js";
 import { computeOrderEta } from "../services/orderEta.js";
 import { computeUserSavings } from "../services/savings.js";
 import { rollScratchReward, getScratchForCelebration, revealScratchReward } from "../services/scratchReward.js";
+import { rollFreeSample, getFreeSampleReveal } from "../services/freeSample.js";
 import { getNextOrderNumber } from "../services/orderNumbering.js";
 import { createRazorpayOrder, verifyPaymentSignature, isRazorpayConfigured, refundPayment } from "../services/razorpay.js";
 import { notifyNewOrder, notifyOrderStatusChange } from "../services/fcmNotifier.js";
@@ -256,6 +257,8 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     // Roll the scratch-card outcome once, now (idempotent, keyed by orderId), so the celebration
     // screen has it ready. Best-effort — a failure here must never block order placement.
     try { await rollScratchReward(order.id, userId); } catch (e) { console.error("scratch roll failed:", e); }
+    // Roll a possible free sample (gated by eligibility/chance/budget). Best-effort.
+    try { await rollFreeSample(order.id); } catch (e) { console.error("free sample roll failed:", e); }
 
     // Create Razorpay order for online payment
     let razorpayOrderId: string | null = null;
@@ -550,6 +553,7 @@ router.get("/:id/celebration", async (req: FirebaseAuthRequest, res: Response) =
       select: {
         id: true, status: true, fulfillmentType: true, deliverySlot: true,
         savedAmount: true, totalAmount: true, estimatedReadyAt: true,
+        freeSampleName: true, freeSampleImageUrl: true, freeSamplePacked: true,
       },
     });
     if (!order) throw new NotFoundError("Order", req.params.id!);
@@ -572,8 +576,8 @@ router.get("/:id/celebration", async (req: FirebaseAuthRequest, res: Response) =
         refundPromiseShown: true,
         // Scratch card (Phase 3A): UNSCRATCHED hides the outcome until revealed via POST /scratch.
         scratch,
-        // Reserved for Phase 3B (free sample).
-        freeSample: null,
+        // Free sample (Phase 3B): null until the owner confirms it's physically packed.
+        freeSample: getFreeSampleReveal(order),
       },
     });
   } catch (e) {
@@ -626,7 +630,14 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
       }
     }
 
-    res.json({ success: true, data: { ...order, deliveryOtp } });
+    // Never expose the sample NAME before the owner confirms it's in the bag.
+    const sampleName = order.freeSamplePacked ? order.freeSampleName : null;
+    const sampleImage = order.freeSamplePacked ? order.freeSampleImageUrl : null;
+
+    res.json({
+      success: true,
+      data: { ...order, freeSampleName: sampleName, freeSampleImageUrl: sampleImage, deliveryOtp },
+    });
   } catch (e) {
     sendError(res, e);
   }

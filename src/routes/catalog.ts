@@ -33,6 +33,7 @@ export function formatProductForApp(product: any) {
     isTaxInclusive: product.isTaxInclusive ?? true,
     isExempt: product.isExempt ?? false,
     isBranded: product.isBranded ?? false,
+    isSampleEligible: product.isSampleEligible ?? false,
     imageUrls: product.imageUrls,
     searchKeywords: product.searchKeywords,
     isActive: product.isActive,

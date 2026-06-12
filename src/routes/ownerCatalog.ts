@@ -117,6 +117,7 @@ const productCreateSchema = z.object({
   isTaxInclusive: z.boolean().default(true),
   isExempt: z.boolean().default(false),
   isBranded: z.boolean().default(false),
+  isSampleEligible: z.boolean().default(false),
   imageUrls: z.array(z.string()).default([]),
   searchKeywords: z.array(z.string()).default([]),
   isActive: z.boolean().default(true),

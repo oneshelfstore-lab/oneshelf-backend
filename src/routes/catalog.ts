@@ -262,6 +262,47 @@ publicCatalogRouter.get("/trending-products", async (_req: Request, res: Respons
   }
 });
 
+// GET /api/app/products/deal-today — one deterministic "today's pick" per day. Picked from products
+// that ALREADY have a real discount (mrp > sellingPrice) — no fabricated pricing. Stable within the
+// IST day, changes daily. Returns null when nothing is genuinely discounted.
+publicCatalogRouter.get("/deal-today", async (_req: Request, res: Response) => {
+  try {
+    const products = await prisma.catalogProduct.findMany({
+      where: { isActive: true, variants: { some: { isActive: true, stock: { gt: 0 } } } },
+      include: {
+        variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
+        category: { select: { slug: true, name: true } },
+      },
+    });
+
+    const pool = products
+      .map((p) => {
+        let best = 0;
+        for (const v of p.variants) {
+          const mrp = Number(v.mrp), sp = Number(v.sellingPrice);
+          if (mrp > sp && mrp > 0 && Number(v.stock) > 0) {
+            best = Math.max(best, Math.round(((mrp - sp) / mrp) * 100));
+          }
+        }
+        return { p, discountPct: best };
+      })
+      .filter((x) => x.discountPct > 0)
+      .sort((a, b) => a.p.id.localeCompare(b.p.id)); // stable ordering for a stable daily pick
+
+    if (pool.length === 0) return res.json({ success: true, data: null });
+
+    // Deterministic by IST calendar date so it matches the customer's "today" and rotates daily.
+    const istDate = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+    let h = 0;
+    for (let i = 0; i < istDate.length; i++) h = (h * 31 + istDate.charCodeAt(i)) >>> 0;
+    const chosen = pool[h % pool.length]!;
+
+    res.json({ success: true, data: { product: formatProductForApp(chosen.p), discountPct: chosen.discountPct } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // POST /api/app/products/stock-check — batch stock check for cart items.
 // Returns current stock for each variant and alternatives for OOS items.
 publicCatalogRouter.post("/stock-check", async (req: Request, res: Response) => {

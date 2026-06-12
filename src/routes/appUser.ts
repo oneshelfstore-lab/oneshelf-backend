@@ -9,6 +9,7 @@ import {
 import { admin, isFirebaseInitialized } from "../lib/firebase.js";
 import { formatProductForApp } from "./catalog.js";
 import { computeUserSavings } from "../services/savings.js";
+import { computeUserLoyalty } from "../services/loyalty.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -39,6 +40,16 @@ router.get("/savings", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const savings = await computeUserSavings(req.appUser!.id);
     res.json({ success: true, data: savings });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// GET /api/app/me/loyalty — tier, spend, progress to next tier, perks
+router.get("/loyalty", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const loyalty = await computeUserLoyalty(req.appUser!.id);
+    res.json({ success: true, data: loyalty });
   } catch (e) {
     sendError(res, e);
   }

@@ -184,7 +184,9 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           shippingAddress: address?.addressLine,
           shippingPincode: address?.pincode,
           subtotal: totals.subtotal,
-          discount: totals.discount,
+          // Coupon + loyalty member discount combined, so the stored order reconciles
+          // (subtotal − discount + delivery = total). savedAmount tracks the full breakdown.
+          discount: totals.discount + totals.loyaltyDiscount,
           deliveryCharge: totals.deliveryCharge,
           taxableValue: totals.taxableValue,
           totalTax: totals.totalTax,

@@ -1,5 +1,7 @@
 import prisma from "../lib/prisma.js";
 import { toAppFormat } from "../utils/looseUnitConverter.js";
+import { getUserSpend365 } from "./loyalty.js";
+import { tierForSpend } from "../data/loyaltyTiers.js";
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -30,8 +32,11 @@ export interface CartTotals {
   totalSgst: number;
   totalTax: number;
   totalAmount: number;
-  // Total saved vs MRP: Σ max(0, mrp − price)×qty + coupon discount + delivery waived.
+  // Total saved vs MRP: Σ max(0, mrp − price)×qty + coupon discount + loyalty discount + delivery waived.
   savedAmount: number;
+  // Standing loyalty (tier) member discount applied to this cart, and the tier key that earned it.
+  loyaltyDiscount: number;
+  loyaltyTier: string | null;
 }
 
 interface CartItemWithVariant {
@@ -146,6 +151,21 @@ export async function calculateCartTotals(
     }
   }
 
+  // Loyalty tier perks (member free delivery + standing % member discount). One lightweight
+  // aggregate query when a user is known; absent for anonymous quotes. Spend-based tier.
+  let loyaltyDiscount = 0;
+  let loyaltyTier: string | null = null;
+  let tierFreeDelivery = false;
+  if (userId) {
+    const tier = tierForSpend(await getUserSpend365(userId));
+    loyaltyTier = tier.key;
+    tierFreeDelivery = tier.freeDelivery;
+    if (tier.discountPct > 0) {
+      // Applied on the post-coupon subtotal so the two discounts don't compound oddly.
+      loyaltyDiscount = round2((subtotal - discount) * tier.discountPct / 100);
+    }
+  }
+
   // Delivery charge
   const storeConfig = await prisma.storeConfig.findFirst();
   const freeDeliveryAbove = storeConfig ? Number(storeConfig.freeDeliveryAbove) : 500;
@@ -155,13 +175,13 @@ export async function calculateCartTotals(
 
   let deliveryCharge = 0;
   const isPickup = fulfillmentType === "PICKUP";
-  // Pickup never incurs a delivery charge. Otherwise charge the store's standard fee
-  // unless the order qualifies for free delivery (threshold or FREE_DELIVERY coupon).
-  if (!isPickup && subtotal < freeDeliveryAbove && !isFreeDelivery) {
+  // Pickup never incurs a delivery charge. Otherwise charge the store's standard fee unless the
+  // order qualifies for free delivery (threshold, FREE_DELIVERY coupon, or a member tier perk).
+  if (!isPickup && subtotal < freeDeliveryAbove && !isFreeDelivery && !tierFreeDelivery) {
     deliveryCharge = standardDelivery; // single source of truth: store config
   }
 
-  const afterDiscount = round2(subtotal - discount);
+  const afterDiscount = round2(subtotal - discount - loyaltyDiscount);
 
   // Recalculate totals
   const totalTaxable = round2(lines.reduce((sum, l) => sum + l.taxableValue, 0));
@@ -180,7 +200,7 @@ export async function calculateCartTotals(
     lines.reduce((sum, l) => sum + Math.max(0, l.mrp - l.effectiveUnitPrice) * l.quantity, 0),
   );
   const deliverySaved = !isPickup && deliveryCharge === 0 && standardDelivery > 0 ? standardDelivery : 0;
-  const savedAmount = round2(mrpSavings + discount + deliverySaved);
+  const savedAmount = round2(mrpSavings + discount + loyaltyDiscount + deliverySaved);
 
   return {
     items: lines,
@@ -194,5 +214,7 @@ export async function calculateCartTotals(
     totalTax,
     totalAmount,
     savedAmount,
+    loyaltyDiscount,
+    loyaltyTier,
   };
 }

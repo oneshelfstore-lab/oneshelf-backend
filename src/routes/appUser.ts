@@ -55,6 +55,84 @@ router.get("/loyalty", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
+// GET /api/app/me/essentials — products the user reorders, with a "running low" prediction.
+// A product qualifies if bought in ≥2 distinct orders. runningLow = days-since-last ≥ 0.8 × the
+// median gap between past purchases. Pure derivation from existing orders; no extra tracking.
+router.get("/essentials", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const orders = await prisma.order.findMany({
+      where: { customerId: userId, status: { not: "CANCELLED" } },
+      orderBy: { createdAt: "desc" },
+      take: 40,
+      select: { createdAt: true, items: { select: { variantId: true } } },
+    });
+    if (orders.length < 2) return res.json({ success: true, data: [] });
+
+    // variant → product
+    const allVariantIds = [
+      ...new Set(orders.flatMap((o) => o.items.map((i) => i.variantId).filter((v): v is string => !!v))),
+    ];
+    if (allVariantIds.length === 0) return res.json({ success: true, data: [] });
+    const variants = await prisma.productVariant.findMany({
+      where: { id: { in: allVariantIds } },
+      select: { id: true, productId: true },
+    });
+    const productByVariant = new Map(variants.map((v) => [v.id, v.productId]));
+
+    // product → purchase dates (one per order that contained it)
+    const datesByProduct = new Map<string, number[]>();
+    for (const o of orders) {
+      const productsInOrder = new Set<string>();
+      for (const it of o.items) {
+        const pid = it.variantId ? productByVariant.get(it.variantId) : undefined;
+        if (pid) productsInOrder.add(pid);
+      }
+      for (const pid of productsInOrder) {
+        if (!datesByProduct.has(pid)) datesByProduct.set(pid, []);
+        datesByProduct.get(pid)!.push(o.createdAt.getTime());
+      }
+    }
+
+    const now = Date.now();
+    const DAY = 86_400_000;
+    const candidates = [...datesByProduct.entries()]
+      .filter(([, dates]) => dates.length >= 2)
+      .map(([pid, dates]) => {
+        const sorted = [...dates].sort((a, b) => b - a); // newest first
+        const gaps: number[] = [];
+        for (let i = 0; i < sorted.length - 1; i++) gaps.push((sorted[i]! - sorted[i + 1]!) / DAY);
+        gaps.sort((a, b) => a - b);
+        const median = gaps.length ? gaps[Math.floor(gaps.length / 2)]! : 0;
+        const daysSinceLast = (now - sorted[0]!) / DAY;
+        const runningLow = median > 0 && daysSinceLast >= 0.8 * median;
+        return { pid, count: dates.length, runningLow };
+      })
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6);
+
+    if (candidates.length === 0) return res.json({ success: true, data: [] });
+
+    const products = await prisma.catalogProduct.findMany({
+      where: { id: { in: candidates.map((c) => c.pid) }, isActive: true },
+      include: {
+        variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
+        category: { select: { slug: true, name: true } },
+      },
+    });
+    const byId = new Map(products.map((p) => [p.id, p]));
+    const data = candidates
+      .map((c) => {
+        const p = byId.get(c.pid);
+        return p ? { product: formatProductForApp(p), runningLow: c.runningLow } : null;
+      })
+      .filter((x): x is NonNullable<typeof x> => !!x);
+    res.json({ success: true, data });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // PUT /api/app/me
 const updateProfileSchema = z.object({
   name: z.string().min(1).max(100).optional(),

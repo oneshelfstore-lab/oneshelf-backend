@@ -207,6 +207,60 @@ publicCatalogRouter.get("/trending", async (_req: Request, res: Response) => {
   }
 });
 
+// GET /api/app/products/trending-products — full products most ordered in the last 7 days,
+// each with its weekly ordered-quantity count. Powers the Home "Trending this week" rail.
+// Real order data only; in-stock products; the client shows the count chip only above a floor.
+publicCatalogRouter.get("/trending-products", async (_req: Request, res: Response) => {
+  try {
+    const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const grouped = await prisma.orderItem.groupBy({
+      by: ["variantId"],
+      _sum: { quantity: true },
+      where: {
+        variantId: { not: null },
+        order: { createdAt: { gte: since }, status: { not: "CANCELLED" } },
+      },
+      orderBy: { _sum: { quantity: "desc" } },
+      take: 50,
+    });
+    const variantIds = grouped.map((g) => g.variantId).filter((v): v is string => !!v);
+    if (variantIds.length === 0) return res.json({ success: true, data: [] });
+
+    // Roll weekly quantity up from variants to their parent products.
+    const variants = await prisma.productVariant.findMany({
+      where: { id: { in: variantIds }, isActive: true },
+      select: { id: true, productId: true },
+    });
+    const qtyByVariant = new Map(grouped.map((g) => [g.variantId!, Number(g._sum.quantity ?? 0)]));
+    const qtyByProduct = new Map<string, number>();
+    for (const v of variants) {
+      qtyByProduct.set(v.productId, (qtyByProduct.get(v.productId) ?? 0) + (qtyByVariant.get(v.id) ?? 0));
+    }
+    const topProductIds = [...qtyByProduct.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([id]) => id);
+    if (topProductIds.length === 0) return res.json({ success: true, data: [] });
+
+    const products = await prisma.catalogProduct.findMany({
+      where: { id: { in: topProductIds }, isActive: true },
+      include: {
+        variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
+        category: { select: { slug: true, name: true } },
+      },
+    });
+    const byId = new Map(products.map((p) => [p.id, p]));
+    // Preserve the most-ordered ordering, keep only in-stock products, attach the count.
+    const data = topProductIds
+      .map((id) => byId.get(id))
+      .filter((p): p is NonNullable<typeof p> => !!p && p.variants.some((v: any) => Number(v.stock) > 0))
+      .map((p) => ({ product: formatProductForApp(p), count: qtyByProduct.get(p.id) ?? 0 }));
+    res.json({ success: true, data });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // POST /api/app/products/stock-check — batch stock check for cart items.
 // Returns current stock for each variant and alternatives for OOS items.
 publicCatalogRouter.post("/stock-check", async (req: Request, res: Response) => {

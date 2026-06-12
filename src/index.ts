@@ -18,7 +18,7 @@ import storeConfigRoutes from "./routes/storeConfig.js";
 import fcmTokenRoutes from "./routes/fcmTokens.js";
 import { publicCategoryRouter, adminCategoryRouter } from "./routes/categories.js";
 import { publicCatalogRouter, adminCatalogRouter } from "./routes/catalog.js";
-import { publicBannerRouter, adminBannerRouter } from "./routes/banners.js";
+import { publicBannerRouter, adminBannerRouter, ownerBannerRouter } from "./routes/banners.js";
 import cartRoutes from "./routes/cart.js";
 import { appCouponRouter, adminCouponRouter } from "./routes/coupons.js";
 import orderRoutes from "./routes/orders.js";
@@ -152,6 +152,7 @@ app.use("/api/app/coupons", appCouponRouter);
 app.use("/api/app/orders", orderRoutes);
 app.use("/api/app/owner/orders", ownerOrderRoutes);
 app.use("/api/app/owner/catalog", ownerCatalogRoutes);
+app.use("/api/app/owner/banners", ownerBannerRouter);
 app.use("/api/app/delivery/orders", deliveryRoutes);
 app.use("/api/app/me", appUserRoutes);
 

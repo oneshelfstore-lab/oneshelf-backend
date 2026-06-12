@@ -10,6 +10,7 @@ import { toAppFormat } from "../utils/looseUnitConverter.js";
 import { calculateCartTotals } from "../services/cartPricing.js";
 import { computeOrderEta } from "../services/orderEta.js";
 import { computeUserSavings } from "../services/savings.js";
+import { rollScratchReward, getScratchForCelebration, revealScratchReward } from "../services/scratchReward.js";
 import { getNextOrderNumber } from "../services/orderNumbering.js";
 import { createRazorpayOrder, verifyPaymentSignature, isRazorpayConfigured, refundPayment } from "../services/razorpay.js";
 import { notifyNewOrder, notifyOrderStatusChange } from "../services/fcmNotifier.js";
@@ -251,6 +252,10 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
 
       return created;
     });
+
+    // Roll the scratch-card outcome once, now (idempotent, keyed by orderId), so the celebration
+    // screen has it ready. Best-effort — a failure here must never block order placement.
+    try { await rollScratchReward(order.id, userId); } catch (e) { console.error("scratch roll failed:", e); }
 
     // Create Razorpay order for online payment
     let razorpayOrderId: string | null = null;
@@ -549,9 +554,10 @@ router.get("/:id/celebration", async (req: FirebaseAuthRequest, res: Response) =
     });
     if (!order) throw new NotFoundError("Order", req.params.id!);
 
-    const [savings, eta] = await Promise.all([
+    const [savings, eta, scratch] = await Promise.all([
       computeUserSavings(userId),
       computeOrderEta(order.fulfillmentType, order.deliverySlot),
+      getScratchForCelebration(order.id),
     ]);
 
     res.json({
@@ -564,11 +570,33 @@ router.get("/:id/celebration", async (req: FirebaseAuthRequest, res: Response) =
         etaLabel: eta.etaLabel,
         // Display-only trust card — confidence shown, not claimed. The real claim flow is Phase 4.
         refundPromiseShown: true,
-        // Reserved for later phases — null keeps the client contract stable now.
-        scratch: null,
+        // Scratch card (Phase 3A): UNSCRATCHED hides the outcome until revealed via POST /scratch.
+        scratch,
+        // Reserved for Phase 3B (free sample).
         freeSample: null,
       },
     });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/orders/:id/scratch — reveal the scratch card ──────
+// Idempotent: flips UNSCRATCHED→SCRATCHED, mints a single-use coupon on a win.
+
+router.post("/:id/scratch", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    // Authorize: the order must belong to this user.
+    const order = await prisma.order.findFirst({
+      where: { id: req.params.id, customerId: userId },
+      select: { id: true },
+    });
+    if (!order) throw new NotFoundError("Order", req.params.id!);
+
+    const result = await revealScratchReward(order.id, userId);
+    if (!result) throw new NotFoundError("ScratchReward", req.params.id!);
+    res.json({ success: true, data: result });
   } catch (e) {
     sendError(res, e);
   }

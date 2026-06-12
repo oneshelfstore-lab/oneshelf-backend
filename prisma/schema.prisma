@@ -497,6 +497,38 @@ model CouponRedemption {
   @@index([userId])
 }
 
+// ─── Scratch reward (Delight Phase 3A) ───────────────────────────────
+// One scratch card per order. Outcome is rolled server-side at placement (idempotent, keyed by
+// orderId) so re-opening the celebration screen can't re-roll. A win mints a single-use coupon
+// through the existing Coupon system when the customer reveals it.
+
+enum ScratchRewardType {
+  NONE
+  FREE_DELIVERY_NEXT
+  FLAT_OFF
+}
+
+enum ScratchRewardStatus {
+  UNSCRATCHED
+  SCRATCHED
+  EXPIRED
+}
+
+model ScratchReward {
+  id         String              @id @default(cuid())
+  orderId    String              @unique
+  order      Order               @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  userId     String
+  type       ScratchRewardType   @default(NONE)
+  value      Decimal?            @db.Decimal(10, 2) // flat-off ₹ amount when FLAT_OFF
+  status     ScratchRewardStatus @default(UNSCRATCHED)
+  couponCode String?             // minted on reveal for a win
+  expiresAt  DateTime?
+  createdAt  DateTime            @default(now())
+
+  @@index([userId])
+}
+
 // ─── 10. Order ───────────────────────────────────────────────────────
 
 model Order {
@@ -559,6 +591,7 @@ model Order {
   items                 OrderItem[]
   secret                OrderSecret?
   rating                OrderRating?
+  scratchReward         ScratchReward?
 
   @@index([customerId])
   @@index([status])
@@ -670,6 +703,14 @@ model StoreConfig {
   // Average fulfillment time used to compute the honest order ETA (shown as a range).
   avgDeliveryMinutes    Int      @default(40)
   avgPickupMinutes      Int      @default(20)
+  // Delight engine (Phase 3). delightEnabled is the master kill switch. Scratch-card outcome
+  // weights (a real NONE weight is mandatory so wins stay variable, not an entitlement);
+  // scratchFlatOffValue = ₹ off for a FLAT_OFF win.
+  delightEnabled            Boolean @default(true)
+  scratchNoneWeight         Int     @default(55)
+  scratchFreeDeliveryWeight Int     @default(30)
+  scratchFlatOffWeight      Int     @default(15)
+  scratchFlatOffValue       Int     @default(20)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 }

@@ -105,6 +105,7 @@ const variantCreateSchema = z.object({
 const productCreateSchema = z.object({
   handle: z.string().min(1).max(100).regex(/^[a-z0-9-]+$/, "Handle must be lowercase with hyphens"),
   name: z.string().min(1).max(200),
+  nameHi: z.string().max(200).optional().nullable(),
   brand: z.string().max(100).optional().nullable(),
   categorySlug: z.string().min(1).max(50),
   subcategory: z.string().max(100).optional().nullable(),

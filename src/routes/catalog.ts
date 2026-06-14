@@ -20,6 +20,7 @@ export function formatProductForApp(product: any) {
     id: product.id,
     handle: product.handle,
     name: product.name,
+    nameHi: product.nameHi ?? null,
     brand: product.brand,
     categoryId: product.categoryId,
     category: product.category ?? undefined,

@@ -278,6 +278,7 @@ model CatalogProduct {
   id              String      @id @default(cuid())
   handle          String      @unique
   name            String
+  nameHi          String?
   brand           String?
   categoryId      String
   category        Category    @relation(fields: [categoryId], references: [id])

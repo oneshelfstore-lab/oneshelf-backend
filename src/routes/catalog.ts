@@ -34,6 +34,7 @@ export function formatProductForApp(product: any) {
     isExempt: product.isExempt ?? false,
     isBranded: product.isBranded ?? false,
     isSampleEligible: product.isSampleEligible ?? false,
+    featuredIn99Store: product.featuredIn99Store ?? false,
     imageUrls: product.imageUrls,
     searchKeywords: product.searchKeywords,
     isActive: product.isActive,
@@ -298,6 +299,31 @@ publicCatalogRouter.get("/deal-today", async (_req: Request, res: Response) => {
     const chosen = pool[h % pool.length]!;
 
     res.json({ success: true, data: { product: formatProductForApp(chosen.p), discountPct: chosen.discountPct } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// GET /api/app/products/under-99 — the "99 Store": products the owner flagged (featuredIn99Store)
+// AND actually priced ₹99 or less (a cheapest active, in-stock variant ≤ 99), so the "everything
+// under ₹99" promise stays true even if a flagged item is later repriced. In-stock only. Declared
+// before "/:id" so the literal path isn't swallowed as a product id.
+publicCatalogRouter.get("/under-99", async (_req: Request, res: Response) => {
+  try {
+    const products = await prisma.catalogProduct.findMany({
+      where: {
+        isActive: true,
+        featuredIn99Store: true,
+        variants: { some: { isActive: true, stock: { gt: 0 }, sellingPrice: { lte: 99 } } },
+      },
+      include: {
+        variants: { where: { isActive: true }, orderBy: { sellingPrice: "asc" } },
+        category: { select: { slug: true, name: true } },
+      },
+      orderBy: { name: "asc" },
+      take: 30,
+    });
+    res.json({ success: true, data: products.map(formatProductForApp) });
   } catch (e) {
     sendError(res, e);
   }

@@ -294,6 +294,9 @@ model CatalogProduct {
   // Owner opt-in: this product may be given as a free sample (Delight Phase 3B). Marking ≥1
   // product eligible is what turns the sample engine on.
   isSampleEligible Boolean    @default(false)
+  // Owner opt-in: feature this product in the Home "99 Store" rail. Only surfaced when the product
+  // is also actually priced ₹99 or less, so the "everything under ₹99" promise stays honest.
+  featuredIn99Store Boolean   @default(false)
   imageUrls       String[]    @default([])
   searchKeywords  String[]    @default([])
   isActive        Boolean     @default(true)
@@ -408,6 +411,7 @@ model Banner {
   imageUrl        String
   targetCategory  String?
   targetUrl       String?
+  placement       String    @default("HOME")  // HOME | CATEGORY — which surface shows this banner
   displayOrder    Int       @default(0)
   isActive        Boolean   @default(true)
   startDate       DateTime?
@@ -416,6 +420,18 @@ model Banner {
   updatedAt       DateTime  @updatedAt
 
   @@index([isActive, displayOrder])
+}
+
+// ─── 6b. Brand ───────────────────────────────────────────────────────
+// Owner-managed company/brand with an optional logo. CatalogProduct.brand stays the brand NAME
+// (a string), so products reference a brand by name and the logo is looked up here — no product
+// migration needed. Names are unique (upserted on create).
+model Brand {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  logoUrl   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // ─── 7. Address ──────────────────────────────────────────────────────

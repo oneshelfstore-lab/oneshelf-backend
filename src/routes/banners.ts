@@ -9,12 +9,16 @@ import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAu
 
 export const publicBannerRouter = Router();
 
-publicBannerRouter.get("/", async (_req: Request, res: Response) => {
+publicBannerRouter.get("/", async (req: Request, res: Response) => {
   try {
     const now = new Date();
+    // Optional ?placement=HOME|CATEGORY filter so category-page banners are a distinct set from
+    // the Home carousel. No param → all active banners (back-compat for any existing caller).
+    const placement = typeof req.query.placement === "string" ? req.query.placement : undefined;
     const banners = await prisma.banner.findMany({
       where: {
         isActive: true,
+        ...(placement ? { placement } : {}),
         OR: [
           { startDate: null, endDate: null },
           { startDate: { lte: now }, endDate: null },
@@ -38,6 +42,7 @@ const bannerSchema = z.object({
   imageUrl: z.string().min(1).max(500),
   targetCategory: z.string().max(50).optional().nullable(),
   targetUrl: z.string().max(500).optional().nullable(),
+  placement: z.enum(["HOME", "CATEGORY"]).default("HOME"),
   displayOrder: z.number().int().min(0).default(0),
   isActive: z.boolean().default(true),
   startDate: z.coerce.date().optional().nullable(),

@@ -88,6 +88,17 @@ export async function notifyDeliveryAssignment(order: { id: string; orderNumber:
   });
 }
 
+export async function notifyDeliveryArrived(order: { id: string; orderNumber: string; customerId: string }) {
+  const tokens = await getUserTokens(order.customerId);
+  await sendToTokens(tokens, {
+    type: "delivery_arrived",
+    orderId: order.id,
+    orderNumber: order.orderNumber,
+    title: "Your delivery has arrived",
+    body: `Your delivery is at your doorstep for Order #${order.orderNumber}. Please keep your handover code ready.`,
+  });
+}
+
 export async function notifySubstitutionProposal(
   customerId: string,
   info: { orderId: string; orderNumber: string; originalItem: string; substituteItem: string; priceDelta: number },
@@ -122,6 +133,33 @@ export async function notifySubstitutionResponse(
     title: `Substitution ${action}`,
     body: `Customer ${action} the substitution of ${substituteItem} for Order #${order.orderNumber}.`,
   });
+}
+
+export async function notifyNewComplaint(info: { id: string; subject: string; customerName: string }) {
+  await sendToTopic("owner_orders", {
+    type: "complaint",
+    complaintId: info.id,
+    title: "New complaint",
+    body: `${info.customerName}: ${info.subject}`,
+  });
+}
+
+export async function notifyNewQuoteRequest(info: { id: string; type: string; customerName: string }) {
+  await sendToTopic("owner_orders", {
+    type: "quote_request",
+    quoteId: info.id,
+    title: "New quote request",
+    body: `${info.customerName} requested a ${info.type} quote. Tap to send a price.`,
+  });
+}
+
+/**
+ * Owner broadcast → an FCM topic. Data-only (title/body in the data map) so the
+ * app's MyFirebaseMessagingService builds the notification consistently in
+ * foreground AND background — same convention as every payload above.
+ */
+export async function notifyBroadcast(topic: string, title: string, body: string) {
+  await sendToTopic(topic, { type: "broadcast", title, body });
 }
 
 export async function notifyAbandonedCart(

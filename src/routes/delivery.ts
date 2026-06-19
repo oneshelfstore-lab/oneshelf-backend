@@ -7,7 +7,7 @@ import {
   requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
-import { notifyOrderStatusChange } from "../services/fcmNotifier.js";
+import { notifyOrderStatusChange, notifyDeliveryArrived } from "../services/fcmNotifier.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -49,6 +49,38 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
       success: true,
       data: orders,
       serverTimestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── GET /api/app/delivery/cash-summary — today's COD cash collected ─
+// Declared BEFORE "/:id" so Express doesn't match "cash-summary" as an order id.
+router.get("/cash-summary", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+
+    // Start of "today" in IST (UTC+5:30), expressed in UTC for the deliveredAt filter.
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const istNow = new Date(Date.now() + IST_OFFSET_MS);
+    const istMidnight = Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate());
+    const startUtc = new Date(istMidnight - IST_OFFSET_MS);
+
+    const orders = await prisma.order.findMany({
+      where: {
+        deliveryBoyId: userId,
+        paymentMethod: "COD",
+        status: "DELIVERED",
+        deliveredAt: { gte: startUtc },
+      },
+      select: { totalAmount: true },
+    });
+
+    const totalCollected = orders.reduce((sum, o) => sum + Number(o.totalAmount), 0);
+    res.json({
+      success: true,
+      data: { date: startUtc.toISOString(), orderCount: orders.length, totalCollected },
     });
   } catch (e) {
     sendError(res, e);
@@ -186,6 +218,26 @@ router.post("/:id/deliver", async (req: FirebaseAuthRequest, res: Response) => {
     notifyOrderStatusChange({ ...order, status: "DELIVERED" }).catch(() => {});
 
     res.json({ success: true, data: { orderId: order.id, status: "DELIVERED" } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/delivery/orders/:id/arrived — ping the customer ──
+// Lets the delivery boy tell the customer "I'm here" (FCM push). No status change.
+router.post("/:id/arrived", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const isOwner = req.appUser!.role === "OWNER";
+
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!isOwner && order.deliveryBoyId !== userId) {
+      throw new AppError(403, "FORBIDDEN", "Not assigned to you");
+    }
+
+    notifyDeliveryArrived(order).catch(() => {});
+    res.json({ success: true, data: { orderId: order.id } });
   } catch (e) {
     sendError(res, e);
   }

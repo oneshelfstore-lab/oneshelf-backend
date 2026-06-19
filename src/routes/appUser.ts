@@ -10,6 +10,7 @@ import { admin, isFirebaseInitialized } from "../lib/firebase.js";
 import { formatProductForApp } from "./catalog.js";
 import { computeUserSavings } from "../services/savings.js";
 import { computeUserLoyalty } from "../services/loyalty.js";
+import { notifyNewComplaint, notifyNewQuoteRequest } from "../services/fcmNotifier.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -442,6 +443,173 @@ router.post("/referral/apply", async (req: FirebaseAuthRequest, res: Response) =
 });
 
 // ═══════════════════════════════════════════════════════════════════════
+// Complaints + Quote requests (shared shapes — also used by the owner routes)
+// ═══════════════════════════════════════════════════════════════════════
+
+// Short human-facing ids derived from the cuid (the app shows these).
+export function shapeComplaint(c: {
+  id: string; subject: string; message: string; status: string;
+  orderId: string | null; createdAt: Date; resolvedAt: Date | null;
+  user?: { name: string; phone: string | null } | null;
+}) {
+  return {
+    id: c.id,
+    complaintNumber: "CMP-" + c.id.slice(-6).toUpperCase(),
+    subject: c.subject,
+    message: c.message,
+    status: c.status, // OPEN | RESOLVED
+    orderId: c.orderId,
+    createdAt: c.createdAt.getTime(),
+    resolvedAt: c.resolvedAt ? c.resolvedAt.getTime() : null,
+    customerName: c.user?.name ?? null,
+    customerPhone: c.user?.phone ?? null,
+  };
+}
+
+export function shapeQuote(q: {
+  id: string; type: string; note: string; eventDate: string | null;
+  imageUrls: string[]; status: string; quotedAmount: unknown; quoteMessage: string | null;
+  createdAt: Date; user?: { name: string; phone: string | null } | null;
+}) {
+  return {
+    id: q.id,
+    requestNumber: "QR-" + q.id.slice(-6).toUpperCase(),
+    type: q.type,
+    note: q.note,
+    eventDate: q.eventDate,
+    imageUrls: q.imageUrls,
+    status: q.status, // PENDING | QUOTED | ACCEPTED | DECLINED | FULFILLED
+    quotedAmount: q.quotedAmount != null ? Number(q.quotedAmount) : 0,
+    quoteMessage: q.quoteMessage,
+    createdAt: q.createdAt.getTime(),
+    customerName: q.user?.name ?? null,
+    customerPhone: q.user?.phone ?? null,
+  };
+}
+
+const complaintSchema = z.object({
+  subject: z.string().min(1).max(200),
+  message: z.string().min(1).max(2000),
+  orderId: z.string().max(100).optional().nullable(),
+});
+
+// POST /api/app/me/complaints → register a complaint (+ best-effort owner push)
+router.post("/complaints", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = complaintSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid complaint", parsed.error.errors);
+
+    const complaint = await prisma.complaint.create({
+      data: {
+        userId: req.appUser!.id,
+        subject: parsed.data.subject.trim(),
+        message: parsed.data.message.trim(),
+        orderId: parsed.data.orderId || null,
+      },
+    });
+
+    // Notify the owner — never let a push failure fail the create.
+    try {
+      await notifyNewComplaint({ id: complaint.id, subject: complaint.subject, customerName: req.appUser!.name });
+    } catch (notifyErr) {
+      console.warn("notifyNewComplaint failed:", notifyErr);
+    }
+
+    res.status(201).json({ success: true, data: shapeComplaint({ ...complaint }) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// GET /api/app/me/complaints → the caller's complaints (newest first)
+router.get("/complaints", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const complaints = await prisma.complaint.findMany({
+      where: { userId: req.appUser!.id },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json({ success: true, data: complaints.map((c) => shapeComplaint({ ...c })) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+const quoteRequestSchema = z.object({
+  type: z.string().min(1).max(50),
+  note: z.string().max(2000).default(""),
+  eventDate: z.string().max(100).optional().nullable(),
+  imageUrls: z.array(z.string().max(1000)).max(8).default([]),
+});
+
+// POST /api/app/me/quote-requests → submit a quote request (+ best-effort owner push)
+router.post("/quote-requests", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = quoteRequestSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid quote request", parsed.error.errors);
+
+    const quote = await prisma.quoteRequest.create({
+      data: {
+        userId: req.appUser!.id,
+        type: parsed.data.type.trim(),
+        note: parsed.data.note.trim(),
+        eventDate: parsed.data.eventDate || null,
+        imageUrls: parsed.data.imageUrls,
+      },
+    });
+
+    try {
+      await notifyNewQuoteRequest({ id: quote.id, type: quote.type, customerName: req.appUser!.name });
+    } catch (notifyErr) {
+      console.warn("notifyNewQuoteRequest failed:", notifyErr);
+    }
+
+    res.status(201).json({ success: true, data: shapeQuote({ ...quote }) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// GET /api/app/me/quote-requests → the caller's quote requests (newest first)
+router.get("/quote-requests", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const quotes = await prisma.quoteRequest.findMany({
+      where: { userId: req.appUser!.id },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json({ success: true, data: quotes.map((q) => shapeQuote({ ...q })) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+const respondQuoteSchema = z.object({ accept: z.boolean() });
+
+// POST /api/app/me/quote-requests/:id/respond → customer accepts/declines a QUOTED price
+router.post("/quote-requests/:id/respond", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = respondQuoteSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid response", parsed.error.errors);
+
+    const id = String(req.params.id ?? "");
+    const quote = await prisma.quoteRequest.findFirst({
+      where: { id, userId: req.appUser!.id },
+    });
+    if (!quote) throw new NotFoundError("Quote request", id);
+    if (quote.status !== "QUOTED") {
+      throw new ValidationError("This request isn't awaiting your response.");
+    }
+
+    const updated = await prisma.quoteRequest.update({
+      where: { id: quote.id },
+      data: { status: parsed.data.accept ? "ACCEPTED" : "DECLINED" },
+    });
+    res.json({ success: true, data: shapeQuote({ ...updated }) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
 // Account deletion (required by Google Play account-deletion policy)
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -460,6 +628,8 @@ router.delete("/", async (req: FirebaseAuthRequest, res: Response) => {
       await tx.cartItem.deleteMany({ where: { userId } });
       await tx.fcmToken.deleteMany({ where: { userId } });
       await tx.favorite.deleteMany({ where: { userId } });
+      await tx.complaint.deleteMany({ where: { userId } });
+      await tx.quoteRequest.deleteMany({ where: { userId } });
       await tx.user.update({
         where: { id: userId },
         data: {

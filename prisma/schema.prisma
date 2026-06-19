@@ -197,6 +197,19 @@ enum SubstitutionStatus {
   REJECTED
 }
 
+enum ComplaintStatus {
+  OPEN
+  RESOLVED
+}
+
+enum QuoteStatus {
+  PENDING
+  QUOTED
+  ACCEPTED
+  DECLINED
+  FULFILLED
+}
+
 // ─── 0. User ────────────────────────────────────────────────────────
 
 model User {
@@ -236,6 +249,8 @@ model User {
   couponRedemptions  CouponRedemption[]
   favorites          Favorite[]
   orderRatings       OrderRating[]
+  complaints         Complaint[]
+  quoteRequests      QuoteRequest[]
 
   @@index([phone])
 }
@@ -340,6 +355,42 @@ model OrderRating {
   createdAt DateTime @default(now())
 
   @@index([userId])
+}
+
+// ─── Complaint (customer support ticket) ────────────────────────────
+
+model Complaint {
+  id         String          @id @default(cuid())
+  userId     String
+  user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orderId    String?         // optional link to a specific order
+  subject    String
+  message    String
+  status     ComplaintStatus @default(OPEN)
+  createdAt  DateTime        @default(now())
+  resolvedAt DateTime?
+
+  @@index([userId])
+  @@index([status])
+}
+
+// ─── QuoteRequest (bulk / event price ask) ──────────────────────────
+
+model QuoteRequest {
+  id           String      @id @default(cuid())
+  userId       String
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type         String      // "Bulk" | "Monthly Ration" | "Event"
+  note         String
+  eventDate    String?     // free-text date the customer typed (kept verbatim)
+  imageUrls    String[]    @default([]) // Firebase Storage public URLs (uploaded client-side)
+  status       QuoteStatus @default(PENDING)
+  quotedAmount Decimal?    @db.Decimal(10, 2)
+  quoteMessage String?
+  createdAt    DateTime    @default(now())
+
+  @@index([userId])
+  @@index([status])
 }
 
 // ─── 4. ProductVariant (the sellable SKU — owns size, price, stock) ──

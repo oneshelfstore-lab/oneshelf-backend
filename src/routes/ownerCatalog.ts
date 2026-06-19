@@ -40,6 +40,7 @@ function formatProductForApp(product: any) {
     imageUrls: product.imageUrls,
     searchKeywords: product.searchKeywords,
     isActive: product.isActive,
+    sellerName: product.seller?.name ?? null,
     variants: product.variants?.map((v: any) => formatVariantForApp(v, isLoose)) ?? [],
   };
 }
@@ -67,6 +68,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         include: {
           variants: { orderBy: { packageSize: "asc" } },
           category: { select: { slug: true, name: true } },
+          seller: { select: { name: true } },
         },
         orderBy: { name: "asc" },
         skip: (page - 1) * limit,

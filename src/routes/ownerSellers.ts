@@ -217,4 +217,69 @@ router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
+// ─── POST /:id/payout — settle the seller's unsettled sub-orders ──
+// Sums every unsettled SubOrder, creates a SellerPayout covering them, marks them settled, and
+// decrements the running balance. This is the manual-ledger settlement (no Razorpay Route yet).
+const payoutSchema = z.object({
+  mode: z.string().max(40).optional(),
+  reference: z.string().max(120).optional(),
+  note: z.string().max(300).optional(),
+});
+
+router.post("/:id/payout", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const parsed = payoutSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid payout data", parsed.error.errors);
+
+    const seller = await prisma.seller.findUnique({ where: { id }, select: { id: true, isHouse: true } });
+    if (!seller) throw new NotFoundError("Seller", id);
+    if (seller.isHouse) throw new ValidationError("The house store has no commission ledger to pay out.");
+
+    const result = await prisma.$transaction(async (tx) => {
+      const unsettled = await tx.subOrder.findMany({
+        where: { sellerId: id, settled: false },
+        select: { id: true, subtotal: true, commissionAmount: true, tcsAmount: true, netPayable: true },
+      });
+      if (unsettled.length === 0) throw new ValidationError("Nothing to pay out — no unsettled orders.");
+
+      const gross = +unsettled.reduce((s, o) => s + Number(o.subtotal), 0).toFixed(2);
+      const commission = +unsettled.reduce((s, o) => s + Number(o.commissionAmount), 0).toFixed(2);
+      const tcs = +unsettled.reduce((s, o) => s + Number(o.tcsAmount), 0).toFixed(2);
+      const net = +unsettled.reduce((s, o) => s + Number(o.netPayable), 0).toFixed(2);
+
+      const payout = await tx.sellerPayout.create({
+        data: {
+          sellerId: id, grossAmount: gross, commission, tcs, netPaid: net,
+          mode: parsed.data.mode ?? null, reference: parsed.data.reference ?? null, note: parsed.data.note ?? null,
+        },
+      });
+      await tx.subOrder.updateMany({ where: { id: { in: unsettled.map((o) => o.id) } }, data: { settled: true, payoutId: payout.id } });
+      await tx.seller.update({ where: { id }, data: { outstandingBalance: { decrement: net } } });
+      return { payout, count: unsettled.length };
+    });
+
+    res.json({ success: true, data: { payoutId: result.payout.id, settledCount: result.count, netPaid: Number(result.payout.netPaid) } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── GET /:id/payouts — payout history for a seller ───────────────
+router.get("/:id/payouts", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const payouts = await prisma.sellerPayout.findMany({ where: { sellerId: id }, orderBy: { paidAt: "desc" }, take: 50 });
+    res.json({
+      success: true,
+      data: payouts.map((p) => ({
+        id: p.id, grossAmount: Number(p.grossAmount), commission: Number(p.commission),
+        netPaid: Number(p.netPaid), paidAt: p.paidAt, mode: p.mode, reference: p.reference, note: p.note,
+      })),
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 export default router;

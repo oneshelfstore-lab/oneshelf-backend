@@ -87,6 +87,97 @@ router.get("/cash-summary", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
+// ─── Shared: start of "today" in IST, expressed in UTC (for deliveredAt filters) ──
+function istTodayStartUtc(): Date {
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const istNow = new Date(Date.now() + IST_OFFSET_MS);
+  const istMidnight = Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), istNow.getUTCDate());
+  return new Date(istMidnight - IST_OFFSET_MS);
+}
+
+// Builds the delivery boy's profile + today's stats (delivered count + COD cash to settle).
+async function buildDeliveryProfile(userId: string) {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { name: true, phone: true, isAvailableForDelivery: true },
+  });
+  if (!user) throw new NotFoundError("User", userId);
+
+  const startUtc = istTodayStartUtc();
+  const delivered = await prisma.order.findMany({
+    where: { deliveryBoyId: userId, status: "DELIVERED", deliveredAt: { gte: startUtc } },
+    select: { totalAmount: true, paymentMethod: true },
+  });
+  const todayCash = delivered
+    .filter((o) => o.paymentMethod === "COD")
+    .reduce((sum, o) => sum + Number(o.totalAmount), 0);
+
+  return {
+    name: user.name,
+    phone: user.phone,
+    isAvailableForDelivery: user.isAvailableForDelivery,
+    todayDeliveredCount: delivered.length,
+    todayCash,
+  };
+}
+
+// NOTE: this router is mounted at /api/app/delivery/orders, so all paths below are under
+// .../orders/... (e.g. "/me" → /api/app/delivery/orders/me).
+
+// ─── GET /api/app/delivery/orders/me — profile + availability + today's stats ──
+// Declared BEFORE "/:id" so Express doesn't treat "me" as an order id.
+router.get("/me", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const data = await buildDeliveryProfile(req.appUser!.id);
+    res.json({ success: true, data });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── PATCH /api/app/delivery/orders/me — flip the availability toggle ──────
+const availabilitySchema = z.object({ available: z.boolean() });
+
+router.patch("/me", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = availabilitySchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
+
+    await prisma.user.update({
+      where: { id: req.appUser!.id },
+      data: { isAvailableForDelivery: parsed.data.available },
+    });
+    const data = await buildDeliveryProfile(req.appUser!.id);
+    res.json({ success: true, data });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── GET /api/app/delivery/orders/history — this boy's delivered orders ────
+// Declared BEFORE "/:id". Newest-delivered first, capped at 50 (a delivery boy never needs more
+// than the recent tail on-device). Same slim shape as GET / so OrderDto.toDomain reuses cleanly.
+router.get("/history", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const orders = await prisma.order.findMany({
+      where: { deliveryBoyId: req.appUser!.id, status: "DELIVERED" },
+      orderBy: { deliveredAt: "desc" },
+      take: 50,
+      select: {
+        id: true, orderNumber: true, status: true, fulfillmentType: true,
+        paymentMethod: true, paymentStatus: true, totalAmount: true,
+        deliveryOtpRequired: true, shippingName: true, shippingPhone: true,
+        shippingAddress: true, shippingPincode: true,
+        createdAt: true, updatedAt: true, deliveredAt: true,
+        _count: { select: { items: true } },
+      },
+    });
+    res.json({ success: true, data: orders, serverTimestamp: new Date().toISOString() });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // ─── GET /api/app/delivery/orders/:id — order detail ────────────────
 
 router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {

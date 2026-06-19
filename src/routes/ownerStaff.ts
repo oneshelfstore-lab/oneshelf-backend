@@ -22,7 +22,7 @@ function normalizePhone(input: string): string {
   return input.replace(/\D/g, "").slice(-10);
 }
 
-function shape(a: { id: string; name: string; phone: string | null; firebaseUid: string | null }) {
+function shape(a: { id: string; name: string; phone: string | null; firebaseUid: string | null; isAvailableForDelivery: boolean }) {
   return {
     id: a.id,
     name: a.name,
@@ -30,6 +30,9 @@ function shape(a: { id: string; name: string; phone: string | null; firebaseUid:
     // true once they've actually logged in (Firebase account linked); false = pre-registered,
     // waiting for their first login. They can still be assigned to orders either way.
     active: !!a.firebaseUid,
+    // The agent's own advisory on/off toggle (delivery dashboard). Advisory only — the owner
+    // can still assign an "offline" boy; this just surfaces who's available right now.
+    available: a.isAvailableForDelivery,
   };
 }
 
@@ -38,7 +41,7 @@ router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
   try {
     const agents = await prisma.user.findMany({
       where: { role: "DELIVERY", isActive: true },
-      select: { id: true, name: true, phone: true, firebaseUid: true },
+      select: { id: true, name: true, phone: true, firebaseUid: true, isAvailableForDelivery: true },
       orderBy: { name: "asc" },
     });
     res.json({ success: true, data: agents.map(shape) });
@@ -75,14 +78,14 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       agent = await prisma.user.update({
         where: { id: existing.id },
         data: { role: "DELIVERY", phone, name: keepName },
-        select: { id: true, name: true, phone: true, firebaseUid: true },
+        select: { id: true, name: true, phone: true, firebaseUid: true, isAvailableForDelivery: true },
       });
     } else {
       // Pre-register: a DELIVERY row with no Firebase account yet. firebaseAuthMiddleware
       // links the account to this row by phone on the agent's first login.
       agent = await prisma.user.create({
         data: { name, phone, role: "DELIVERY", phoneVerified: false },
-        select: { id: true, name: true, phone: true, firebaseUid: true },
+        select: { id: true, name: true, phone: true, firebaseUid: true, isAvailableForDelivery: true },
       });
     }
 

@@ -245,6 +245,11 @@ model User {
   photoUrl         String?
   phoneVerified    Boolean   @default(false)
 
+  // Delivery-agent availability — advisory toggle in the delivery dashboard. Shown to the owner
+  // in the assignment picker (an "Offline" tag) but does NOT hard-block assignment. Defaults to
+  // true so existing/pre-registered agents are assignable until they turn themselves off.
+  isAvailableForDelivery Boolean @default(true)
+
   // Abandoned-cart push throttling
   lastCartReminderAt  DateTime?
   cartReminderCount   Int       @default(0)

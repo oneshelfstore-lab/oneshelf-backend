@@ -82,7 +82,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         variant: {
           include: {
             product: {
-              select: { id: true, name: true, productType: true, hsnCode: true, gstRate: true, isPackaged: true, categoryId: true, imageUrls: true },
+              select: { id: true, name: true, productType: true, hsnCode: true, gstRate: true, isPackaged: true, categoryId: true, imageUrls: true, sellerId: true },
             },
           },
         },
@@ -114,6 +114,10 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
 
     // Generate order number
     const orderNumber = await getNextOrderNumber();
+
+    // Resolve the house seller once — the fallback owner for any item whose product has no
+    // explicit seller (pre-backfill products). Used to group items into per-seller sub-orders.
+    const houseSeller = await prisma.seller.findFirst({ where: { isHouse: true }, select: { id: true } });
 
     // Transactional: decrement stock + create order + clear cart
     const order = await prisma.$transaction(async (tx) => {
@@ -168,6 +172,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           stepSize: isLoose ? Number(item.variant.packageSize) : null,
           stepUnit: isLoose ? item.variant.packageUnit : null,
           packageUnit: item.variant.packageUnit,
+          sellerId: item.variant.product.sellerId ?? houseSeller?.id ?? null,
         };
       });
 
@@ -250,6 +255,62 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
 
       // Clear active cart
       await tx.cartItem.deleteMany({ where: { userId, savedForLater: false } });
+
+      // ── Split into per-seller sub-orders + accrue the commission ledger ──
+      // Group the just-created items by seller, create one SubOrder per seller, link the items,
+      // and bump each (non-house) seller's outstanding balance by their net (gross − commission
+      // − TCS). A single-seller (house-only) order produces exactly one SubOrder, so the existing
+      // flow is unchanged. Order-level discounts/delivery are NOT split in v1 (the platform funds
+      // promos); commission is the seller's pct of their item subtotal. TCS stays 0 until Phase 6
+      // (CA-gated). Skipped only if no seller resolves (pre-backfill) — order placement never breaks.
+      type CreatedItem = (typeof created.items)[number];
+      const itemsBySeller = new Map<string, CreatedItem[]>();
+      for (const it of created.items) {
+        if (!it.sellerId) continue;
+        const arr = itemsBySeller.get(it.sellerId) ?? [];
+        arr.push(it);
+        itemsBySeller.set(it.sellerId, arr);
+      }
+      if (itemsBySeller.size > 0) {
+        const sellers = await tx.seller.findMany({
+          where: { id: { in: [...itemsBySeller.keys()] } },
+          select: { id: true, commissionPct: true, isHouse: true },
+        });
+        const sellerById = new Map(sellers.map((s) => [s.id, s]));
+        for (const [sid, sellerItems] of itemsBySeller) {
+          const seller = sellerById.get(sid);
+          if (!seller) continue;
+          const subtotal = +sellerItems.reduce((sum, it) => sum + Number(it.lineTotal), 0).toFixed(2);
+          const commissionPct = Number(seller.commissionPct);
+          const commissionAmount = +((subtotal * commissionPct) / 100).toFixed(2);
+          const tcsAmount = 0;
+          const netPayable = +(subtotal - commissionAmount - tcsAmount).toFixed(2);
+
+          const subOrder = await tx.subOrder.create({
+            data: {
+              orderId: created.id,
+              sellerId: sid,
+              status: "PLACED",
+              subtotal,
+              commissionPct,
+              commissionAmount,
+              tcsAmount,
+              netPayable,
+            },
+          });
+          await tx.orderItem.updateMany({
+            where: { id: { in: sellerItems.map((it) => it.id) } },
+            data: { subOrderId: subOrder.id },
+          });
+          // The platform doesn't owe its own house store — only accrue for real sellers.
+          if (!seller.isHouse) {
+            await tx.seller.update({
+              where: { id: sid },
+              data: { outstandingBalance: { increment: netPayable } },
+            });
+          }
+        }
+      }
 
       return created;
     });

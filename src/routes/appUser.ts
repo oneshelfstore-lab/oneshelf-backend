@@ -119,6 +119,7 @@ router.get("/essentials", async (req: FirebaseAuthRequest, res: Response) => {
       include: {
         variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
         category: { select: { slug: true, name: true } },
+        seller: { select: { id: true, name: true, isHouse: true } },
       },
     });
     const byId = new Map(products.map((p) => [p.id, p]));
@@ -305,6 +306,7 @@ router.get("/favorites", async (req: FirebaseAuthRequest, res: Response) => {
           include: {
             variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
             category: { select: { slug: true, name: true } },
+            seller: { select: { id: true, name: true, isHouse: true } },
           },
         },
       },

@@ -39,9 +39,17 @@ export function formatProductForApp(product: any) {
     imageUrls: product.imageUrls,
     searchKeywords: product.searchKeywords,
     isActive: product.isActive,
+    // Marketplace (Phase 6): who sells this. Null for legacy products with no seller link; the
+    // app shows "Sold by <name>" only for non-house sellers (the house store sells directly).
+    seller: product.seller
+      ? { id: product.seller.id, name: product.seller.name, isHouse: product.seller.isHouse }
+      : null,
     variants: product.variants?.map((v: any) => formatVariantForApp(v, isLoose)) ?? [],
   };
 }
+
+// Reusable include for the seller chip on customer-facing product reads.
+const SELLER_SELECT = { select: { id: true, name: true, isHouse: true } } as const;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Public router (no auth, mounted at /api/app/products)
@@ -84,6 +92,7 @@ publicCatalogRouter.get("/", async (req: Request, res: Response) => {
         include: {
           variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
           category: { select: { slug: true, name: true } },
+          seller: SELLER_SELECT,
         },
         orderBy: { name: "asc" },
         skip: (page - 1) * limit,
@@ -250,6 +259,7 @@ publicCatalogRouter.get("/trending-products", async (_req: Request, res: Respons
       include: {
         variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
         category: { select: { slug: true, name: true } },
+        seller: SELLER_SELECT,
       },
     });
     const byId = new Map(products.map((p) => [p.id, p]));
@@ -274,6 +284,7 @@ publicCatalogRouter.get("/deal-today", async (_req: Request, res: Response) => {
       include: {
         variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
         category: { select: { slug: true, name: true } },
+        seller: SELLER_SELECT,
       },
     });
 
@@ -320,6 +331,7 @@ publicCatalogRouter.get("/under-99", async (_req: Request, res: Response) => {
       include: {
         variants: { where: { isActive: true }, orderBy: { sellingPrice: "asc" } },
         category: { select: { slug: true, name: true } },
+        seller: SELLER_SELECT,
       },
       orderBy: { name: "asc" },
       take: 30,
@@ -378,6 +390,7 @@ publicCatalogRouter.post("/stock-check", async (req: Request, res: Response) => 
         include: {
           variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
           category: { select: { slug: true, name: true } },
+          seller: SELLER_SELECT,
         },
         orderBy: { name: "asc" },
         take: 30, // cap total, we'll slice per product
@@ -438,6 +451,7 @@ publicCatalogRouter.get("/:id/alternatives", async (req: Request, res: Response)
       include: {
         variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
         category: { select: { slug: true, name: true } },
+        seller: SELLER_SELECT,
       },
       orderBy: { name: "asc" },
       take: 6,
@@ -457,6 +471,7 @@ publicCatalogRouter.get("/:id", async (req: Request, res: Response) => {
       include: {
         variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
         category: { select: { slug: true, name: true } },
+        seller: SELLER_SELECT,
       },
     });
 

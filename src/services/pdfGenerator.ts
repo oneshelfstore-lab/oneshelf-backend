@@ -419,19 +419,31 @@ export async function generateInvoicePdf(invoiceId: string): Promise<Buffer> {
 
   if (!invoice) throw new Error(`Invoice not found: ${invoiceId}`);
 
-  // Fetch company info
+  // Fetch company info (the platform/house store — the default supplier).
   const company = await prisma.company.findFirst();
 
-  const companyName = company?.tradeName ?? company?.legalName ?? "Oneshelf Store";
-  const companyAddress = company?.address
-    ? typeof company.address === "string"
-      ? company.address
-      : JSON.stringify(company.address)
-    : "Address not configured";
-  const companyGstin = company?.gstin ?? "09XXXXXXXXXXX";
-  const companyPan = company?.pan ?? "XXXXXXXXXX";
-  const companyPhone = company?.phone ?? "";
-  const companyEmail = company?.email ?? "";
+  // Phase 6: a marketplace invoice snapshots the EXTERNAL seller as the supplier so the document
+  // is issued under their GSTIN. When those fields are set they OVERRIDE the store identity; an
+  // all-null snapshot (house seller / legacy invoice) falls back to the store Company, unchanged.
+  const isSellerIssued = !!invoice.supplierName;
+  const companyName = isSellerIssued
+    ? invoice.supplierName!
+    : (company?.tradeName ?? company?.legalName ?? "Oneshelf Store");
+  const companyAddress = isSellerIssued
+    ? (invoice.supplierAddress ?? "Address not configured")
+    : company?.address
+      ? typeof company.address === "string"
+        ? company.address
+        : JSON.stringify(company.address)
+      : "Address not configured";
+  const companyGstin = isSellerIssued
+    ? (invoice.supplierGstin ?? "Unregistered")
+    : (company?.gstin ?? "09XXXXXXXXXXX");
+  const companyPan = isSellerIssued
+    ? (invoice.supplierPan ?? "")
+    : (company?.pan ?? "XXXXXXXXXX");
+  const companyPhone = isSellerIssued ? (invoice.supplierPhone ?? "") : (company?.phone ?? "");
+  const companyEmail = isSellerIssued ? "" : (company?.email ?? "");
 
   // Build line items
   const lineItems = invoice.lineItems.map((li, idx) => ({

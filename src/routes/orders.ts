@@ -23,6 +23,10 @@ router.use(firebaseAuthMiddleware as any);
 
 function isLooseType(t: string) { return t === "LOOSE" || t === "PRODUCE"; }
 
+// GST Sec-52 TCS rate the platform (e-commerce operator) collects on external sellers' net taxable
+// supplies. ⚠️ CA-gated — confirm before launch. 1% total = 0.5% CGST + 0.5% SGST (intra-state).
+const TCS_RATE_PCT = 1;
+
 function generateOtp(): string {
   return String(Math.floor(1000 + Math.random() * 9000));
 }
@@ -283,7 +287,13 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           const subtotal = +sellerItems.reduce((sum, it) => sum + Number(it.lineTotal), 0).toFixed(2);
           const commissionPct = Number(seller.commissionPct);
           const commissionAmount = +((subtotal * commissionPct) / 100).toFixed(2);
-          const tcsAmount = 0;
+          // ⚠️ GST/CA (Phase 6): as a GST e-commerce operator the platform collects Sec-52 TCS @ 1%
+          // (0.5% CGST + 0.5% SGST) on the NET TAXABLE value of each EXTERNAL seller's supplies. The
+          // house store is the platform's own catalog → no TCS on its own supplies. TCS is NOT charged
+          // to the customer; it's withheld from the seller's payout and reported in GSTR-8. The TCS base
+          // is the GST-exclusive taxable value (prices are GST-inclusive). Confirm the rate/base w/ CA.
+          const taxableValue = +sellerItems.reduce((sum, it) => sum + Number(it.taxableValue), 0).toFixed(2);
+          const tcsAmount = seller.isHouse ? 0 : +((taxableValue * TCS_RATE_PCT) / 100).toFixed(2);
           const netPayable = +(subtotal - commissionAmount - tcsAmount).toFixed(2);
 
           const subOrder = await tx.subOrder.create({
@@ -571,6 +581,33 @@ router.get("/:id/invoice/pdf", async (req: FirebaseAuthRequest, res: Response) =
   }
 });
 
+// ─── GET /api/app/orders/:id/invoices/:invoiceId/pdf — per-seller invoice ──
+// A multi-seller order has one invoice per seller (Phase 6). The customer downloads each by id.
+// The invoice MUST belong to this customer's order (ownership re-checked here).
+router.get("/:id/invoices/:invoiceId/pdf", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const order = await prisma.order.findFirst({
+      where: { id: req.params.id, customerId: userId },
+      select: { id: true, orderNumber: true },
+    });
+    if (!order) throw new NotFoundError("Order", req.params.id!);
+
+    const invoice = await prisma.invoice.findFirst({
+      where: { id: req.params.invoiceId, orderId: order.id },
+      select: { id: true, invoiceNumber: true },
+    });
+    if (!invoice) throw new NotFoundError("Invoice", req.params.invoiceId!);
+
+    const pdfBuffer = await generateInvoicePdf(invoice.id);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="Invoice-${invoice.invoiceNumber.replace(/\//g, "-")}.pdf"`);
+    res.send(pdfBuffer);
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // ─── GET /api/app/orders — customer's orders ────────────────────────
 
 router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
@@ -676,7 +713,9 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     const order = await prisma.order.findFirst({
       where: { id: req.params.id, customerId: userId },
       include: {
-        items: true,
+        // Each item carries its seller (via the sub-order) so the app can show "Sold by <shop>"
+        // and group the order by seller.
+        items: { include: { subOrder: { include: { seller: { select: { id: true, name: true, isHouse: true } } } } } },
         address: true,
       },
     });
@@ -695,9 +734,33 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     const sampleName = order.freeSamplePacked ? order.freeSampleName : null;
     const sampleImage = order.freeSamplePacked ? order.freeSampleImageUrl : null;
 
+    // Flatten the seller onto each item (the app's OrderItem is flat). sellerIsHouse=null when the
+    // line has no seller link (legacy orders) so the app simply omits the "Sold by" label.
+    const items = order.items.map((it) => ({
+      ...it,
+      sellerName: it.subOrder?.seller?.name ?? null,
+      sellerIsHouse: it.subOrder?.seller?.isHouse ?? null,
+    }));
+
+    // Per-seller tax invoices for this order (Phase 6 — one per seller). The customer can view/
+    // download each. supplierName is null for the house store → the app labels it "Store".
+    const invoiceRows = await prisma.invoice.findMany({
+      where: { orderId: order.id },
+      orderBy: { invoiceNumber: "asc" },
+      select: { id: true, invoiceNumber: true, sellerId: true, supplierName: true, totalAmount: true, invoiceType: true },
+    });
+    const invoices = invoiceRows.map((iv) => ({
+      id: iv.id,
+      invoiceNumber: iv.invoiceNumber,
+      sellerName: iv.supplierName,
+      isHouse: iv.sellerId == null,
+      totalAmount: Number(iv.totalAmount),
+      invoiceType: iv.invoiceType,
+    }));
+
     res.json({
       success: true,
-      data: { ...order, freeSampleName: sampleName, freeSampleImageUrl: sampleImage, deliveryOtp },
+      data: { ...order, items, freeSampleName: sampleName, freeSampleImageUrl: sampleImage, deliveryOtp, invoices },
     });
   } catch (e) {
     sendError(res, e);

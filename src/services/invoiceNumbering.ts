@@ -26,6 +26,8 @@ export function getCurrentFinancialYear(date: Date = new Date()): string {
 
 // ─── Invoice Number Generator ────────────────────────────────────────
 
+// Standard series. Marketplace seller invoices use a per-seller string prefix (e.g. "INV-acme")
+// so each registered supplier keeps its OWN consecutive series under its GSTIN (GST requirement).
 export type InvoicePrefix = "INV" | "CN" | "DN";
 
 /**
@@ -33,9 +35,9 @@ export type InvoicePrefix = "INV" | "CN" | "DN";
  * Uses database-level row locking to prevent duplicates under concurrency.
  *
  * Format: "{PREFIX}/{FY}/{SERIAL}"
- * Example: "INV/2627/00001"
+ * Example: "INV/2627/00001"  ·  per-seller: "INV-acme/2627/00001"
  */
-export async function getNextInvoiceNumber(prefix: InvoicePrefix): Promise<string> {
+export async function getNextInvoiceNumber(prefix: InvoicePrefix | string): Promise<string> {
   const fy = getCurrentFinancialYear();
 
   // Use a Prisma interactive transaction with serializable isolation

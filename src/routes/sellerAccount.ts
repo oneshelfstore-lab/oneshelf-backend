@@ -83,7 +83,7 @@ router.get("/earnings", async (req: SellerRequest, res: Response) => {
     if (!seller) throw new NotFoundError("Seller", req.sellerId ?? "");
 
     const [allTime, unsettled, payouts] = await Promise.all([
-      prisma.subOrder.aggregate({ where: { sellerId: req.sellerId }, _sum: { subtotal: true, commissionAmount: true, netPayable: true }, _count: true }),
+      prisma.subOrder.aggregate({ where: { sellerId: req.sellerId }, _sum: { subtotal: true, commissionAmount: true, tcsAmount: true, netPayable: true }, _count: true }),
       prisma.subOrder.aggregate({ where: { sellerId: req.sellerId, settled: false }, _sum: { netPayable: true }, _count: true }),
       prisma.sellerPayout.findMany({ where: { sellerId: req.sellerId }, orderBy: { paidAt: "desc" }, take: 20 }),
     ]);
@@ -96,6 +96,8 @@ router.get("/earnings", async (req: SellerRequest, res: Response) => {
         orderCount: allTime._count,
         totalGross: Number(allTime._sum.subtotal ?? 0),
         totalCommission: Number(allTime._sum.commissionAmount ?? 0),
+        // GST Sec-52 TCS the platform withholds (gross − commission − tcs = net). 0 until Phase 6.
+        totalTcs: Number(allTime._sum.tcsAmount ?? 0),
         totalNet: Number(allTime._sum.netPayable ?? 0),
         unsettledCount: unsettled._count,
         unsettledNet: Number(unsettled._sum.netPayable ?? 0),
@@ -103,6 +105,7 @@ router.get("/earnings", async (req: SellerRequest, res: Response) => {
           id: p.id,
           grossAmount: Number(p.grossAmount),
           commission: Number(p.commission),
+          tcs: Number(p.tcs),
           netPaid: Number(p.netPaid),
           paidAt: p.paidAt,
           mode: p.mode,

@@ -1048,8 +1048,22 @@ model Invoice {
   gstr1Period           String?
   gstr1Filed            Boolean       @default(false)
 
-  // Link to app order (V2)
-  orderId               String?       @unique
+  // Link to app order (V2). NOT unique any more: a multi-seller marketplace order produces ONE
+  // invoice per seller sub-order, so an Order can own several invoices (queried by orderId).
+  orderId               String?
+  // Marketplace (Phase 6): the per-seller SubOrder this invoice covers (one invoice / SubOrder).
+  // Null for legacy single-invoice orders. @unique → idempotent regeneration keys off the sub-order.
+  subOrderId            String?       @unique
+  // The seller whose supply this invoice bills. Null ⇒ house (store-issued, the pre-Phase-6 path).
+  sellerId              String?
+  // ⚠️ GST/CA: for an EXTERNAL seller the tax invoice is issued under THE SELLER'S identity (their
+  // GSTIN), not the store's — these snapshot the issuing supplier so the PDF/GSTR-1 reflect it.
+  // All null ⇒ the PDF falls back to the store Company (house-seller / legacy path, unchanged).
+  supplierName          String?
+  supplierGstin         String?       @db.VarChar(15)
+  supplierPan           String?       @db.VarChar(10)
+  supplierAddress       String?
+  supplierPhone         String?
 
   createdBy             String
   approvedBy            String?
@@ -1068,6 +1082,8 @@ model Invoice {
   @@index([status])
   @@index([gstr1Period])
   @@index([amountDue])
+  @@index([orderId])
+  @@index([sellerId])
 }
 
 model InvoiceLineItem {

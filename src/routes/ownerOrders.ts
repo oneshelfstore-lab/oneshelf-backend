@@ -60,6 +60,11 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
           createdAt: true, updatedAt: true,
           customer: { select: { id: true, name: true, phone: true } },
           _count: { select: { items: true } },
+          // Per-seller collection progress for the admin "Collected X/Y shops" chip (Phase 5).
+          // Non-house sub-orders are the pickup stops; counts only — no owner action here.
+          subOrders: {
+            select: { id: true, status: true, seller: { select: { name: true, isHouse: true } } },
+          },
         },
       }),
       prisma.order.count({ where }),

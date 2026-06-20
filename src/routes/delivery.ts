@@ -42,6 +42,21 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         shippingAddress: true, shippingPincode: true,
         createdAt: true, updatedAt: true,
         _count: { select: { items: true } },
+        // Per-seller collection manifest for the Phase-5 collection run. House sub-orders
+        // (seller.isHouse) are at the store — shown as "From store", auto-collected; only
+        // non-house stops need a physical pickup.
+        subOrders: {
+          select: {
+            id: true, status: true, collectedAt: true,
+            seller: {
+              select: {
+                id: true, name: true, shopAddress: true, city: true,
+                pincode: true, lat: true, lng: true, phone: true, isHouse: true,
+              },
+            },
+            items: { select: { productName: true, quantity: true } },
+          },
+        },
       },
     });
 
@@ -190,6 +205,18 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
       include: {
         items: { select: { productName: true, quantity: true, lineTotal: true, isLoose: true, stepSize: true, stepUnit: true } },
         address: true,
+        subOrders: {
+          select: {
+            id: true, status: true, collectedAt: true,
+            seller: {
+              select: {
+                id: true, name: true, shopAddress: true, city: true,
+                pincode: true, lat: true, lng: true, phone: true, isHouse: true,
+              },
+            },
+            items: { select: { productName: true, quantity: true } },
+          },
+        },
       },
     });
     if (!order) throw new NotFoundError("Order", req.params.id!);
@@ -225,6 +252,88 @@ router.post("/:id/accept", async (req: FirebaseAuthRequest, res: Response) => {
     notifyOrderStatusChange({ ...order, status: "OUT_FOR_DELIVERY" }).catch(() => {});
 
     res.json({ success: true, data: { orderId: order.id, status: "OUT_FOR_DELIVERY" } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/delivery/orders/:id/collect/:subOrderId — collection-run pickup ──
+// The delivery agent marks one seller's (PACKED) sub-order COLLECTED during the collection run.
+// House sub-orders (the store's own items) sit at the dispatch point and are auto-collected here.
+// When every sub-order is collected, the parent order auto-advances PACKED → OUT_FOR_DELIVERY.
+// House-only orders never call this — they use /accept (no behavior change for the common case).
+router.post("/:id/collect/:subOrderId", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const isOwner = req.appUser!.role === "OWNER";
+    const orderId = req.params.id as string;
+    const subOrderId = req.params.subOrderId as string;
+
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    if (!order) throw new NotFoundError("Order", orderId);
+    if (!isOwner && order.deliveryBoyId !== userId) {
+      throw new AppError(403, "FORBIDDEN", "Not assigned to you");
+    }
+    if (order.status !== "PACKED") {
+      throw new ValidationError(`Can only collect for orders in PACKED status (order is '${order.status}')`);
+    }
+
+    const sub = await prisma.subOrder.findFirst({
+      where: { id: subOrderId, orderId },
+      include: { seller: { select: { isHouse: true } } },
+    });
+    if (!sub) throw new NotFoundError("SubOrder", subOrderId);
+
+    // Idempotent: re-collecting an already-collected stop is a no-op success.
+    if (sub.status !== "COLLECTED") {
+      if (sub.status !== "PACKED") {
+        throw new ValidationError("Seller hasn't packed these items yet");
+      }
+      await prisma.subOrder.update({
+        where: { id: sub.id },
+        data: { status: "COLLECTED", collectedAt: new Date(), collectedById: userId },
+      });
+    }
+
+    // Auto-collect house sub-orders (they're already at the store), then advance the parent order
+    // to OUT_FOR_DELIVERY once every sub-order is COLLECTED/CANCELLED.
+    const all = await prisma.subOrder.findMany({
+      where: { orderId },
+      select: { id: true, status: true, seller: { select: { isHouse: true } } },
+    });
+    const houseUncollected = all.filter(
+      (s) => s.seller.isHouse && s.status !== "COLLECTED" && s.status !== "CANCELLED",
+    );
+    if (houseUncollected.length > 0) {
+      await prisma.subOrder.updateMany({
+        where: { id: { in: houseUncollected.map((s) => s.id) } },
+        data: { status: "COLLECTED", collectedAt: new Date(), collectedById: userId },
+      });
+      houseUncollected.forEach((s) => { s.status = "COLLECTED"; });
+    }
+
+    let orderStatus: string = order.status;
+    const allDone = all.every((s) => s.status === "COLLECTED" || s.status === "CANCELLED");
+    if (allDone) {
+      await prisma.order.update({ where: { id: orderId }, data: { status: "OUT_FOR_DELIVERY" } });
+      orderStatus = "OUT_FOR_DELIVERY";
+      notifyOrderStatusChange({ ...order, status: "OUT_FOR_DELIVERY" }).catch(() => {});
+    }
+
+    const pickupStops = all.filter((s) => !s.seller.isHouse);
+    const collectedStops = pickupStops.filter((s) => s.status === "COLLECTED").length;
+
+    res.json({
+      success: true,
+      data: {
+        orderId,
+        subOrderId,
+        subOrderStatus: "COLLECTED",
+        orderStatus,
+        collectedStops,
+        totalStops: pickupStops.length,
+      },
+    });
   } catch (e) {
     sendError(res, e);
   }

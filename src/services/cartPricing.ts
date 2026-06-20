@@ -37,6 +37,11 @@ export interface CartTotals {
   // Standing loyalty (tier) member discount applied to this cart, and the tier key that earned it.
   loyaltyDiscount: number;
   loyaltyTier: string | null;
+  // Store credit (Phase 2) — a payment tender applied AFTER GST. walletApplied reduces totalAmount
+  // (the amount due, never the taxable base); walletAvailable is the user's current balance (for
+  // the checkout toggle). Both 0 for anonymous quotes (no userId).
+  walletApplied: number;
+  walletAvailable: number;
 }
 
 interface CartItemWithVariant {
@@ -78,6 +83,7 @@ export async function calculateCartTotals(
   couponCode?: string | null,
   userId?: string | null,
   fulfillmentType?: string | null,
+  walletCredit?: number | null,
 ): Promise<CartTotals> {
   const lines: CartLineItem[] = [];
 
@@ -189,7 +195,22 @@ export async function calculateCartTotals(
   const totalSgst = round2(lines.reduce((sum, l) => sum + l.sgst, 0));
   const totalTax = round2(totalCgst + totalSgst);
 
-  const totalAmount = round2(afterDiscount + deliveryCharge);
+  const grandTotal = round2(afterDiscount + deliveryCharge);
+
+  // Store credit (Phase 2) — a payment TENDER, applied after GST. It reduces the amount DUE (never
+  // the taxable base), so GST is unchanged. Clamp to the user's balance and the grand total (a tender
+  // can cover the whole bill incl. delivery). savedAmount is NOT increased — store credit is the
+  // customer's own money being returned, not a discount.
+  let walletApplied = 0;
+  let walletAvailable = 0;
+  if (userId) {
+    const u = await prisma.user.findUnique({ where: { id: userId }, select: { walletBalance: true } });
+    walletAvailable = Number(u?.walletBalance ?? 0);
+    if (walletCredit && walletCredit > 0) {
+      walletApplied = round2(Math.min(walletCredit, walletAvailable, grandTotal));
+    }
+  }
+  const totalAmount = round2(grandTotal - walletApplied);
 
   // Savings vs MRP. Three honest components:
   //  1. Per-line MRP gap: Σ max(0, mrp − effectiveUnitPrice) × qty (covers bulk pricing too).
@@ -216,5 +237,7 @@ export async function calculateCartTotals(
     savedAmount,
     loyaltyDiscount,
     loyaltyTier,
+    walletApplied,
+    walletAvailable,
   };
 }

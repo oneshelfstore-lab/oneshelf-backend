@@ -17,6 +17,7 @@ import { createRazorpayOrder, verifyPaymentSignature, isRazorpayConfigured, refu
 import { notifyNewOrder, notifyOrderStatusChange } from "../services/fcmNotifier.js";
 import { generateOrderInvoice, syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { generateInvoicePdf } from "../services/pdfGenerator.js";
+import { refundWalletOnCancel } from "../services/referralRewards.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -46,13 +47,15 @@ const placeOrderSchema = z.object({
   couponCode: z.string().max(20).optional().nullable(),
   notes: z.string().max(500).optional().nullable(),
   deliverySlot: z.string().max(60).optional().nullable(),
+  // Store credit the customer chose to apply (clamped server-side to balance + grand total).
+  walletCredit: z.number().min(0).optional().nullable(),
 });
 
 router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const parsed = placeOrderSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid order data", parsed.error.errors);
-    const { addressId, fulfillmentType, paymentMethod, couponCode, notes, deliverySlot } = parsed.data;
+    const { addressId, fulfillmentType, paymentMethod, couponCode, notes, deliverySlot, walletCredit } = parsed.data;
     const userId = req.appUser!.id;
 
     // Idempotency: if the client sends an Idempotency-Key and we already created an
@@ -105,11 +108,14 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
 
     // Calculate totals (reuses the cart pricing service). Pass fulfillmentType so
     // pickup orders are not charged delivery (matches the /cart/quote preview exactly).
-    const totals = await calculateCartTotals(cartItems as any, couponCode, userId, fulfillmentType);
+    const totals = await calculateCartTotals(cartItems as any, couponCode, userId, fulfillmentType, walletCredit);
 
     // Determine payment status. Every order starts PENDING; online orders flip to
     // PAID only after Razorpay verification in /:id/pay (which also arms the OTP).
-    const initialPaymentStatus = "PENDING";
+    // Exception: if store credit covers the WHOLE bill (₹0 due) on an online order, there's nothing
+    // to charge via Razorpay → settle it as PAID right at placement.
+    const fullyWalletPaid = paymentMethod !== "COD" && totals.totalAmount === 0 && totals.walletApplied > 0;
+    const initialPaymentStatus = fullyWalletPaid ? "PAID" : "PENDING";
     const needsOtp = orderRequiresOtp(paymentMethod, initialPaymentStatus, totals.totalAmount);
 
     // Honest ETA (range or chosen slot) — computed once, stored on the order, and echoed
@@ -204,6 +210,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           totalAmount: totals.totalAmount,
           savedAmount: totals.savedAmount,
           couponCode: totals.couponCode,
+          walletApplied: totals.walletApplied,
           estimatedReadyAt: eta.estimatedReadyAt,
           deliveryOtpRequired: needsOtp,
           notes,
@@ -255,6 +262,30 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
             data: { couponId: coupon.id, userId, orderId: created.id },
           });
         }
+      }
+
+      // Debit store credit (payment tender). The guarded decrement is the double-spend defense — a
+      // concurrent checkout can't spend the same balance twice (count === 0 ⇒ the balance changed
+      // since the quote ⇒ reject). The WalletTransaction @@unique([orderId, type]) is the retry guard.
+      if (totals.walletApplied > 0) {
+        const dec = await tx.user.updateMany({
+          where: { id: userId, walletBalance: { gte: totals.walletApplied } },
+          data: { walletBalance: { decrement: totals.walletApplied } },
+        });
+        if (dec.count === 0) {
+          throw new AppError(400, "WALLET_INSUFFICIENT", "Your store credit changed. Please review your order and try again.");
+        }
+        const fresh = await tx.user.findUnique({ where: { id: userId }, select: { walletBalance: true } });
+        await tx.walletTransaction.create({
+          data: {
+            userId,
+            amount: -totals.walletApplied,
+            type: "ORDER_DEBIT",
+            balanceAfter: fresh!.walletBalance,
+            orderId: created.id,
+            note: "Paid with store credit",
+          },
+        });
       }
 
       // Clear active cart
@@ -331,9 +362,10 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     // Roll a possible free sample (gated by eligibility/chance/budget). Best-effort.
     try { await rollFreeSample(order.id); } catch (e) { console.error("free sample roll failed:", e); }
 
-    // Create Razorpay order for online payment
+    // Create Razorpay order for online payment. A fully-wallet-paid online order (₹0 due) skips
+    // Razorpay entirely — it's already settled as PAID above.
     let razorpayOrderId: string | null = null;
-    if (paymentMethod === "ONLINE" || paymentMethod === "UPI") {
+    if ((paymentMethod === "ONLINE" || paymentMethod === "UPI") && totals.totalAmount > 0) {
       if (isRazorpayConfigured()) {
         const amountInPaise = Math.round(totals.totalAmount * 100);
         const rpOrder = await createRazorpayOrder(amountInPaise, order.orderNumber);
@@ -345,8 +377,9 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       }
     }
 
-    // Generate invoice for COD orders immediately (online orders get invoiced after payment)
-    if (paymentMethod === "COD") {
+    // Generate invoice for COD orders immediately (online orders get invoiced after payment).
+    // A fully-wallet-paid online order is already settled at placement → invoice it now too.
+    if (paymentMethod === "COD" || fullyWalletPaid) {
       generateOrderInvoice(order.id).catch((e) => console.error("Invoice generation failed:", e));
     }
 
@@ -484,6 +517,8 @@ router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
 
     notifyOrderStatusChange({ ...order, status: "CANCELLED" }).catch(() => {});
     syncInvoicePaymentStatus(order.id).catch((e) => console.error("Invoice sync failed:", e));
+    // Return any store credit that was applied to this order (idempotent; no-op if none).
+    refundWalletOnCancel(order.id).catch((e) => console.error("wallet refund failed:", e));
 
     res.json({ success: true, message: "Order cancelled", data: { orderId: order.id, status: "CANCELLED" } });
   } catch (e) {

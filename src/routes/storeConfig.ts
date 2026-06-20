@@ -25,6 +25,12 @@ const updateSchema = z.object({
   operatingHoursStart: z.string().max(10).optional().nullable(),
   operatingHoursEnd: z.string().max(10).optional().nullable(),
   deliveryRadius: z.number().min(0).optional().nullable(),
+  // Referral wallet (Phase 2) — owner-tunable reward economics.
+  referralEnabled: z.boolean().optional(),
+  referralRewardAmount: z.number().int().min(0).max(100000).optional(),
+  referralWelcomeAmount: z.number().int().min(0).max(100000).optional(),
+  referralMinOrder: z.number().int().min(0).max(100000).optional(),
+  referralWelcomeExpiryDays: z.number().int().min(1).max(365).optional(),
 });
 
 // GET /api/app/config — public, no auth

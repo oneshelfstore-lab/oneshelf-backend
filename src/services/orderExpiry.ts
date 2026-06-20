@@ -1,4 +1,5 @@
 import prisma from "../lib/prisma.js";
+import { refundWalletOnCancel } from "./referralRewards.js";
 
 // Online/UPI orders decrement stock at placement (to hold it during payment). If the
 // customer never completes payment (abandons the Razorpay sheet, app crash), that stock
@@ -58,6 +59,10 @@ export async function expireStaleUnpaidOrders(): Promise<number> {
         });
         expired++;
       });
+      // If this order was auto-cancelled and had store credit applied (a partly-wallet-paid online
+      // order the customer abandoned), return that credit. Safe to call unconditionally — it verifies
+      // status === CANCELLED internally and is idempotent.
+      await refundWalletOnCancel(order.id);
     } catch (err) {
       console.error(JSON.stringify({ level: "error", msg: "order-expiry failed", orderId: order.id, err: String(err) }));
     }

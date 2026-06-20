@@ -4,6 +4,7 @@ import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { requireRole } from "../middleware/auth.js";
 import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orderInvoice.js";
+import { creditReferrerOnFirstDelivered, refundWalletOnCancel } from "../services/referralRewards.js";
 
 /**
  * Admin order management for the React dashboard (JWT auth).
@@ -128,6 +129,13 @@ router.put("/:id/status", requireRole("OWNER", "ACCOUNTANT", "BILLING_CLERK") as
     }
     if (newStatus === "DELIVERED" && !order.invoiceId) {
       generateOrderInvoice(order.id).catch((e) => console.error("Invoice generation failed:", e));
+    }
+    // Referral wallet hooks (idempotent + best-effort).
+    if (newStatus === "DELIVERED") {
+      creditReferrerOnFirstDelivered(order.id).catch((e) => console.error("referral credit failed:", e));
+    }
+    if (newStatus === "CANCELLED") {
+      refundWalletOnCancel(order.id).catch((e) => console.error("wallet refund failed:", e));
     }
 
     res.json({ success: true, data: { orderId: order.id, status: newStatus } });

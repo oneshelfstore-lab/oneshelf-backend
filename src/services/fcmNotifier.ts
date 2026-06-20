@@ -162,6 +162,17 @@ export async function notifyBroadcast(topic: string, title: string, body: string
   await sendToTopic(topic, { type: "broadcast", title, body });
 }
 
+export async function notifyReferralReward(userId: string, amount: number) {
+  const tokens = await getUserTokens(userId);
+  if (tokens.length === 0) return;
+  await sendToTokens(tokens, {
+    type: "referral_reward",
+    amount: String(amount),
+    title: "You earned store credit!",
+    body: `Your friend's first order was delivered — Rs.${Math.round(amount)} added to your wallet.`,
+  });
+}
+
 export async function notifyAbandonedCart(
   userId: string,
   info: { itemCount: number; cartValue: number; topItemName: string },

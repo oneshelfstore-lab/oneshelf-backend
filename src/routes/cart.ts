@@ -105,18 +105,21 @@ const quoteSchema = z.object({
     .max(200),
   couponCode: z.string().max(40).optional().nullable(),
   fulfillmentType: z.enum(["DELIVERY", "PICKUP"]).optional().nullable(),
+  // Store credit the customer wants to apply (clamped server-side to balance + grand total).
+  walletCredit: z.number().min(0).optional().nullable(),
 });
 
 router.post("/quote", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const parsed = quoteSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
-    const { items, couponCode, fulfillmentType } = parsed.data;
+    const { items, couponCode, fulfillmentType, walletCredit } = parsed.data;
     const userId = req.appUser!.id;
 
     const emptyTotals = {
       items: [], subtotal: 0, discount: 0, couponCode: null, deliveryCharge: 0,
       taxableValue: 0, totalCgst: 0, totalSgst: 0, totalTax: 0, totalAmount: 0,
+      walletApplied: 0, walletAvailable: 0,
     };
 
     if (items.length === 0) {
@@ -139,7 +142,7 @@ router.post("/quote", async (req: FirebaseAuthRequest, res: Response) => {
       .map((i) => ({ id: i.variantId, variantId: i.variantId, quantity: i.quantity, variant: byId.get(i.variantId)! }));
 
     const totals = cartItems.length > 0
-      ? await calculateCartTotals(cartItems as any, couponCode, userId, fulfillmentType)
+      ? await calculateCartTotals(cartItems as any, couponCode, userId, fulfillmentType, walletCredit)
       : emptyTotals;
 
     res.json({ success: true, data: totals });

@@ -233,6 +233,20 @@ enum SubOrderStatus {
   CANCELLED
 }
 
+// ─── Enums (V4 — referral wallet / store credit) ───────────────────
+
+enum WalletTxnType {
+  REFERRAL_CREDIT   // referrer earns when their referee's first order is delivered
+  ORDER_DEBIT       // store credit spent at checkout
+  ORDER_REFUND      // credit returned when a wallet-paying order is cancelled
+  ADJUSTMENT        // manual owner correction
+}
+
+enum ReferralStatus {
+  PENDING    // code applied + welcome coupon minted; referrer not yet paid
+  REWARDED   // referee's first order delivered → referrer credited
+}
+
 // ─── 0. User ────────────────────────────────────────────────────────
 
 model User {
@@ -266,6 +280,11 @@ model User {
   referredBy       User?     @relation("UserReferrals", fields: [referredById], references: [id])
   referredUsers    User[]    @relation("UserReferrals")
 
+  // Referral wallet / store credit (Phase 2). Denormalized spendable balance — the source of
+  // truth for the guarded atomic decrement at checkout. Every mutation also writes a
+  // WalletTransaction ledger row in the SAME db transaction (balance never drifts from the ledger).
+  walletBalance    Decimal   @default(0) @db.Decimal(10, 2)
+
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
@@ -280,6 +299,9 @@ model User {
   complaints         Complaint[]
   quoteRequests      QuoteRequest[]
   sellerAccount      Seller?          @relation("SellerOwner")
+  walletTxns         WalletTransaction[]
+  referralsMade      Referral[]       @relation("Referrer")
+  referralReceived   Referral?        @relation("Referee")
 
   @@index([phone])
 }
@@ -626,6 +648,46 @@ model CouponRedemption {
   @@index([userId])
 }
 
+// ─── Referral wallet (Phase 2 — store-credit ledger) ─────────────────
+// Append-only ledger backing User.walletBalance. Every balance mutation writes one row in the SAME
+// db transaction, snapshotting balanceAfter so history is self-verifying. @@unique([orderId, type])
+// makes order-linked debits/refunds idempotent (≤1 per order per type); referral-credit rows have a
+// null orderId and are unconstrained (Postgres treats NULLs as distinct in a unique index).
+model WalletTransaction {
+  id           String        @id @default(cuid())
+  userId       String
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amount       Decimal       @db.Decimal(10, 2)   // signed: +credit / −debit
+  type         WalletTxnType
+  balanceAfter Decimal       @db.Decimal(10, 2)
+  orderId      String?       // set for ORDER_DEBIT / ORDER_REFUND
+  referralId   String?       // set for REFERRAL_CREDIT
+  note         String?
+  createdAt    DateTime      @default(now())
+
+  @@unique([orderId, type])
+  @@index([userId, createdAt])
+}
+
+// One referral event per referee (refereeId @unique). Carries the reward state machine so the
+// referrer is credited exactly once: PENDING→REWARDED via a guarded update + qualifyingOrderId @unique.
+model Referral {
+  id                String         @id @default(cuid())
+  referrerId        String
+  referrer          User           @relation("Referrer", fields: [referrerId], references: [id])
+  refereeId         String         @unique
+  referee           User           @relation("Referee", fields: [refereeId], references: [id])
+  status            ReferralStatus @default(PENDING)
+  welcomeCouponCode String?
+  rewardAmount      Decimal?       @db.Decimal(10, 2)
+  qualifyingOrderId String?        @unique
+  rewardedAt        DateTime?
+  createdAt         DateTime       @default(now())
+
+  @@index([referrerId])
+  @@index([status])
+}
+
 // ─── Scratch reward (Delight Phase 3A) ───────────────────────────────
 // One scratch card per order. Outcome is rolled server-side at placement (idempotent, keyed by
 // orderId) so re-opening the celebration screen can't re-roll. A win mints a single-use coupon
@@ -691,6 +753,9 @@ model Order {
   // are immutable and truthful. 0 for pre-migration orders.
   savedAmount           Decimal            @default(0) @db.Decimal(12, 2)
   couponCode            String?
+  // Store credit applied as a payment tender (Phase 2): reduces the amount DUE after GST, does NOT
+  // change taxableValue/totalTax. Refunded to the wallet if the order is cancelled.
+  walletApplied         Decimal            @default(0) @db.Decimal(10, 2)
 
   // Delivery
   deliveryBoyId         String?
@@ -860,6 +925,15 @@ model StoreConfig {
   sampleChancePct           Int     @default(12)
   sampleMaxValue            Int     @default(50)
   monthlySampleBudget       Int     @default(500)
+  // Referral wallet (Phase 2 — refer & earn). referralEnabled is the master gate.
+  // referralRewardAmount = ₹ store credit the referrer earns when their referee's first order is
+  // delivered; referralWelcomeAmount = ₹ off the referee's welcome coupon (min order
+  // referralMinOrder, valid for referralWelcomeExpiryDays).
+  referralEnabled           Boolean @default(true)
+  referralRewardAmount      Int     @default(50)
+  referralWelcomeAmount     Int     @default(50)
+  referralMinOrder          Int     @default(199)
+  referralWelcomeExpiryDays Int     @default(30)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 }

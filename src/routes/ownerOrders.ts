@@ -10,6 +10,7 @@ import {
 import { notifyOrderStatusChange, notifyDeliveryAssignment } from "../services/fcmNotifier.js";
 import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orderInvoice.js";
 import { markSamplePacked } from "../services/freeSample.js";
+import { creditReferrerOnFirstDelivered, refundWalletOnCancel } from "../services/referralRewards.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -183,6 +184,14 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
     }
 
     notifyOrderStatusChange({ ...order, status: newStatus }).catch(() => {});
+    // Referral wallet hooks (idempotent + best-effort). Credit the referrer on the referee's first
+    // delivery; refund any store credit if the order is cancelled.
+    if (newStatus === "DELIVERED") {
+      creditReferrerOnFirstDelivered(order.id).catch((e) => console.error("referral credit failed:", e));
+    }
+    if (newStatus === "CANCELLED") {
+      refundWalletOnCancel(order.id).catch((e) => console.error("wallet refund failed:", e));
+    }
 
     res.json({ success: true, data: { orderId: order.id, status: newStatus } });
   } catch (e) {

@@ -11,6 +11,7 @@ import { formatProductForApp } from "./catalog.js";
 import { computeUserSavings } from "../services/savings.js";
 import { computeUserLoyalty } from "../services/loyalty.js";
 import { notifyNewComplaint, notifyNewQuoteRequest } from "../services/fcmNotifier.js";
+import { mintReferralWelcomeCoupon } from "../services/referralRewards.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -362,22 +363,19 @@ router.delete("/favorites/:productId", async (req: FirebaseAuthRequest, res: Res
 // Referral program (refer & earn)
 // ═══════════════════════════════════════════════════════════════════════
 
-// Both referrer and referee get this. Surfaced to the app for display copy.
-const REFERRAL_REWARD_LABEL = "₹50 off";
-
 function genReferralCode(name: string): string {
   const base = (name || "ONE").replace(/[^a-zA-Z]/g, "").toUpperCase().slice(0, 4) || "ONE";
   const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
   return `${base}${rand}`;
 }
 
-// GET /api/app/me/referral → the user's code (generated on first access) + stats
+// GET /api/app/me/referral → the user's code (generated on first access) + stats + wallet
 router.get("/referral", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { referralCode: true },
+      select: { referralCode: true, walletBalance: true },
     });
 
     let code = user?.referralCode ?? null;
@@ -397,11 +395,65 @@ router.get("/referral", async (req: FirebaseAuthRequest, res: Response) => {
       }
     }
 
-    const referredCount = await prisma.user.count({ where: { referredById: userId } });
+    const [referredCount, earned, cfg] = await Promise.all([
+      prisma.user.count({ where: { referredById: userId } }),
+      prisma.walletTransaction.aggregate({
+        _sum: { amount: true },
+        where: { userId, type: "REFERRAL_CREDIT" },
+      }),
+      prisma.storeConfig.findFirst(),
+    ]);
+
+    const getAmount = cfg?.referralRewardAmount ?? 50;   // referrer earns (store credit)
+    const giveAmount = cfg?.referralWelcomeAmount ?? 50;  // referee gets (welcome coupon)
 
     res.json({
       success: true,
-      data: { code, referredCount, reward: REFERRAL_REWARD_LABEL },
+      data: {
+        code,
+        referredCount,
+        reward: `₹${giveAmount} off`,
+        walletBalance: Number(user?.walletBalance ?? 0),
+        totalEarned: Number(earned._sum.amount ?? 0),
+        giveAmount,
+        getAmount,
+      },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// GET /api/app/me/wallet → store-credit balance + recent transaction history
+router.get("/wallet", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const [user, txns] = await Promise.all([
+      prisma.user.findUnique({ where: { id: userId }, select: { walletBalance: true } }),
+      prisma.walletTransaction.findMany({
+        where: { userId },
+        orderBy: { createdAt: "desc" },
+        take: 100,
+        select: {
+          id: true, amount: true, type: true, balanceAfter: true,
+          note: true, orderId: true, createdAt: true,
+        },
+      }),
+    ]);
+    res.json({
+      success: true,
+      data: {
+        balance: Number(user?.walletBalance ?? 0),
+        transactions: txns.map((t) => ({
+          id: t.id,
+          amount: Number(t.amount),
+          type: t.type,
+          balanceAfter: Number(t.balanceAfter),
+          note: t.note,
+          orderId: t.orderId,
+          createdAt: t.createdAt.getTime(),
+        })),
+      },
     });
   } catch (e) {
     sendError(res, e);
@@ -432,12 +484,48 @@ router.post("/referral/apply", async (req: FirebaseAuthRequest, res: Response) =
     if (!referrer) throw new NotFoundError("Referral code", code);
     if (referrer.id === userId) throw new ValidationError("You can't use your own code.");
 
-    await prisma.user.update({ where: { id: userId }, data: { referredById: referrer.id } });
+    const cfg = await prisma.storeConfig.findFirst();
+    const welcomeAmount = cfg?.referralWelcomeAmount ?? 50;
+    const minOrder = cfg?.referralMinOrder ?? 199;
+    const expiryDays = cfg?.referralWelcomeExpiryDays ?? 30;
+    const referralEnabled = cfg?.referralEnabled ?? true;
+
+    // Link the referee → referrer (one-time), mint the welcome coupon, and open the Referral record
+    // (PENDING) that gates the referrer's later store-credit payout — all atomically.
+    const welcome = await prisma.$transaction(async (tx) => {
+      await tx.user.update({ where: { id: userId }, data: { referredById: referrer.id } });
+
+      const minted = referralEnabled
+        ? await mintReferralWelcomeCoupon(tx, { amount: welcomeAmount, minOrder, expiryDays })
+        : null;
+
+      await tx.referral.create({
+        data: {
+          referrerId: referrer.id,
+          refereeId: userId,
+          status: "PENDING",
+          welcomeCouponCode: minted?.code ?? null,
+        },
+      });
+      return minted;
+    });
 
     res.json({
       success: true,
-      message: "Referral applied! Enjoy your reward.",
-      data: { reward: REFERRAL_REWARD_LABEL },
+      message: welcome
+        ? `Welcome reward unlocked — ₹${welcome.amount} off your first order!`
+        : "Referral applied!",
+      data: {
+        reward: `₹${welcomeAmount} off`,
+        welcomeCoupon: welcome
+          ? {
+              code: welcome.code,
+              amount: welcome.amount,
+              minOrder: welcome.minOrder,
+              expiresAt: welcome.expiresAt.toISOString(),
+            }
+          : null,
+      },
     });
   } catch (e) {
     sendError(res, e);

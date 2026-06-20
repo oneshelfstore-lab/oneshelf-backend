@@ -211,6 +211,12 @@ enum QuoteStatus {
   FULFILLED
 }
 
+enum PartnerApplicationStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
 // ─── Enums (V3 — multi-seller marketplace) ─────────────────────────
 
 enum SellerStatus {
@@ -419,6 +425,30 @@ model QuoteRequest {
 
   @@index([userId])
   @@index([status])
+}
+
+// ─── PartnerApplication ("Partner with us" — seller / delivery onboarding lead) ──
+// Submitted UNAUTHENTICATED from the login page, so it deliberately does NOT link to a
+// User row (the applicant may not have an account yet — phone is the only identity we
+// have). The owner reviews these in their inbox and completes onboarding through the
+// existing marketplace-seller / delivery-agent flows on approval.
+model PartnerApplication {
+  id           String                   @id @default(cuid())
+  kind         String                   @default("SELLER") // "SELLER" | "DELIVERY"
+  businessName String
+  contactName  String
+  phone        String
+  email        String?
+  gstin        String?
+  category     String?
+  message      String                   @default("")
+  status       PartnerApplicationStatus @default(PENDING)
+  reviewNote   String?
+  createdAt    DateTime                 @default(now())
+  reviewedAt   DateTime?
+
+  @@index([status])
+  @@index([phone])
 }
 
 // ─── 4. ProductVariant (the sellable SKU — owns size, price, stock) ──

@@ -42,8 +42,8 @@ export async function expireStaleUnpaidOrders(): Promise<number> {
         for (const item of order.items) {
           if (!item.variantId) continue;
           const restore = item.isLoose && item.stepSize
-            ? item.quantity * Number(item.stepSize)
-            : item.quantity;
+            ? Number(item.quantity) * Number(item.stepSize)
+            : Number(item.quantity);
           await tx.productVariant.update({
             where: { id: item.variantId },
             data: { stock: { increment: restore } },

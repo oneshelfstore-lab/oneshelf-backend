@@ -99,7 +99,7 @@ const quoteSchema = z.object({
     .array(
       z.object({
         variantId: z.string().min(1),
-        quantity: z.number().int().min(1).max(10000),
+        quantity: z.number().positive().max(10000),
       }),
     )
     .max(200),
@@ -155,7 +155,7 @@ router.post("/quote", async (req: FirebaseAuthRequest, res: Response) => {
 
 const addSchema = z.object({
   variantId: z.string().min(1),
-  quantity: z.number().int().min(1).max(10000),
+  quantity: z.number().positive().max(10000),
 });
 
 router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
@@ -192,7 +192,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     });
 
     if (existing) {
-      const newQty = existing.quantity + quantity;
+      const newQty = Number(existing.quantity) + quantity;
       await prisma.cartItem.update({
         where: { id: existing.id },
         data: { quantity: newQty },
@@ -216,7 +216,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
 // ─── PUT /api/app/cart/:itemId — update quantity ────────────────────
 
 const updateSchema = z.object({
-  quantity: z.number().int().min(1).max(10000),
+  quantity: z.number().positive().max(10000),
 });
 
 router.put("/:itemId", async (req: FirebaseAuthRequest, res: Response) => {
@@ -299,9 +299,9 @@ router.post("/:itemId/move-to-cart", async (req: FirebaseAuthRequest, res: Respo
     const packageSize = Number(item.variant.packageSize);
 
     if (isLoose) {
-      if (item.quantity * packageSize > stockNum) throw new ValidationError("Item is now out of stock");
+      if (Number(item.quantity) * packageSize > stockNum) throw new ValidationError("Item is now out of stock");
     } else {
-      if (item.quantity > stockNum) throw new ValidationError("Item is now out of stock");
+      if (Number(item.quantity) > stockNum) throw new ValidationError("Item is now out of stock");
     }
 
     await prisma.cartItem.update({ where: { id: item.id }, data: { savedForLater: false } });

@@ -283,7 +283,7 @@ router.post("/:orderId/items/:itemId/substitute", async (req: FirebaseAuthReques
 
     const subUnitPrice = Number(subVariant.sellingPrice);
     const originalUnitPrice = Number(item.unitPrice);
-    const priceDelta = (subUnitPrice - originalUnitPrice) * item.quantity;
+    const priceDelta = (subUnitPrice - originalUnitPrice) * Number(item.quantity);
 
     await prisma.orderItem.update({
       where: { id: item.id },

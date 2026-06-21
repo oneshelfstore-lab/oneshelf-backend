@@ -139,7 +139,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       for (const item of cartItems) {
         const isLoose = isLooseType(item.variant.product.productType);
         const packageSize = Number(item.variant.packageSize);
-        const needed = isLoose ? item.quantity * packageSize : item.quantity;
+        const needed = isLoose ? Number(item.quantity) * packageSize : Number(item.quantity);
 
         const result = await tx.productVariant.updateMany({
           where: { id: item.variantId, isActive: true, stock: { gte: needed } },
@@ -162,7 +162,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         const converted = toAppFormat(item.variant, isLoose);
         const pricingLine = totals.items.find(l => l.variantId === item.variantId);
         const effectivePrice = pricingLine?.effectiveUnitPrice ?? converted.sellingPrice;
-        const lineTotal = pricingLine?.lineTotal ?? (effectivePrice * item.quantity);
+        const lineTotal = pricingLine?.lineTotal ?? (effectivePrice * Number(item.quantity));
 
         return {
           variantId: item.variantId,
@@ -844,8 +844,8 @@ router.post("/:orderId/items/:itemId/substitute/respond", async (req: FirebaseAu
       // Decrement stock for the substitute variant.
       if (item.substituteVariantId) {
         const decrementBy = item.isLoose && item.stepSize
-          ? item.quantity * Number(item.stepSize)
-          : item.quantity;
+          ? Number(item.quantity) * Number(item.stepSize)
+          : Number(item.quantity);
         const updated = await tx.productVariant.updateMany({
           where: { id: item.substituteVariantId, stock: { gte: decrementBy } },
           data: { stock: { decrement: decrementBy } },
@@ -858,8 +858,8 @@ router.post("/:orderId/items/:itemId/substitute/respond", async (req: FirebaseAu
       // Restore stock for the original variant.
       if (item.variantId) {
         const restoreBy = item.isLoose && item.stepSize
-          ? item.quantity * Number(item.stepSize)
-          : item.quantity;
+          ? Number(item.quantity) * Number(item.stepSize)
+          : Number(item.quantity);
         await tx.productVariant.update({
           where: { id: item.variantId },
           data: { stock: { increment: restoreBy } },
@@ -876,7 +876,7 @@ router.post("/:orderId/items/:itemId/substitute/respond", async (req: FirebaseAu
           productName: item.substituteProductName ?? item.productName,
           imageUrl: item.substituteImageUrl,
           unitPrice: item.substituteUnitPrice ?? item.unitPrice,
-          lineTotal: Number(item.substituteUnitPrice ?? item.unitPrice) * item.quantity,
+          lineTotal: Number(item.substituteUnitPrice ?? item.unitPrice) * Number(item.quantity),
         },
       });
 

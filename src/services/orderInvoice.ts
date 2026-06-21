@@ -43,7 +43,7 @@ type OrderItemRow = {
   productName: string;
   hsnCode: string | null;
   unitPrice: any;
-  quantity: number;
+  quantity: any; // Prisma Decimal at runtime — wrapped with Number(...) where used numerically
   gstRate: any;
   isLoose: boolean;
   stepUnit: string | null;
@@ -103,7 +103,7 @@ async function createOneInvoice(opts: {
   const lineItemTaxResults: LineItemTaxResult[] = items.map((item) =>
     calculateLineItemTax({
       unitPrice: Number(item.unitPrice),
-      quantity: item.quantity,
+      quantity: Number(item.quantity),
       gstRate: Number(item.gstRate),
       cessRate: 0,
       isTaxInclusive: true,

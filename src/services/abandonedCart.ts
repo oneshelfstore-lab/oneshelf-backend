@@ -52,7 +52,7 @@ export async function sweepAbandonedCarts(): Promise<number> {
       if (inStockItems.length === 0) continue;
 
       const cartValue = inStockItems.reduce(
-        (sum, ci) => sum + ci.quantity * Number(ci.variant.sellingPrice),
+        (sum, ci) => sum + Number(ci.quantity) * Number(ci.variant.sellingPrice),
         0,
       );
       if (cartValue < MIN_CART_VALUE) continue;

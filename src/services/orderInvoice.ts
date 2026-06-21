@@ -304,6 +304,178 @@ export async function generateOrderInvoice(orderId: string): Promise<string | nu
 }
 
 /**
+ * Generates ONE consolidated GST tax invoice for a monthly subscription statement, aggregating all
+ * of the statement's DELIVERED MONTHLY orders' items into a single house-issued invoice. Identical
+ * lines (same variant + unit price + GST rate) are collapsed (a month of daily milk → "Milk 500ml ×30").
+ *
+ * ⚠️ GST/CA: this is house-billed (store GSTIN) and consolidates a month of GST-inclusive lines into
+ * one tax invoice. If a subscription ever covers an EXTERNAL seller's product, those lines are still
+ * billed here under the store's GSTIN (v1 limitation — subscriptions are house products in practice).
+ * Confirm the consolidated-invoice treatment + invoice presentation with the CA.
+ *
+ * Idempotent: returns the existing invoice id if the statement already has one.
+ */
+export async function generateStatementInvoice(statementId: string): Promise<string | null> {
+  const statement = await prisma.subscriptionStatement.findUnique({
+    where: { id: statementId },
+    include: { orders: { include: { items: true } } },
+  });
+  if (!statement) return null;
+  if (statement.invoiceId) return statement.invoiceId; // idempotent
+  if (statement.orders.length === 0) return null;
+
+  const customerId = await ensureBillingCustomer(statement.customerId);
+  const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+  if (!customer) throw new Error("Failed to resolve billing customer");
+
+  // Consolidate identical lines across the month (variant + unit price + GST rate).
+  const lineMap = new Map<string, OrderItemRow & { quantity: number }>();
+  for (const order of statement.orders) {
+    for (const it of order.items) {
+      const key = `${it.variantId}|${Number(it.unitPrice)}|${Number(it.gstRate)}`;
+      const existing = lineMap.get(key);
+      if (existing) {
+        existing.quantity = +(existing.quantity + Number(it.quantity)).toFixed(6);
+      } else {
+        lineMap.set(key, { ...(it as OrderItemRow), quantity: Number(it.quantity) });
+      }
+    }
+  }
+  const items = [...lineMap.values()];
+
+  const lineItemTaxResults: LineItemTaxResult[] = items.map((item) =>
+    calculateLineItemTax({
+      unitPrice: Number(item.unitPrice),
+      quantity: Number(item.quantity),
+      gstRate: Number(item.gstRate),
+      cessRate: 0,
+      isTaxInclusive: true,
+    }),
+  );
+  const totals = calculateInvoiceTotals(lineItemTaxResults);
+  const invoiceNumber = await getNextInvoiceNumber("INV"); // house series
+  const supplyType = customer.gstin ? "B2B" : "B2CS";
+  const allExempt = lineItemTaxResults.every((r) => r.gstRate === 0);
+  const invoiceType = allExempt ? "BILL_OF_SUPPLY" : "TAX_INVOICE";
+  const firstOrder = statement.orders[0];
+
+  const invoice = await prisma.invoice.create({
+    data: {
+      invoiceNumber,
+      invoiceDate: new Date(),
+      invoiceType: invoiceType as any,
+      supplyType: supplyType as any,
+      orderId: null,
+      subOrderId: null,
+      sellerId: null, // house-billed consolidated statement
+      ...HOUSE_SUPPLIER,
+
+      customerId: customer.id,
+      customerName: firstOrder?.shippingName ?? customer.name,
+      customerGstin: customer.gstin,
+      billingAddress: firstOrder?.shippingAddress
+        ? { address: firstOrder.shippingAddress, pincode: firstOrder.shippingPincode }
+        : undefined,
+      shippingAddress: firstOrder?.shippingAddress
+        ? { address: firstOrder.shippingAddress, pincode: firstOrder.shippingPincode }
+        : undefined,
+
+      supplierStateCode: "09",
+      placeOfSupplyCode: "09",
+      isInterState: false,
+
+      subtotal: totals.subtotal,
+      totalCgst: totals.totalCgst,
+      totalSgst: totals.totalSgst,
+      totalIgst: 0,
+      totalCess: totals.totalCess,
+      totalDiscount: 0,
+      roundOff: totals.roundOff,
+      totalAmount: totals.totalAmount,
+      amountInWords: convertAmountToWords(totals.totalAmount),
+
+      status: "APPROVED",
+      paymentStatus: "UNPAID",
+      amountPaid: 0,
+      amountDue: totals.totalAmount,
+      createdBy: "system",
+
+      lineItems: {
+        create: items.map((item, idx) => {
+          const taxResult = lineItemTaxResults[idx]!;
+          return {
+            lineNumber: idx + 1,
+            variantId: item.variantId,
+            description: item.productName,
+            hsnCode: item.hsnCode || "0000",
+            quantity: item.quantity,
+            unit: item.isLoose ? (item.stepUnit ?? "KG") : (item.packageUnit ?? "PCS"),
+            unitPrice: Number(item.unitPrice),
+            discountPercent: 0,
+            discountAmount: 0,
+            taxableValue: taxResult.taxableValue,
+            gstRate: taxResult.gstRate,
+            cgstRate: taxResult.cgstRate,
+            cgstAmount: taxResult.cgstAmount,
+            sgstRate: taxResult.sgstRate,
+            sgstAmount: taxResult.sgstAmount,
+            igstRate: 0,
+            igstAmount: 0,
+            cessRate: 0,
+            cessAmount: 0,
+            totalAmount: taxResult.totalAmount,
+          };
+        }),
+      },
+    },
+  });
+
+  await prisma.subscriptionStatement.update({ where: { id: statementId }, data: { invoiceId: invoice.id } });
+  return invoice.id;
+}
+
+/**
+ * Marks a settled statement's consolidated invoice PAID and records a house Payment RECEIPT (so
+ * subscription revenue shows in the store's Daily Summary). Idempotent. Called when a statement is
+ * settled — wallet auto-debit or the owner's COD mark-paid.
+ */
+export async function markStatementInvoicePaid(
+  statementId: string,
+  paymentMode: "CASH" | "UPI" | "BANK_TRANSFER" = "CASH",
+): Promise<void> {
+  const statement = await prisma.subscriptionStatement.findUnique({
+    where: { id: statementId },
+    select: { invoiceId: true },
+  });
+  if (!statement?.invoiceId) return;
+  const invoice = await prisma.invoice.findUnique({ where: { id: statement.invoiceId } });
+  if (!invoice || invoice.paymentStatus === "PAID") return;
+
+  await prisma.$transaction(async (tx) => {
+    await tx.invoice.update({
+      where: { id: invoice.id },
+      data: { status: "PAID", paymentStatus: "PAID", amountPaid: invoice.totalAmount, amountDue: 0 },
+    });
+    const existing = await tx.payment.findFirst({
+      where: { relatedType: "INVOICE", relatedId: invoice.id },
+    });
+    if (!existing) {
+      await tx.payment.create({
+        data: {
+          paymentType: "RECEIPT",
+          relatedType: "INVOICE",
+          relatedId: invoice.id,
+          amount: Number(invoice.totalAmount),
+          paymentMode: paymentMode as any,
+          paymentDate: new Date(),
+          status: "COMPLETED",
+        },
+      });
+    }
+  });
+}
+
+/**
  * Syncs the order's payment status to ALL the order's invoices (one per seller in Phase 6).
  * Called when order status changes (e.g. DELIVERED → COD becomes PAID).
  */

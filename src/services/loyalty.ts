@@ -10,7 +10,14 @@ export async function getUserSpend365(userId: string): Promise<number> {
   start.setFullYear(start.getFullYear() - 1);
   const agg = await prisma.order.aggregate({
     _sum: { totalAmount: true },
-    where: { customerId: userId, status: { not: "CANCELLED" }, createdAt: { gte: start } },
+    where: {
+      customerId: userId,
+      status: { not: "CANCELLED" },
+      createdAt: { gte: start },
+      // Subscription (MONTHLY) orders are deferred/unpaid khata — they do NOT count toward loyalty
+      // tier spend (would otherwise push customers to Platinum on uncollected money). Decision D5.
+      paymentMethod: { not: "MONTHLY" },
+    },
   });
   return Number(agg._sum.totalAmount ?? 0);
 }

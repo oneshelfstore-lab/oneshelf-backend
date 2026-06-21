@@ -42,6 +42,8 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         deliveryOtpRequired: true, shippingName: true, shippingPhone: true,
         shippingAddress: true, shippingPincode: true,
         createdAt: true, updatedAt: true,
+        // Set when this order was auto-generated from a subscription → the app shows a 🔁 chip.
+        subscriptionId: true,
         _count: { select: { items: true } },
         // Per-seller collection manifest for the Phase-5 collection run. House sub-orders
         // (seller.isHouse) are at the store — shown as "From store", auto-collected; only

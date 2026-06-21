@@ -122,6 +122,7 @@ const productCreateSchema = z.object({
   isBranded: z.boolean().default(false),
   isSampleEligible: z.boolean().default(false),
   featuredIn99Store: z.boolean().default(false),
+  isSubscribable: z.boolean().default(false),
   imageUrls: z.array(z.string()).default([]),
   searchKeywords: z.array(z.string()).default([]),
   isActive: z.boolean().default(true),

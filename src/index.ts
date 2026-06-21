@@ -41,12 +41,16 @@ import sellerCatalogRoutes from "./routes/sellerCatalog.js";
 import sellerOrdersRoutes from "./routes/sellerOrders.js";
 import sellerAccountRoutes from "./routes/sellerAccount.js";
 import appUserRoutes from "./routes/appUser.js";
+import subscriptionRoutes from "./routes/subscriptions.js";
+import ownerSubscriptionRoutes from "./routes/ownerSubscriptions.js";
+import internalRoutes from "./routes/internal.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { auditLoggerMiddleware } from "./middleware/auditLogger.js";
 import { globalErrorHandler } from "./middleware/errorHandler.js";
 import { initFirebase } from "./lib/firebase.js";
 import { startOrderExpirySweeper } from "./services/orderExpiry.js";
 import { startAbandonedCartSweeper } from "./services/abandonedCart.js";
+import { startSubscriptionSweeper } from "./services/subscriptionEngine.js";
 import prisma from "./lib/prisma.js";
 
 const app = express();
@@ -164,6 +168,9 @@ app.use("/api/app/banners", publicBannerRouter);
 app.use("/api/app/brands", publicBrandRouter);
 // Public — submitted from the login page, before the user has an account.
 app.use("/api/app/partner-applications", partnerApplicationRoutes);
+// Internal automation (subscriptions engine) — shared-secret header, no user auth. Must stay BEFORE
+// the global JWT guard so an external scheduler with no identity can reach it.
+app.use("/api/app/internal", internalRoutes);
 app.use("/api/app/cart", cartRoutes);
 app.use("/api/app/coupons", appCouponRouter);
 app.use("/api/app/orders", orderRoutes);
@@ -180,10 +187,13 @@ app.use("/api/app/owner/users", ownerUsersRoutes);
 app.use("/api/app/owner/sellers", ownerSellersRoutes);
 app.use("/api/app/owner/analytics", ownerAnalyticsRoutes);
 app.use("/api/app/owner/gstr8", ownerGstr8Routes);
+app.use("/api/app/owner/subscriptions", ownerSubscriptionRoutes);
 app.use("/api/app/seller/catalog", sellerCatalogRoutes);
 app.use("/api/app/seller/orders", sellerOrdersRoutes);
 app.use("/api/app/seller/me", sellerAccountRoutes);
 app.use("/api/app/delivery/orders", deliveryRoutes);
+// More-specific than "/api/app/me" → MUST be mounted before it (Express matches prefixes in order).
+app.use("/api/app/me/subscriptions", subscriptionRoutes);
 app.use("/api/app/me", appUserRoutes);
 
 // ─── Auth routes (no auth middleware) ───────────────────────────────
@@ -267,4 +277,7 @@ app.listen(PORT, '0.0.0.0', () => {
   startOrderExpirySweeper();
   // Nudge users who left items in cart (every 15 min, max 1 push per user per 24h).
   startAbandonedCartSweeper();
+  // Generate due subscription orders + close monthly statements (backup driver — the external cron
+  // hitting POST /api/app/internal/subscriptions/run is the reliable one on the free tier).
+  startSubscriptionSweeper();
 });

@@ -190,3 +190,32 @@ export async function notifyAbandonedCart(
     body: `${itemText} worth Rs.${info.cartValue} — complete your order before items sell out.`,
   });
 }
+
+// A subscription delivery couldn't be generated today because the item ran out of stock. We skip
+// (never backfill) and let the customer know, so an empty bag is never a silent surprise.
+export async function notifySubscriptionSkipped(userId: string, productName: string) {
+  const tokens = await getUserTokens(userId);
+  if (tokens.length === 0) return;
+  await sendToTokens(tokens, {
+    type: "subscription_skipped",
+    title: "Subscription paused for today",
+    body: `${productName} is out of stock today, so we skipped today's delivery. It resumes automatically.`,
+  });
+}
+
+// Monthly khata bill is ready (consolidated statement). For COD it's "please pay"; for wallet it's
+// "auto-paid from your store credit".
+export async function notifySubscriptionStatement(
+  userId: string,
+  info: { amount: number; periodLabel: string; autoPaid: boolean },
+) {
+  const tokens = await getUserTokens(userId);
+  if (tokens.length === 0) return;
+  await sendToTokens(tokens, {
+    type: "subscription_statement",
+    title: info.autoPaid ? "Subscription bill paid" : "Subscription bill ready",
+    body: info.autoPaid
+      ? `Your ${info.periodLabel} subscription bill of Rs.${Math.round(info.amount)} was paid from your store credit.`
+      : `Your ${info.periodLabel} subscription bill is Rs.${Math.round(info.amount)}. Please settle it at the store.`,
+  });
+}

@@ -175,6 +175,7 @@ enum OrderPaymentMethod {
   COD
   ONLINE
   UPI
+  MONTHLY   // deferred-billing subscription order — settled via a monthly SubscriptionStatement
 }
 
 enum OrderPaymentStatus {
@@ -247,6 +248,35 @@ enum ReferralStatus {
   REWARDED   // referee's first order delivered → referrer credited
 }
 
+// ─── Subscriptions (milk / newspaper / recurring deliveries) ─────────
+enum SubscriptionFrequency {
+  DAILY
+  WEEKLY
+  MONTHLY
+  CUSTOM
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAUSED
+  CANCELLED
+}
+
+// How the monthly statement settles.
+enum SubscriptionBilling {
+  COD
+  WALLET
+  AUTOPAY
+}
+
+enum SubscriptionStatementStatus {
+  OPEN
+  BILLED
+  PAID
+  PARTIALLY_PAID
+  VOID
+}
+
 // ─── 0. User ────────────────────────────────────────────────────────
 
 model User {
@@ -302,6 +332,8 @@ model User {
   walletTxns         WalletTransaction[]
   referralsMade      Referral[]       @relation("Referrer")
   referralReceived   Referral?        @relation("Referee")
+  subscriptions          Subscription[]
+  subscriptionStatements SubscriptionStatement[]
 
   @@index([phone])
 }
@@ -364,6 +396,9 @@ model CatalogProduct {
   // Owner opt-in: feature this product in the Home "99 Store" rail. Only surfaced when the product
   // is also actually priced ₹99 or less, so the "everything under ₹99" promise stays honest.
   featuredIn99Store Boolean   @default(false)
+  // Owner opt-in: this product can be subscribed to (milk / newspaper / recurring). Gates the
+  // "Subscribe" button on the PDP. Validated server-side on subscription create.
+  isSubscribable   Boolean    @default(false)
   imageUrls       String[]    @default([])
   searchKeywords  String[]    @default([])
   isActive        Boolean     @default(true)
@@ -499,6 +534,7 @@ model ProductVariant {
   orderItems        OrderItem[]
   substituteItems   OrderItem[]    @relation("SubstituteVariant")
   invoiceLines      InvoiceLineItem[]
+  subscriptions     Subscription[]
 
   @@index([productId])
   @@index([barcode])
@@ -585,6 +621,7 @@ model Address {
   updatedAt     DateTime @updatedAt
 
   orders        Order[]
+  subscriptions Subscription[]
 
   @@index([userId])
 }
@@ -662,6 +699,7 @@ model WalletTransaction {
   balanceAfter Decimal       @db.Decimal(10, 2)
   orderId      String?       // set for ORDER_DEBIT / ORDER_REFUND
   referralId   String?       // set for REFERRAL_CREDIT
+  statementId  String?       // set for a subscription monthly-statement ORDER_DEBIT
   note         String?
   createdAt    DateTime      @default(now())
 
@@ -718,6 +756,76 @@ model ScratchReward {
   createdAt  DateTime            @default(now())
 
   @@index([userId])
+}
+
+// ─── Subscription (standing instruction → one Order per due date) ────
+// The customer's recurring order. A daily engine turns each due subscription into a normal Order
+// (paymentMethod=MONTHLY, deferred billing) that flows through the existing delivery pipeline. All
+// dates use IST-midnight semantics. Pricing is FREE delivery (baked into the unit price) — see
+// services/subscriptionEngine.ts.
+model Subscription {
+  id            String  @id @default(cuid())
+  customerId    String
+  customer      User    @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  variantId     String
+  variant       ProductVariant @relation(fields: [variantId], references: [id])
+
+  // Snapshot for display continuity if the product later changes.
+  productName   String
+  imageUrl      String?
+  quantity      Decimal  @db.Decimal(14, 6)
+  isLoose       Boolean  @default(false)
+  stepSize      Decimal? @db.Decimal(10, 3)
+  stepUnit      String?
+
+  frequency     SubscriptionFrequency
+  intervalDays  Int?      // CUSTOM: every N days
+  daysOfWeek    Int[]     @default([])  // WEEKLY: 0=Sun..6=Sat (IST weekday)
+  dayOfMonth    Int?      // MONTHLY: 1..28 (capped — no month-end ambiguity)
+
+  addressId     String?
+  address       Address?  @relation(fields: [addressId], references: [id])
+  billing       SubscriptionBilling @default(COD)
+
+  status        SubscriptionStatus @default(ACTIVE)
+  startDate     DateTime           // first delivery date (IST-midnight)
+  endDate       DateTime?          // optional auto-stop
+  pausedUntil   DateTime?          // auto-resume after this date
+  nextDeliveryDate  DateTime?      // engine cursor (IST-midnight-in-UTC)
+  lastGeneratedDate DateTime?
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  orders        Order[]  @relation("SubscriptionOrders")
+
+  @@index([customerId])
+  @@index([status, nextDeliveryDate])   // the engine's hot query
+}
+
+// ─── SubscriptionStatement (monthly consolidated khata bill) ─────────
+// One bill per customer per month aggregating that month's DELIVERED subscription (MONTHLY) orders.
+model SubscriptionStatement {
+  id            String  @id @default(cuid())
+  customerId    String
+  customer      User    @relation(fields: [customerId], references: [id])
+  periodYear    Int
+  periodMonth   Int     // 1..12 (IST)
+  totalAmount   Decimal @db.Decimal(12, 2) @default(0)
+  deliveryCount Int     @default(0)
+  status        SubscriptionStatementStatus @default(OPEN)
+  billing       SubscriptionBilling
+  invoiceId     String?
+  paidAt        DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  orders        Order[]  @relation("StatementOrders")
+
+  // One statement per customer per month PER TENDER — a customer who mixes COD + wallet subscriptions
+  // gets one bill per tender (each settles differently). Same-tender customers get exactly one bill.
+  @@unique([customerId, periodYear, periodMonth, billing])
+  @@index([status])
 }
 
 // ─── 10. Order ───────────────────────────────────────────────────────
@@ -785,6 +893,16 @@ model Order {
   // Customer-selected delivery window, e.g. "2026-06-08 09:00-12:00". Null = use the
   // store's default next-day schedule.
   deliverySlot          String?
+
+  // Subscriptions — set when this order was auto-generated from a standing Subscription.
+  // subscriptionDate is the IST-midnight date this delivery is FOR; the composite unique below is
+  // the engine's idempotency guard (it can never generate two orders for the same sub on the same day).
+  subscriptionId        String?
+  subscription          Subscription?      @relation("SubscriptionOrders", fields: [subscriptionId], references: [id])
+  subscriptionDate      DateTime?
+  statementId           String?
+  statement             SubscriptionStatement? @relation("StatementOrders", fields: [statementId], references: [id])
+
   createdAt             DateTime           @default(now())
   updatedAt             DateTime           @updatedAt
 
@@ -803,6 +921,10 @@ model Order {
   // and owner status-filtered lists.
   @@index([customerId, createdAt])
   @@index([status, createdAt])
+  // The engine can never create two orders for the same subscription on the same date.
+  @@unique([subscriptionId, subscriptionDate])
+  @@index([subscriptionId])
+  @@index([statementId])
 }
 
 // ─── 11. OrderItem (snapshotted at sale time) ────────────────────────
@@ -934,6 +1056,12 @@ model StoreConfig {
   referralWelcomeAmount     Int     @default(50)
   referralMinOrder          Int     @default(199)
   referralWelcomeExpiryDays Int     @default(30)
+  // Subscriptions (milk / newspaper / recurring). subscriptionsEnabled is the master kill switch;
+  // subscriptionBillingDay is the day-of-month the prior month's statements are closed/billed;
+  // defaultSubscriptionAgentId (optional) auto-assigns generated orders straight onto a delivery boy.
+  subscriptionsEnabled       Boolean @default(true)
+  subscriptionBillingDay     Int     @default(1)
+  defaultSubscriptionAgentId String?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 }

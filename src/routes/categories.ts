@@ -14,8 +14,16 @@ publicCategoryRouter.get("/", async (_req: Request, res: Response) => {
     const categories = await prisma.category.findMany({
       where: { isActive: true },
       orderBy: { displayOrder: "asc" },
+      include: { _count: { select: { catalogProducts: true } } },
     });
-    res.json({ success: true, data: categories });
+    // Flatten the relation count into a plain productCount the app consumes
+    // (mirrors the admin endpoint's _count include; counts ALL catalog products
+    // in the category — active or not, matching the admin tile counts).
+    const data = categories.map(({ _count, ...c }) => ({
+      ...c,
+      productCount: _count.catalogProducts,
+    }));
+    res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);
   }

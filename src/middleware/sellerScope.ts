@@ -4,6 +4,10 @@ import { type FirebaseAuthRequest } from "./firebaseAuth.js";
 
 export interface SellerRequest extends FirebaseAuthRequest {
   sellerId?: string;
+  // True when the logged-in seller IS the house store (the owner's own catalog). The house manager
+  // gets extra powers third-party sellers don't: products go live immediately + owner-only
+  // merchandising toggles (₹99 store / free-sample / visibility).
+  sellerIsHouse?: boolean;
 }
 
 /**
@@ -20,7 +24,7 @@ export async function resolveSeller(req: SellerRequest, res: Response, next: Nex
     }
     const seller = await prisma.seller.findUnique({
       where: { ownerUserId: userId },
-      select: { id: true, status: true, isActive: true },
+      select: { id: true, status: true, isActive: true, isHouse: true },
     });
     if (!seller) {
       return res.status(403).json({ success: false, error: { code: "NO_SELLER", message: "No seller account is linked to this login", details: [] } });
@@ -29,6 +33,7 @@ export async function resolveSeller(req: SellerRequest, res: Response, next: Nex
       return res.status(403).json({ success: false, error: { code: "SELLER_SUSPENDED", message: "This seller account is suspended", details: [] } });
     }
     req.sellerId = seller.id;
+    req.sellerIsHouse = seller.isHouse;
     next();
   } catch (e) {
     console.error("resolveSeller error:", e);

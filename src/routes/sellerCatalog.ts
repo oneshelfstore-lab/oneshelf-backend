@@ -42,6 +42,10 @@ function formatProductForApp(product: any) {
     isExempt: product.isExempt,
     isBranded: product.isBranded,
     isSubscribable: product.isSubscribable,
+    // Surfaced so the HOUSE manager's editor prefills these correctly on edit (third-party sellers
+    // can't change them anyway).
+    featuredIn99Store: product.featuredIn99Store,
+    isSampleEligible: product.isSampleEligible,
     imageUrls: product.imageUrls,
     searchKeywords: product.searchKeywords,
     isActive: product.isActive,
@@ -82,6 +86,11 @@ const productSchema = z.object({
   isExempt: z.boolean().default(false),
   isBranded: z.boolean().default(false),
   isSubscribable: z.boolean().default(false),
+  // Owner-only merchandising toggles — accepted only from the HOUSE manager (stripped for
+  // third-party sellers below, so they keep the limited editor).
+  isSampleEligible: z.boolean().optional(),
+  featuredIn99Store: z.boolean().optional(),
+  isActive: z.boolean().optional(),
   imageUrls: z.array(z.string()).default([]),
   searchKeywords: z.array(z.string()).default([]),
   variants: z.array(variantSchema).min(1).max(20),
@@ -124,10 +133,22 @@ router.post("/", async (req: SellerRequest, res: Response) => {
   try {
     const parsed = productSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid product data", parsed.error.errors);
-    const { variants, categorySlug, ...productData } = parsed.data;
+    const { variants, categorySlug, isActive, isSampleEligible, featuredIn99Store, ...productData } = parsed.data;
 
     const cat = await prisma.category.findUnique({ where: { slug: categorySlug } });
     if (!cat) throw new ValidationError(`Category '${categorySlug}' not found`);
+
+    // The house manager (the store's own catalog) gets owner-level powers: products go LIVE
+    // immediately and the merchandising toggles apply. Third-party sellers stay limited: their
+    // products land inactive (pending owner approval) and the merchandising toggles are ignored.
+    const isHouse = req.sellerIsHouse === true;
+    const merchandising = isHouse
+      ? {
+          isActive: isActive ?? true,
+          isSampleEligible: isSampleEligible ?? false,
+          featuredIn99Store: featuredIn99Store ?? false,
+        }
+      : { isActive: false };
 
     let handle = productData.handle;
     if (await prisma.catalogProduct.findUnique({ where: { handle } })) handle = `${handle}-${Date.now().toString(36)}`;
@@ -155,7 +176,7 @@ router.post("/", async (req: SellerRequest, res: Response) => {
         handle,
         categoryId: cat.id,
         sellerId: req.sellerId!,
-        isActive: false, // pending admin approval
+        ...merchandising, // house → live now (+toggles); third-party → inactive pending approval
         variants: { create: convertedVariants },
       },
       include: { variants: { orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
@@ -195,7 +216,13 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
       const updateData: any = { ...productFields };
       if (categoryId) updateData.categoryId = categoryId;
       delete updateData.categorySlug;
-      delete updateData.isActive; // activation is admin moderation only
+      // Third-party sellers can't self-activate or set merchandising flags (owner moderation only).
+      // The house manager can — it's the store's own catalog.
+      if (req.sellerIsHouse !== true) {
+        delete updateData.isActive;
+        delete updateData.isSampleEligible;
+        delete updateData.featuredIn99Store;
+      }
 
       if (Object.keys(updateData).length > 0) {
         await tx.catalogProduct.update({ where: { id: productId }, data: updateData });

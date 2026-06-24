@@ -1526,3 +1526,26 @@ model HsnMaster {
   @@unique([code, description])
   @@index([code])
 }
+
+// Submissions from the standalone product-intake HTML form (the owner's brother / staff fill
+// the form remotely, click Send, the products land here for owner review before being imported
+// into the live catalog). Status moves PENDING → IMPORTED/REJECTED as the owner processes them.
+enum ProductIntakeStatus {
+  PENDING
+  IMPORTED
+  REJECTED
+}
+
+model ProductIntake {
+  id          String              @id @default(cuid())
+  submittedBy String              // Free-text "Who are you?" (e.g. "Rohit (brother)")
+  payload     Json                // Array of product objects matching the HTML form's shape
+  productCount Int                @default(0) // Denormalized for cheap list rendering
+  variantCount Int                @default(0)
+  status      ProductIntakeStatus @default(PENDING)
+  notes       String?             // Owner notes after review
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  @@index([status, createdAt])
+}

@@ -44,6 +44,8 @@ import appUserRoutes from "./routes/appUser.js";
 import subscriptionRoutes from "./routes/subscriptions.js";
 import ownerSubscriptionRoutes from "./routes/ownerSubscriptions.js";
 import internalRoutes from "./routes/internal.js";
+import productIntakeRoutes from "./routes/productIntake.js";
+import ownerProductIntakeRoutes from "./routes/ownerProductIntake.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { auditLoggerMiddleware } from "./middleware/auditLogger.js";
 import { globalErrorHandler } from "./middleware/errorHandler.js";
@@ -73,13 +75,25 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim()).filter(Boolean)
   : ["http://localhost:5173", "http://localhost:3000"]);
 
-app.use(cors({
-  origin: (origin, callback) => {
-    // Allow same-origin/non-browser clients (no Origin header) and whitelisted origins.
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error("Not allowed by CORS"));
-  },
-  credentials: true,
+// Public product-intake endpoint accepts ANY origin (the form may be hosted on Netlify, served
+// locally as a file://, or sent via WhatsApp — we can't enumerate origins ahead of time).
+// All other endpoints keep the strict allowlist.
+const PUBLIC_OPEN_PATHS = ["/api/app/public/product-intake"];
+
+app.use(cors((req, callback) => {
+  const isPublic = PUBLIC_OPEN_PATHS.some((p) => req.path.startsWith(p));
+  if (isPublic) {
+    callback(null, { origin: true, credentials: false });
+    return;
+  }
+  callback(null, {
+    origin: (origin, cb) => {
+      // Allow same-origin/non-browser clients (no Origin header) and whitelisted origins.
+      if (!origin || allowedOrigins.includes(origin)) return cb(null, true);
+      return cb(new Error("Not allowed by CORS"));
+    },
+    credentials: true,
+  });
 }));
 
 app.use(express.json({ limit: "10mb" }));
@@ -171,6 +185,9 @@ app.use("/api/app/partner-applications", partnerApplicationRoutes);
 // Internal automation (subscriptions engine) — shared-secret header, no user auth. Must stay BEFORE
 // the global JWT guard so an external scheduler with no identity can reach it.
 app.use("/api/app/internal", internalRoutes);
+// Public product-intake form (tools/add-products.html). Public POST has its own permissive CORS;
+// admin GET/DELETE under /admin use a shared INTAKE_ADMIN_TOKEN. Must stay BEFORE the JWT guard.
+app.use("/api/app/public/product-intake", productIntakeRoutes);
 app.use("/api/app/cart", cartRoutes);
 app.use("/api/app/coupons", appCouponRouter);
 app.use("/api/app/orders", orderRoutes);
@@ -188,6 +205,8 @@ app.use("/api/app/owner/sellers", ownerSellersRoutes);
 app.use("/api/app/owner/analytics", ownerAnalyticsRoutes);
 app.use("/api/app/owner/gstr8", ownerGstr8Routes);
 app.use("/api/app/owner/subscriptions", ownerSubscriptionRoutes);
+// Owner review queue for the product-intake form (Firebase OWNER auth) — approve/reject/delete.
+app.use("/api/app/owner/product-intake", ownerProductIntakeRoutes);
 app.use("/api/app/seller/catalog", sellerCatalogRoutes);
 app.use("/api/app/seller/orders", sellerOrdersRoutes);
 app.use("/api/app/seller/me", sellerAccountRoutes);

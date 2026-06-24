@@ -75,6 +75,31 @@ router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
+// GET /house — who currently manages the house store (or null). MUST be declared before GET /:id,
+// else "/house" matches the :id param route.
+router.get("/house", async (_req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const house = await prisma.seller.findFirst({
+      where: { isHouse: true },
+      include: { ownerUser: { select: { name: true, phone: true, firebaseUid: true } } },
+    });
+    if (!house) throw new NotFoundError("House store", "house");
+    res.json({
+      success: true,
+      data: {
+        sellerId: house.id,
+        managerName: house.ownerUser?.name ?? null,
+        managerPhone: house.ownerUser?.phone ?? null,
+        // true once they've actually logged in (Firebase account linked).
+        managerActive: house.ownerUser ? !!house.ownerUser.firebaseUid : false,
+        hasManager: !!house.ownerUserId,
+      },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // GET /:id — seller detail + unsettled sub-order summary (what the platform currently owes).
 router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
   try {
@@ -107,6 +132,94 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
         },
       },
     });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── House store co-manager (by phone) ───────────────────────────
+// Link a trusted person (e.g. the owner's brother) to the HOUSE store as a SELLER login. They then
+// manage the store's own catalog from the seller dashboard — full editor, zero commission, no
+// "Sold by", products go live immediately — without any owner/money/admin access. This is the
+// "higher-level internal seller" (distinct from third-party sellers created via POST /).
+
+const houseManagerSchema = z.object({
+  name: z.string().min(1),
+  phone: z.string().min(8),
+});
+
+// POST /house/manager — set/replace the house co-manager by phone. Promotes (or pre-creates) the
+// user as SELLER and links them to the house store. firebaseAuth links the pre-created row to their
+// Firebase account on first phone login, keeping the SELLER role.
+router.post("/house/manager", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = houseManagerSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
+    const name = parsed.data.name.trim();
+    const phone = normalizePhone(parsed.data.phone);
+    if (phone.length !== 10) throw new ValidationError("Enter a valid 10-digit phone number");
+
+    const house = await prisma.seller.findFirst({ where: { isHouse: true }, select: { id: true, ownerUserId: true } });
+    if (!house) throw new NotFoundError("House store", "house");
+
+    const existingUser = await prisma.user.findFirst({
+      where: { phone: { in: [phone, `+91${phone}`, `91${phone}`] } },
+      orderBy: { createdAt: "asc" },
+      include: { sellerAccount: { select: { id: true, isHouse: true } } },
+    });
+    // Block linking someone who already runs a DIFFERENT (third-party) seller shop.
+    if (existingUser?.sellerAccount && !existingUser.sellerAccount.isHouse) {
+      throw new ValidationError("This phone already runs a seller shop. Use a different number.");
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      let userId: string;
+      if (existingUser) {
+        const keepName = existingUser.name && existingUser.name !== "App User" ? existingUser.name : name;
+        const u = await tx.user.update({
+          where: { id: existingUser.id },
+          data: { role: "SELLER", phone, name: keepName },
+        });
+        userId = u.id;
+      } else {
+        const u = await tx.user.create({ data: { name, phone, role: "SELLER", phoneVerified: false } });
+        userId = u.id;
+      }
+
+      // If a different user was the house manager, unlink them first (ownerUserId is @unique).
+      if (house.ownerUserId && house.ownerUserId !== userId) {
+        await tx.seller.update({ where: { id: house.id }, data: { ownerUserId: null } });
+      }
+      const updated = await tx.seller.update({
+        where: { id: house.id },
+        data: { ownerUserId: userId },
+        include: { ownerUser: { select: { name: true, phone: true, firebaseUid: true } } },
+      });
+      return updated;
+    });
+
+    res.json({
+      success: true,
+      data: {
+        sellerId: result.id,
+        managerName: result.ownerUser?.name ?? null,
+        managerPhone: result.ownerUser?.phone ?? null,
+        managerActive: result.ownerUser ? !!result.ownerUser.firebaseUid : false,
+        hasManager: true,
+      },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// DELETE /house/manager — unlink the house co-manager (does not delete their user account).
+router.delete("/house/manager", async (_req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const house = await prisma.seller.findFirst({ where: { isHouse: true }, select: { id: true } });
+    if (!house) throw new NotFoundError("House store", "house");
+    await prisma.seller.update({ where: { id: house.id }, data: { ownerUserId: null } });
+    res.json({ success: true, message: "House co-manager removed" });
   } catch (e) {
     sendError(res, e);
   }

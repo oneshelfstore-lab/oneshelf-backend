@@ -33,6 +33,9 @@ function shapeProfile(s: any) {
     outstandingBalance: Number(s.outstandingBalance),
     status: s.status,
     isActive: s.isActive,
+    // House manager (the store's own catalog) → the app shows the owner-level merchandising toggles
+    // + a "goes live now" note in the product editor.
+    isHouse: s.isHouse,
   };
 }
 

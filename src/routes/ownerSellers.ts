@@ -162,25 +162,39 @@ router.post("/house/manager", async (req: FirebaseAuthRequest, res: Response) =>
     const house = await prisma.seller.findFirst({ where: { isHouse: true }, select: { id: true, ownerUserId: true } });
     if (!house) throw new NotFoundError("House store", "house");
 
-    const existingUser = await prisma.user.findFirst({
-      where: { phone: { in: [phone, `+91${phone}`, `91${phone}`] } },
-      orderBy: { createdAt: "asc" },
+    const phoneVariants = [phone, `+91${phone}`, `91${phone}`];
+    // There can be MORE than one row for a phone (e.g. an auto-created customer login + a
+    // pre-registered row). Grab them all so we set SELLER on whichever one the person actually
+    // logs into, not just the oldest.
+    const matches = await prisma.user.findMany({
+      where: { phone: { in: phoneVariants } },
       include: { sellerAccount: { select: { id: true, isHouse: true } } },
     });
     // Block linking someone who already runs a DIFFERENT (third-party) seller shop.
-    if (existingUser?.sellerAccount && !existingUser.sellerAccount.isHouse) {
+    if (matches.some((m) => m.sellerAccount && !m.sellerAccount.isHouse)) {
       throw new ValidationError("This phone already runs a seller shop. Use a different number.");
     }
 
+    // Firebase names an account-less login after its phone number; treat that (and "App User")
+    // as "no real name" so the owner-typed name wins.
+    const looksLikePhone = (n: string | null) => !n || n === "App User" || /^\+?\d[\d\s-]{6,}$/.test(n.trim());
+    // Prefer the row that has actually logged in (firebaseUid set) as the canonical manager.
+    const target = matches.find((m) => m.firebaseUid) ?? matches[0] ?? null;
+
     const result = await prisma.$transaction(async (tx) => {
       let userId: string;
-      if (existingUser) {
-        const keepName = existingUser.name && existingUser.name !== "App User" ? existingUser.name : name;
-        const u = await tx.user.update({
-          where: { id: existingUser.id },
-          data: { role: "SELLER", phone, name: keepName },
+      if (target) {
+        // Force SELLER on EVERY row sharing this phone, so the row the person logs into is correct
+        // regardless of which duplicate it is.
+        await tx.user.updateMany({
+          where: { phone: { in: phoneVariants } },
+          data: { role: "SELLER" },
         });
-        userId = u.id;
+        await tx.user.update({
+          where: { id: target.id },
+          data: { phone, name: looksLikePhone(target.name) ? name : target.name },
+        });
+        userId = target.id;
       } else {
         const u = await tx.user.create({ data: { name, phone, role: "SELLER", phoneVerified: false } });
         userId = u.id;

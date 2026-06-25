@@ -71,6 +71,57 @@ export function isRazorpayConfigured(): boolean {
   return !!RAZORPAY_KEY_ID && !!RAZORPAY_KEY_SECRET;
 }
 
+export interface RazorpayPayment {
+  id: string;
+  status: string; // created | authorized | captured | refunded | failed
+  amount: number;
+  order_id: string;
+}
+
+/**
+ * Fetches the payments Razorpay recorded against an order and returns the captured one (if any).
+ * This is the server-to-server source of truth used by reconciliation and the safe expiry sweeper
+ * to answer "was this order actually paid?" — independent of whether the mobile app ever called /pay
+ * (so a crashed/killed app can't strand a real payment). Returns null when nothing was captured.
+ */
+export async function fetchCapturedPaymentForOrder(
+  razorpayOrderId: string,
+): Promise<RazorpayPayment | null> {
+  if (!RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET) {
+    throw new Error("Razorpay not configured");
+  }
+  const auth = Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString("base64");
+
+  const response = await fetch(
+    `https://api.razorpay.com/v1/orders/${encodeURIComponent(razorpayOrderId)}/payments`,
+    { method: "GET", headers: { Authorization: `Basic ${auth}` } },
+  );
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Razorpay fetch-payments failed: ${err}`);
+  }
+
+  const data = (await response.json()) as { items?: RazorpayPayment[] };
+  return (data.items ?? []).find((p) => p.status === "captured") ?? null;
+}
+
+/**
+ * Verifies a Razorpay WEBHOOK signature. Razorpay signs the RAW request body with the webhook
+ * secret (NOT the API key secret) using HMAC-SHA256. Constant-time compare.
+ */
+export function verifyWebhookSignature(rawBody: Buffer | string, signature: string): boolean {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  if (!secret) return false;
+  const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
+  const expectedBuf = Buffer.from(expected, "hex");
+  const receivedBuf = Buffer.from(String(signature || ""), "hex");
+  return (
+    expectedBuf.length === receivedBuf.length &&
+    crypto.timingSafeEqual(expectedBuf, receivedBuf)
+  );
+}
+
 /**
  * Refunds a captured Razorpay payment. Pass amountInPaise for a partial refund;
  * omit for a full refund. Throws on failure so the caller can record the outcome.

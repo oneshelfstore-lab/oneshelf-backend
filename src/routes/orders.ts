@@ -18,6 +18,8 @@ import { notifyNewOrder, notifyOrderStatusChange } from "../services/fcmNotifier
 import { generateOrderInvoice, syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { generateInvoicePdf } from "../services/pdfGenerator.js";
 import { refundWalletOnCancel } from "../services/referralRewards.js";
+import { markOrderPaid } from "../services/orderPayment.js";
+import { reconcileOrderPayment } from "../services/paymentReconciliation.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -288,8 +290,13 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         });
       }
 
-      // Clear active cart
-      await tx.cartItem.deleteMany({ where: { userId, savedForLater: false } });
+      // Clear the active cart. COD / fully-wallet-paid orders are settled now → clear immediately.
+      // Online/UPI orders awaiting Razorpay DEFER the clear to markOrderPaid (on payment confirmation)
+      // so an abandoned payment leaves the cart intact for a clean retry, and both the server cart and
+      // the local Room cart end up clearing together at the moment payment succeeds.
+      if (paymentMethod === "COD" || fullyWalletPaid) {
+        await tx.cartItem.deleteMany({ where: { userId, savedForLater: false } });
+      }
 
       // ── Split into per-seller sub-orders + accrue the commission ledger ──
       // Group the just-created items by seller, create one SubOrder per seller, link the items,
@@ -428,34 +435,31 @@ router.post("/:id/pay", async (req: FirebaseAuthRequest, res: Response) => {
     const isValid = verifyPaymentSignature(order.razorpayOrderId, razorpayPaymentId, razorpaySignature);
     if (!isValid) throw new AppError(400, "PAYMENT_INVALID", "Payment signature verification failed");
 
-    await prisma.$transaction(async (tx) => {
-      // Prepaid orders always require a handover OTP at delivery/pickup.
-      await tx.order.update({
-        where: { id: order.id },
-        data: {
-          paymentStatus: "PAID",
-          razorpayPaymentId,
-          deliveryOtpRequired: true,
-        },
-      });
-      // Arm the OTP secret if one wasn't already created at placement.
-      const existing = await tx.orderSecret.findFirst({ where: { orderId: order.id } });
-      if (!existing) {
-        await tx.orderSecret.create({
-          data: {
-            orderId: order.id,
-            otp: generateOtp(),
-            customerId: order.customerId,
-            fulfillmentType: order.fulfillmentType,
-          },
-        });
-      }
-    });
-
-    // Generate invoice now that payment is confirmed
-    generateOrderInvoice(order.id).catch((e) => console.error("Invoice generation failed:", e));
+    // Single idempotent confirmation path (shared with the webhook + reconciliation): flips
+    // PENDING→PAID, arms the OTP, clears this order's cart lines, and generates the invoice.
+    await markOrderPaid(order.id, razorpayPaymentId);
 
     res.json({ success: true, message: "Payment verified", data: { orderId: order.id, paymentStatus: "PAID" } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/orders/:id/reconcile — recover a stranded payment ──
+// Belt-and-suspenders for "paid but app closed": the app calls this on reopen for any locally-pending
+// online order. The server asks Razorpay whether the payment was actually captured and, if so, flips
+// the order to PAID (idempotent — safe to call repeatedly, and harmless for COD/already-paid orders).
+
+router.post("/:id/reconcile", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const order = await prisma.order.findFirst({
+      where: { id: req.params.id, customerId: req.appUser!.id },
+      select: { id: true },
+    });
+    if (!order) throw new NotFoundError("Order", req.params.id!);
+
+    const result = await reconcileOrderPayment(order.id);
+    res.json({ success: true, data: result });
   } catch (e) {
     sendError(res, e);
   }

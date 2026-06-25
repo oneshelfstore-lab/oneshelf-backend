@@ -1,7 +1,7 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
 import prisma from "../lib/prisma.js";
-import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib/errors.js";
+import { sendError, ValidationError, NotFoundError, ConflictError, AppError } from "../lib/errors.js";
 import {
   firebaseAuthMiddleware,
   type FirebaseAuthRequest,
@@ -12,6 +12,8 @@ import { computeUserSavings } from "../services/savings.js";
 import { computeUserLoyalty } from "../services/loyalty.js";
 import { notifyNewComplaint, notifyNewQuoteRequest } from "../services/fcmNotifier.js";
 import { mintReferralWelcomeCoupon } from "../services/referralRewards.js";
+import { createTopup, creditTopup } from "../services/walletTopup.js";
+import { verifyPaymentSignature } from "../services/razorpay.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -454,6 +456,63 @@ router.get("/wallet", async (req: FirebaseAuthRequest, res: Response) => {
           createdAt: t.createdAt.getTime(),
         })),
       },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── Wallet top-up (money-in via Razorpay) ───────────────────────────
+
+const topupSchema = z.object({ amount: z.number().positive() });
+
+// POST /api/app/me/wallet/topup { amount } → create a PENDING top-up + Razorpay order.
+// The wallet is credited only after payment confirmation (the /pay route below OR the webhook OR
+// reconciliation), so a killed app can't lose the loaded money.
+router.post("/wallet/topup", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = topupSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid top-up amount", parsed.error.errors);
+    const result = await createTopup(req.appUser!.id, parsed.data.amount);
+    res.status(201).json({ success: true, data: result });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// POST /api/app/me/wallet/topup/:id/pay { razorpayPaymentId, razorpaySignature }
+// Fast-path confirmation from the app. Verifies the Razorpay signature, then credits idempotently
+// (the webhook/reconciliation would credit the same top-up exactly once anyway).
+const topupPaySchema = z.object({
+  razorpayPaymentId: z.string().min(1),
+  razorpaySignature: z.string().min(1),
+});
+
+router.post("/wallet/topup/:id/pay", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = topupPaySchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid payment data", parsed.error.errors);
+    const { razorpayPaymentId, razorpaySignature } = parsed.data;
+
+    const topup = await prisma.walletTopup.findFirst({
+      where: { id: req.params.id, userId: req.appUser!.id },
+    });
+    if (!topup) throw new NotFoundError("WalletTopup", req.params.id!);
+    if (!topup.razorpayOrderId) throw new ValidationError("This top-up has no pending payment");
+
+    const isValid = verifyPaymentSignature(topup.razorpayOrderId, razorpayPaymentId, razorpaySignature);
+    if (!isValid) throw new AppError(400, "PAYMENT_INVALID", "Payment signature verification failed");
+
+    await creditTopup(topup.id, razorpayPaymentId);
+
+    const user = await prisma.user.findUnique({
+      where: { id: req.appUser!.id },
+      select: { walletBalance: true },
+    });
+    res.json({
+      success: true,
+      message: "Top-up added",
+      data: { topupId: topup.id, balance: Number(user?.walletBalance ?? 0) },
     });
   } catch (e) {
     sendError(res, e);

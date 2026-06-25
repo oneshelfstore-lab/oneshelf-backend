@@ -240,7 +240,17 @@ enum WalletTxnType {
   REFERRAL_CREDIT   // referrer earns when their referee's first order is delivered
   ORDER_DEBIT       // store credit spent at checkout
   ORDER_REFUND      // credit returned when a wallet-paying order is cancelled
+  TOPUP             // customer loaded money into the wallet via Razorpay
   ADJUSTMENT        // manual owner correction
+}
+
+// Customer wallet top-up (money-in via Razorpay). Mirrors the order payment lifecycle: a PENDING
+// row + Razorpay order is created up front, then flipped to PAID (and the wallet credited) by ANY of
+// the three confirmation paths — the app's /pay call, the Razorpay webhook, or reconciliation.
+enum WalletTopupStatus {
+  PENDING
+  PAID
+  FAILED
 }
 
 enum ReferralStatus {
@@ -330,6 +340,7 @@ model User {
   quoteRequests      QuoteRequest[]
   sellerAccount      Seller?          @relation("SellerOwner")
   walletTxns         WalletTransaction[]
+  walletTopups       WalletTopup[]
   referralsMade      Referral[]       @relation("Referrer")
   referralReceived   Referral?        @relation("Referee")
   subscriptions          Subscription[]
@@ -726,6 +737,24 @@ model Referral {
   @@index([status])
 }
 
+// ─── Wallet top-up (money-in via Razorpay) ───────────────────────────
+// One row per top-up attempt. razorpayOrderId @unique lets the webhook look it up server-to-server.
+// The guarded PENDING→PAID flip in creditTopup() is the idempotency gate — the same money is never
+// credited twice even if the app's /pay call AND the webhook both fire.
+model WalletTopup {
+  id                String            @id @default(cuid())
+  userId            String
+  user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  amount            Decimal           @db.Decimal(10, 2)
+  status            WalletTopupStatus @default(PENDING)
+  razorpayOrderId   String?           @unique
+  razorpayPaymentId String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@index([userId, createdAt])
+}
+
 // ─── Scratch reward (Delight Phase 3A) ───────────────────────────────
 // One scratch card per order. Outcome is rolled server-side at placement (idempotent, keyed by
 // orderId) so re-opening the celebration screen can't re-roll. A win mints a single-use coupon
@@ -1056,6 +1085,9 @@ model StoreConfig {
   referralWelcomeAmount     Int     @default(50)
   referralMinOrder          Int     @default(199)
   referralWelcomeExpiryDays Int     @default(30)
+  // Customer wallet top-up bounds (₹). A top-up amount must be within [min, max].
+  walletTopupMin            Int     @default(50)
+  walletTopupMax            Int     @default(10000)
   // Subscriptions (milk / newspaper / recurring). subscriptionsEnabled is the master kill switch;
   // subscriptionBillingDay is the day-of-month the prior month's statements are closed/billed;
   // defaultSubscriptionAgentId (optional) auto-assigns generated orders straight onto a delivery boy.

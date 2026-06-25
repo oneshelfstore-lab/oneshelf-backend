@@ -44,6 +44,7 @@ import appUserRoutes from "./routes/appUser.js";
 import subscriptionRoutes from "./routes/subscriptions.js";
 import ownerSubscriptionRoutes from "./routes/ownerSubscriptions.js";
 import internalRoutes from "./routes/internal.js";
+import webhookRoutes from "./routes/webhooks.js";
 import productIntakeRoutes from "./routes/productIntake.js";
 import ownerProductIntakeRoutes from "./routes/ownerProductIntake.js";
 import { authMiddleware } from "./middleware/auth.js";
@@ -96,7 +97,12 @@ app.use(cors((req, callback) => {
   });
 }));
 
-app.use(express.json({ limit: "10mb" }));
+// Capture the raw request body so the Razorpay webhook can verify its HMAC signature against the
+// exact bytes Razorpay signed (a parsed-then-restringified body would not match).
+app.use(express.json({
+  limit: "10mb",
+  verify: (req, _res, buf) => { (req as any).rawBody = buf; },
+}));
 
 // ─── Request ID + structured access log ────────────────────────────
 // Assigns/propagates a request id and emits one JSON line per request on finish
@@ -185,6 +191,9 @@ app.use("/api/app/partner-applications", partnerApplicationRoutes);
 // Internal automation (subscriptions engine) — shared-secret header, no user auth. Must stay BEFORE
 // the global JWT guard so an external scheduler with no identity can reach it.
 app.use("/api/app/internal", internalRoutes);
+// Razorpay server-to-server payment webhook — verifies its own HMAC signature, so it must stay
+// PUBLIC (before the JWT/Firebase guards). Idempotent confirmation of orders + wallet top-ups.
+app.use("/api/app/webhooks", webhookRoutes);
 // Public product-intake form (tools/add-products.html). Public POST has its own permissive CORS;
 // admin GET/DELETE under /admin use a shared INTAKE_ADMIN_TOKEN. Must stay BEFORE the JWT guard.
 app.use("/api/app/public/product-intake", productIntakeRoutes);

@@ -1,15 +1,17 @@
 import prisma from "../lib/prisma.js";
 import { refundWalletOnCancel } from "./referralRewards.js";
+import { reconcileOrderPayment } from "./paymentReconciliation.js";
 
 // Online/UPI orders decrement stock at placement (to hold it during payment). If the
 // customer never completes payment (abandons the Razorpay sheet, app crash), that stock
 // would be held forever. This sweeper auto-cancels stale unpaid online orders and
 // restores their stock.
 //
-// NOTE: This does NOT issue refunds — by definition these orders were never paid
-// (paymentStatus PENDING, no razorpayPaymentId). The separate orphan-payment case
-// (money captured by Razorpay but /pay never reached the server) still needs a Razorpay
-// webhook + reconciliation job; that is intentionally out of scope here.
+// SAFE-CANCEL: before cancelling, each candidate is reconciled against Razorpay's API
+// (reconcileOrderPayment) — so an order that was actually PAID but whose /pay confirmation never
+// reached us (app killed, webhook missed) is recovered to PAID and NOT cancelled. We only cancel
+// orders Razorpay confirms were never captured. This, together with the Razorpay webhook, closes
+// the orphan-payment gap (money captured but order stuck PENDING).
 
 const EXPIRY_MINUTES = 20;
 
@@ -31,6 +33,14 @@ export async function expireStaleUnpaidOrders(): Promise<number> {
 
   for (const order of stale) {
     try {
+      // Ask Razorpay whether this "unpaid" order was in fact paid (a captured payment whose
+      // confirmation never reached us). If so, reconcile marks it PAID (or refunds if it was already
+      // wrongly cancelled) and we must NOT cancel it.
+      if (order.razorpayOrderId) {
+        const r = await reconcileOrderPayment(order.id);
+        if (r.paymentStatus !== "PENDING") continue;
+      }
+
       await prisma.$transaction(async (tx) => {
         // Re-read inside the tx so we never cancel an order that just got paid in a
         // racing /pay call.

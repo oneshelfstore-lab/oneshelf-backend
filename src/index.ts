@@ -19,7 +19,7 @@ import fcmTokenRoutes from "./routes/fcmTokens.js";
 import { publicCategoryRouter, adminCategoryRouter } from "./routes/categories.js";
 import { publicCatalogRouter, adminCatalogRouter } from "./routes/catalog.js";
 import { publicBannerRouter, adminBannerRouter, ownerBannerRouter } from "./routes/banners.js";
-import { publicBrandRouter, ownerBrandRouter } from "./routes/brands.js";
+import { publicBrandRouter, ownerBrandRouter, sellerBrandRouter } from "./routes/brands.js";
 import cartRoutes from "./routes/cart.js";
 import { appCouponRouter, adminCouponRouter } from "./routes/coupons.js";
 import orderRoutes from "./routes/orders.js";
@@ -208,6 +208,7 @@ app.use("/api/app/owner/subscriptions", ownerSubscriptionRoutes);
 // Owner review queue for the product-intake form (Firebase OWNER auth) — approve/reject/delete.
 app.use("/api/app/owner/product-intake", ownerProductIntakeRoutes);
 app.use("/api/app/seller/catalog", sellerCatalogRoutes);
+app.use("/api/app/seller/brands", sellerBrandRouter);
 app.use("/api/app/seller/orders", sellerOrdersRoutes);
 app.use("/api/app/seller/me", sellerAccountRoutes);
 app.use("/api/app/delivery/orders", deliveryRoutes);

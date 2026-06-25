@@ -21,6 +21,24 @@ function isLooseType(productType: string): boolean {
   return productType === "LOOSE" || productType === "PRODUCE";
 }
 
+// Persist a free-text brand name into the shared Brand table so it shows up in the brand dropdown for
+// the seller's next product. The seller editor lets the brand be typed directly, so a brand that's
+// never gone through the explicit "add brand" dialog would otherwise never reach the dropdown. Upsert
+// by the unique name; best-effort — a brand-bookkeeping failure must never break the product save.
+async function ensureBrandPersisted(name?: string | null): Promise<void> {
+  const brand = (name ?? "").trim();
+  if (!brand) return;
+  try {
+    await prisma.brand.upsert({
+      where: { name: brand },
+      update: {},
+      create: { name: brand, logoUrl: null },
+    });
+  } catch (e) {
+    console.warn("ensureBrandPersisted (seller) failed — non-fatal:", e);
+  }
+}
+
 function formatProductForApp(product: any) {
   const isLoose = isLooseType(product.productType);
   return {
@@ -191,6 +209,8 @@ router.post("/", async (req: SellerRequest, res: Response) => {
       include: { variants: { orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
     });
 
+    await ensureBrandPersisted(product.brand);
+
     res.status(201).json({ success: true, data: formatProductForApp(product) });
   } catch (e) {
     sendError(res, e);
@@ -276,6 +296,9 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
       where: { id: productId },
       include: { variants: { orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
     });
+
+    await ensureBrandPersisted(updated?.brand);
+
     res.json({ success: true, data: formatProductForApp(updated) });
   } catch (e) {
     sendError(res, e);

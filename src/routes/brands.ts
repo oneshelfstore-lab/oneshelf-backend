@@ -3,6 +3,7 @@ import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
+import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
 
 // ─── Public router (no auth, mounted at /api/app/brands) ─────────────
 //
@@ -69,6 +70,46 @@ ownerBrandRouter.delete("/:id", async (req: Request, res: Response) => {
 
     await prisma.brand.delete({ where: { id: req.params.id } });
     res.json({ success: true, message: "Brand deleted" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── Seller router (FIREBASE auth + SELLER role, mounted at /api/app/seller/brands) ──
+//
+// A seller (notably the in-app house co-manager) needs to add a new brand so it persists in the
+// brand dropdown for future products — the owner write-path above is OWNER-only, so a seller would
+// get a 403 there. Brands are global display labels (products store the brand NAME as a string and
+// every catalog shares the one Brand table), so this just upserts by name; no per-seller scoping of
+// the row is needed. resolveSeller still gates out suspended/unlinked sellers.
+
+export const sellerBrandRouter = Router();
+sellerBrandRouter.use(firebaseAuthMiddleware as any);
+sellerBrandRouter.use(requireAppRole("SELLER") as any);
+sellerBrandRouter.use(resolveSeller as any);
+
+sellerBrandRouter.get("/", async (_req: SellerRequest, res: Response) => {
+  try {
+    const brands = await prisma.brand.findMany({ orderBy: { name: "asc" } });
+    res.json({ success: true, data: brands });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+sellerBrandRouter.post("/", async (req: SellerRequest, res: Response) => {
+  try {
+    const parsed = brandSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid brand data", parsed.error.errors);
+
+    // Upsert by the unique name — re-adding an existing brand is a no-op (keeps its logo) instead of
+    // failing on the unique constraint.
+    const brand = await prisma.brand.upsert({
+      where: { name: parsed.data.name },
+      update: { logoUrl: parsed.data.logoUrl ?? undefined },
+      create: { name: parsed.data.name, logoUrl: parsed.data.logoUrl ?? null },
+    });
+    res.status(201).json({ success: true, data: brand });
   } catch (e) {
     sendError(res, e);
   }

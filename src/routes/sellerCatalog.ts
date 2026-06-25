@@ -153,12 +153,21 @@ router.post("/", async (req: SellerRequest, res: Response) => {
     let handle = productData.handle;
     if (await prisma.catalogProduct.findUnique({ where: { handle } })) handle = `${handle}-${Date.now().toString(36)}`;
 
-    const skus = variants.map((v) => v.sku);
-    const existingSkus = await prisma.productVariant.findMany({ where: { sku: { in: skus } }, select: { sku: true } });
-    if (existingSkus.length > 0) {
-      const existSet = new Set(existingSkus.map((s) => s.sku));
-      variants.forEach((v) => { if (existSet.has(v.sku)) v.sku = `${v.sku}-${Date.now().toString(36)}`; });
-    }
+    // Ensure SKUs are unique WITHIN this product AND against existing DB rows. Two sizes of the same
+    // brand/category auto-generate the SAME SKU client-side (e.g. "GEN-STA-1PI"), which would trip the
+    // unique constraint and fail the whole save. Append the index so same-millisecond suffixes also
+    // can't re-collide.
+    const dbSkus = new Set(
+      (await prisma.productVariant.findMany({ where: { sku: { in: variants.map((v) => v.sku) } }, select: { sku: true } }))
+        .map((s) => s.sku)
+    );
+    const usedSkus = new Set<string>();
+    variants.forEach((v, i) => {
+      let sku = v.sku;
+      if (!sku || dbSkus.has(sku) || usedSkus.has(sku)) sku = `${sku || "SKU"}-${Date.now().toString(36)}${i}`;
+      v.sku = sku;
+      usedSkus.add(sku);
+    });
 
     const isLoose = isLooseType(productData.productType);
     const convertedVariants = variants.map((v) => {
@@ -233,6 +242,22 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
         const toRemove = existing.variants.map((v: any) => v.id).filter((id: string) => !incomingIds.includes(id));
         if (toRemove.length > 0) {
           await tx.productVariant.updateMany({ where: { id: { in: toRemove } }, data: { isActive: false } });
+        }
+        // Make SKUs of NEWLY-ADDED variants unique (vs existing DB rows, kept variants, and each
+        // other) so adding a second size can't hit the unique constraint.
+        const newOnes = variantUpdates.filter((v: any) => !v.id);
+        if (newOnes.length > 0) {
+          const dbSkus = new Set(
+            (await tx.productVariant.findMany({ where: { sku: { in: newOnes.map((v: any) => v.sku) } }, select: { sku: true } }))
+              .map((s) => s.sku)
+          );
+          const usedSkus = new Set<string>(variantUpdates.filter((v: any) => v.id).map((v: any) => v.sku));
+          newOnes.forEach((v: any, i: number) => {
+            let sku = v.sku;
+            if (!sku || dbSkus.has(sku) || usedSkus.has(sku)) sku = `${sku || "SKU"}-${Date.now().toString(36)}${i}`;
+            v.sku = sku;
+            usedSkus.add(sku);
+          });
         }
         for (const v of variantUpdates) {
           const c = fromAppFormat({ mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: (v as any).costPrice, stock: v.stock, bulkPrice: v.bulkPrice, packageSize: v.packageSize }, isLoose);

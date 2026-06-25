@@ -145,18 +145,20 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       handle = `${handle}-${Date.now().toString(36)}`;
     }
 
-    // Check SKU uniqueness
-    const skus = variants.map(v => v.sku);
-    const existingSkus = await prisma.productVariant.findMany({ where: { sku: { in: skus } }, select: { sku: true } });
-    if (existingSkus.length > 0) {
-      // Auto-suffix conflicting SKUs
-      const existSet = new Set(existingSkus.map(s => s.sku));
-      variants.forEach(v => {
-        if (existSet.has(v.sku)) {
-          v.sku = `${v.sku}-${Date.now().toString(36)}`;
-        }
-      });
-    }
+    // Ensure SKUs are unique WITHIN this product AND against existing DB rows. Two sizes of the same
+    // brand/category auto-generate the SAME SKU client-side, which would trip the unique constraint
+    // and fail the whole save. Append the index so same-millisecond suffixes can't re-collide.
+    const dbSkus = new Set(
+      (await prisma.productVariant.findMany({ where: { sku: { in: variants.map(v => v.sku) } }, select: { sku: true } }))
+        .map(s => s.sku)
+    );
+    const usedSkus = new Set<string>();
+    variants.forEach((v, i) => {
+      let sku = v.sku;
+      if (!sku || dbSkus.has(sku) || usedSkus.has(sku)) sku = `${sku || "SKU"}-${Date.now().toString(36)}${i}`;
+      v.sku = sku;
+      usedSkus.add(sku);
+    });
 
     // Convert loose variant prices from app format (per-increment) to API format (per-base-unit)
     const isLoose = isLooseType(productData.productType);

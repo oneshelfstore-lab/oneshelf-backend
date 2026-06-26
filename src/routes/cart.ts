@@ -131,7 +131,7 @@ router.post("/quote", async (req: FirebaseAuthRequest, res: Response) => {
       where: { id: { in: items.map((i) => i.variantId) } },
       include: {
         product: {
-          select: { productType: true, gstRate: true, hsnCode: true, isPackaged: true, categoryId: true },
+          select: { productType: true, gstRate: true, hsnCode: true, isPackaged: true, categoryId: true, isBuyOneGetOne: true },
         },
       },
     });

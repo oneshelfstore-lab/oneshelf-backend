@@ -42,6 +42,8 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         deliveryOtpRequired: true, shippingName: true, shippingPhone: true,
         shippingAddress: true, shippingPincode: true,
         createdAt: true, updatedAt: true,
+        // Customer-uploaded gate/door photo, shown on the delivery card to help find the address.
+        gatePhotoUrl: true,
         // Set when this order was auto-generated from a subscription → the app shows a 🔁 chip.
         subscriptionId: true,
         _count: { select: { items: true } },

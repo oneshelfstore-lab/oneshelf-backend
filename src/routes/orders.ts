@@ -49,6 +49,8 @@ const placeOrderSchema = z.object({
   couponCode: z.string().max(20).optional().nullable(),
   notes: z.string().max(500).optional().nullable(),
   deliverySlot: z.string().max(60).optional().nullable(),
+  // Optional URL of a customer-uploaded gate/door photo, surfaced to the delivery agent.
+  gatePhotoUrl: z.string().max(500).optional().nullable(),
   // Store credit the customer chose to apply (clamped server-side to balance + grand total).
   walletCredit: z.number().min(0).optional().nullable(),
 });
@@ -57,7 +59,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const parsed = placeOrderSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid order data", parsed.error.errors);
-    const { addressId, fulfillmentType, paymentMethod, couponCode, notes, deliverySlot, walletCredit } = parsed.data;
+    const { addressId, fulfillmentType, paymentMethod, couponCode, notes, deliverySlot, gatePhotoUrl, walletCredit } = parsed.data;
     const userId = req.appUser!.id;
 
     // Idempotency: if the client sends an Idempotency-Key and we already created an
@@ -91,7 +93,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         variant: {
           include: {
             product: {
-              select: { id: true, name: true, productType: true, hsnCode: true, gstRate: true, isPackaged: true, categoryId: true, imageUrls: true, sellerId: true },
+              select: { id: true, name: true, productType: true, hsnCode: true, gstRate: true, isPackaged: true, categoryId: true, imageUrls: true, sellerId: true, isBuyOneGetOne: true },
             },
           },
         },
@@ -205,7 +207,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           subtotal: totals.subtotal,
           // Coupon + loyalty member discount combined, so the stored order reconciles
           // (subtotal − discount + delivery = total). savedAmount tracks the full breakdown.
-          discount: totals.discount + totals.loyaltyDiscount,
+          discount: totals.discount + totals.loyaltyDiscount + totals.bogoDiscount,
           deliveryCharge: totals.deliveryCharge,
           taxableValue: totals.taxableValue,
           totalTax: totals.totalTax,
@@ -218,6 +220,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           notes,
           idempotencyKey,
           deliverySlot: fulfillmentType === "DELIVERY" ? (deliverySlot ?? null) : null,
+          gatePhotoUrl: fulfillmentType === "DELIVERY" ? (gatePhotoUrl ?? null) : null,
           items: { create: orderItems },
         },
         include: { items: true },

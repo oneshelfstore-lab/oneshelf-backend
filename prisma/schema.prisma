@@ -436,6 +436,10 @@ model CatalogProduct {
   // Owner opt-in: this product can be subscribed to (milk / newspaper / recurring). Gates the
   // "Subscribe" button on the PDP. Validated server-side on subscription create.
   isSubscribable   Boolean    @default(false)
+  // Owner opt-in: Buy-1-Get-1-Free. For every 2 units in the cart, 1 is free (floor(qty/2) free
+  // units), folded into the cart discount/savings. ⚠️ GST/CA: treated as an order-level discount
+  // (GST still computed per-line from full gross), consistent with how coupon discount behaves.
+  isBuyOneGetOne   Boolean    @default(false)
   imageUrls       String[]    @default([])
   searchKeywords  String[]    @default([])
   isActive        Boolean     @default(true)
@@ -948,6 +952,8 @@ model Order {
   // Customer-selected delivery window, e.g. "2026-06-08 09:00-12:00". Null = use the
   // store's default next-day schedule.
   deliverySlot          String?
+  // Optional customer-uploaded photo of their home gate/door, shown to the delivery agent.
+  gatePhotoUrl          String?
 
   // Subscriptions — set when this order was auto-generated from a standing Subscription.
   // subscriptionDate is the IST-midnight date this delivery is FOR; the composite unique below is

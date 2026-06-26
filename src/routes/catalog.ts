@@ -37,6 +37,7 @@ export function formatProductForApp(product: any) {
     isSampleEligible: product.isSampleEligible ?? false,
     featuredIn99Store: product.featuredIn99Store ?? false,
     isSubscribable: product.isSubscribable ?? false,
+    isBuyOneGetOne: product.isBuyOneGetOne ?? false,
     imageUrls: product.imageUrls,
     searchKeywords: product.searchKeywords,
     isActive: product.isActive,

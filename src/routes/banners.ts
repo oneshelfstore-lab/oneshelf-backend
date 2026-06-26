@@ -42,7 +42,7 @@ const bannerSchema = z.object({
   imageUrl: z.string().min(1).max(500),
   targetCategory: z.string().max(50).optional().nullable(),
   targetUrl: z.string().max(500).optional().nullable(),
-  placement: z.enum(["HOME", "CATEGORY"]).default("HOME"),
+  placement: z.enum(["HOME", "CATEGORY", "SPOTLIGHT"]).default("HOME"),
   displayOrder: z.number().int().min(0).default(0),
   isActive: z.boolean().default(true),
   startDate: z.coerce.date().optional().nullable(),

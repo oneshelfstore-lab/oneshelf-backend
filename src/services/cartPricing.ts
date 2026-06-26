@@ -37,6 +37,8 @@ export interface CartTotals {
   // Standing loyalty (tier) member discount applied to this cart, and the tier key that earned it.
   loyaltyDiscount: number;
   loyaltyTier: string | null;
+  // Buy-1-Get-1: value of the free units across BOGO lines (Σ floor(qty/2) × effectiveUnitPrice).
+  bogoDiscount: number;
   // Store credit (Phase 2) — a payment tender applied AFTER GST. walletApplied reduces totalAmount
   // (the amount due, never the taxable base); walletAvailable is the user's current balance (for
   // the checkout toggle). Both 0 for anonymous quotes (no userId).
@@ -64,6 +66,7 @@ interface CartItemWithVariant {
       hsnCode: string | null;
       isPackaged: boolean;
       categoryId: string;
+      isBuyOneGetOne?: boolean;
     };
   };
 }
@@ -86,6 +89,8 @@ export async function calculateCartTotals(
   walletCredit?: number | null,
 ): Promise<CartTotals> {
   const lines: CartLineItem[] = [];
+  // Buy-1-Get-1: accumulate the value of free units across BOGO-flagged products.
+  let bogoDiscount = 0;
 
   for (const item of cartItems) {
     const isLoose = isLooseType(item.variant.product.productType);
@@ -99,6 +104,12 @@ export async function calculateCartTotals(
     const effectiveUnitPrice = isBulk ? converted.bulkPrice! : unitPrice;
     const lineTotal = round2(effectiveUnitPrice * item.quantity);
     const gstRate = resolveGstRate(item);
+
+    // BOGO — for every 2 units, 1 is free. Only meaningful for whole-unit (non-loose) products.
+    if (item.variant.product.isBuyOneGetOne && !isLoose) {
+      const freeUnits = Math.floor(item.quantity / 2);
+      if (freeUnits > 0) bogoDiscount += round2(freeUnits * effectiveUnitPrice);
+    }
 
     // GST-inclusive back-calculation: taxable = gross / (1 + rate)
     const taxableValue = gstRate > 0 ? round2(lineTotal / (1 + gstRate / 100)) : lineTotal;
@@ -121,6 +132,7 @@ export async function calculateCartTotals(
     });
   }
 
+  bogoDiscount = round2(bogoDiscount);
   const subtotal = round2(lines.reduce((sum, l) => sum + l.lineTotal, 0));
 
   // Coupon
@@ -167,8 +179,9 @@ export async function calculateCartTotals(
     loyaltyTier = tier.key;
     tierFreeDelivery = tier.freeDelivery;
     if (tier.discountPct > 0) {
-      // Applied on the post-coupon subtotal so the two discounts don't compound oddly.
-      loyaltyDiscount = round2((subtotal - discount) * tier.discountPct / 100);
+      // Applied on the post-coupon, post-BOGO subtotal so the discounts don't compound oddly
+      // (no member % on the free BOGO units).
+      loyaltyDiscount = round2((subtotal - discount - bogoDiscount) * tier.discountPct / 100);
     }
   }
 
@@ -187,7 +200,7 @@ export async function calculateCartTotals(
     deliveryCharge = standardDelivery; // single source of truth: store config
   }
 
-  const afterDiscount = round2(subtotal - discount - loyaltyDiscount);
+  const afterDiscount = round2(subtotal - discount - loyaltyDiscount - bogoDiscount);
 
   // Recalculate totals
   const totalTaxable = round2(lines.reduce((sum, l) => sum + l.taxableValue, 0));
@@ -221,7 +234,7 @@ export async function calculateCartTotals(
     lines.reduce((sum, l) => sum + Math.max(0, l.mrp - l.effectiveUnitPrice) * l.quantity, 0),
   );
   const deliverySaved = !isPickup && deliveryCharge === 0 && standardDelivery > 0 ? standardDelivery : 0;
-  const savedAmount = round2(mrpSavings + discount + loyaltyDiscount + deliverySaved);
+  const savedAmount = round2(mrpSavings + discount + loyaltyDiscount + bogoDiscount + deliverySaved);
 
   return {
     items: lines,
@@ -237,6 +250,7 @@ export async function calculateCartTotals(
     savedAmount,
     loyaltyDiscount,
     loyaltyTier,
+    bogoDiscount,
     walletApplied,
     walletAvailable,
   };

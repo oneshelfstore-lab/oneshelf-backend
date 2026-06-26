@@ -366,6 +366,27 @@ model Company {
   updatedAt          DateTime @updatedAt
 }
 
+// ─── 1b. SuperCategory (Department / Zepto-style storefront) ─────────
+//
+// A coarse grouping ABOVE Category (Grocery → staples/dairy/oils; Fresh → fruits/veg; Tech →
+// electronics). Powers the big PNG tabs at the top of Home; tapping one opens a storefront of all
+// its child categories. Additive: a Category with superCategoryId=null simply appears in no
+// storefront (existing flat browse is unaffected).
+
+model SuperCategory {
+  id            String    @id @default(cuid())
+  slug          String    @unique
+  name          String
+  nameHi        String?
+  imageUrl      String?
+  displayOrder  Int       @default(0)
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  categories    Category[]
+}
+
 // ─── 2. Category ─────────────────────────────────────────────────────
 
 model Category {
@@ -377,6 +398,11 @@ model Category {
   isActive      Boolean   @default(true)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
+
+  // Optional parent super-category. SetNull so deleting a super-category just unlinks its children
+  // (never cascades to products).
+  superCategoryId String?
+  superCategory   SuperCategory? @relation(fields: [superCategoryId], references: [id], onDelete: SetNull)
 
   catalogProducts CatalogProduct[]
 }

@@ -72,6 +72,56 @@ publicCategoryRouter.get("/:slug/subcategories", async (req: Request, res: Respo
   }
 });
 
+// ─── Public super-category router (no auth, mounted at /api/app/super-categories) ──
+//
+// Powers the big PNG tabs at the top of Home + the storefront page they open.
+
+export const publicSuperCategoryRouter = Router();
+
+// GET / — ordered active super-categories (top tabs). Includes a childCount so the app can hide
+// empty groups if it wants.
+publicSuperCategoryRouter.get("/", async (_req: Request, res: Response) => {
+  try {
+    const supers = await prisma.superCategory.findMany({
+      where: { isActive: true },
+      orderBy: { displayOrder: "asc" },
+      include: { _count: { select: { categories: true } } },
+    });
+    const data = supers.map(({ _count, ...s }) => ({ ...s, childCount: _count.categories }));
+    res.json({ success: true, data });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// GET /:slug — one super-category + its child categories (each with a live product count) for the
+// storefront page. The app then loads products per child via the existing /products endpoint.
+publicSuperCategoryRouter.get("/:slug", async (req: Request, res: Response) => {
+  try {
+    const slug = req.params.slug as string;
+    const sup = await prisma.superCategory.findUnique({
+      where: { slug },
+      include: {
+        categories: {
+          where: { isActive: true },
+          orderBy: { displayOrder: "asc" },
+          include: { _count: { select: { catalogProducts: true } } },
+        },
+      },
+    });
+    if (!sup) throw new NotFoundError("SuperCategory", slug);
+
+    const { categories, ...rest } = sup;
+    const data = {
+      ...rest,
+      categories: categories.map(({ _count, ...c }) => ({ ...c, productCount: _count.catalogProducts })),
+    };
+    res.json({ success: true, data });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // ─── Admin router (JWT auth, mounted at /api/categories) ────────────
 
 export const adminCategoryRouter = Router();

@@ -16,7 +16,8 @@ import reportRoutes from "./routes/reports.js";
 import companyRoutes from "./routes/company.js";
 import storeConfigRoutes from "./routes/storeConfig.js";
 import fcmTokenRoutes from "./routes/fcmTokens.js";
-import { publicCategoryRouter, adminCategoryRouter } from "./routes/categories.js";
+import { publicCategoryRouter, adminCategoryRouter, publicSuperCategoryRouter } from "./routes/categories.js";
+import ownerSuperCategoryRoutes from "./routes/ownerSuperCategories.js";
 import { publicCatalogRouter, adminCatalogRouter } from "./routes/catalog.js";
 import { publicBannerRouter, adminBannerRouter, ownerBannerRouter } from "./routes/banners.js";
 import { publicBrandRouter, ownerBrandRouter, sellerBrandRouter } from "./routes/brands.js";
@@ -183,6 +184,7 @@ app.use("/api/app/me/fcm-token", fcmTokenRoutes);
 
 // Public app endpoints (no auth)
 app.use("/api/app/categories", publicCategoryRouter);
+app.use("/api/app/super-categories", publicSuperCategoryRouter);
 app.use("/api/app/products", publicCatalogRouter);
 app.use("/api/app/banners", publicBannerRouter);
 app.use("/api/app/brands", publicBrandRouter);
@@ -208,6 +210,7 @@ app.use("/api/app/owner/quote-requests", ownerQuoteRoutes);
 app.use("/api/app/owner/partner-applications", ownerPartnerApplicationRoutes);
 app.use("/api/app/owner/broadcast", ownerBroadcastRoutes);
 app.use("/api/app/owner/banners", ownerBannerRouter);
+app.use("/api/app/owner/super-categories", ownerSuperCategoryRoutes);
 app.use("/api/app/owner/brands", ownerBrandRouter);
 app.use("/api/app/owner/users", ownerUsersRoutes);
 app.use("/api/app/owner/sellers", ownerSellersRoutes);

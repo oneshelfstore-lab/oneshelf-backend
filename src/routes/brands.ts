@@ -4,6 +4,7 @@ import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
+import { cacheControl, memoCache, PUBLIC_TTL_MS, PUBLIC_TTL_SECONDS } from "../lib/httpCache.js";
 
 // ─── Public router (no auth, mounted at /api/app/brands) ─────────────
 //
@@ -12,9 +13,11 @@ import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js"
 
 export const publicBrandRouter = Router();
 
-publicBrandRouter.get("/", async (_req: Request, res: Response) => {
+publicBrandRouter.get("/", cacheControl(PUBLIC_TTL_SECONDS), async (_req: Request, res: Response) => {
   try {
-    const brands = await prisma.brand.findMany({ orderBy: { name: "asc" } });
+    const brands = await memoCache.get("brands", PUBLIC_TTL_MS, () =>
+      prisma.brand.findMany({ orderBy: { name: "asc" } }),
+    );
     res.json({ success: true, data: brands });
   } catch (e) {
     sendError(res, e);
@@ -57,6 +60,7 @@ ownerBrandRouter.post("/", async (req: Request, res: Response) => {
       update: { logoUrl: parsed.data.logoUrl ?? undefined },
       create: { name: parsed.data.name, logoUrl: parsed.data.logoUrl ?? null },
     });
+    memoCache.bust("brands");
     res.status(201).json({ success: true, data: brand });
   } catch (e) {
     sendError(res, e);
@@ -69,6 +73,7 @@ ownerBrandRouter.delete("/:id", async (req: Request, res: Response) => {
     if (!existing) throw new NotFoundError("Brand", req.params.id!);
 
     await prisma.brand.delete({ where: { id: req.params.id } });
+    memoCache.bust("brands");
     res.json({ success: true, message: "Brand deleted" });
   } catch (e) {
     sendError(res, e);
@@ -109,6 +114,7 @@ sellerBrandRouter.post("/", async (req: SellerRequest, res: Response) => {
       update: { logoUrl: parsed.data.logoUrl ?? undefined },
       create: { name: parsed.data.name, logoUrl: parsed.data.logoUrl ?? null },
     });
+    memoCache.bust("brands");
     res.status(201).json({ success: true, data: brand });
   } catch (e) {
     sendError(res, e);

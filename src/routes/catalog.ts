@@ -4,6 +4,15 @@ import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib/errors.js";
 import { requireRole } from "../middleware/auth.js";
 import { formatVariantForApp } from "../utils/looseUnitConverter.js";
+import { cacheControl, memoCache } from "../lib/httpCache.js";
+
+// Product reads carry live stock (decremented on every order), so they are NOT server-memoized —
+// they get a SHORT client Cache-Control window only, and checkout re-validates stock authoritatively.
+// The expensive discovery aggregations (trending / deal-today) below ARE server-memoized for a few
+// minutes: they are costly to compute and fine to be slightly stale on a rail.
+const CATALOG_LIST_TTL = 30; // seconds — browse list / product detail client cache
+const DISCOVERY_TTL_MS = 5 * 60 * 1000;
+const DISCOVERY_TTL_SECONDS = 5 * 60;
 
 // ─── Shared ──────────────────────────────────────────────────────────
 
@@ -67,7 +76,7 @@ const browseSchema = z.object({
 });
 
 // GET /api/app/products
-publicCatalogRouter.get("/", async (req: Request, res: Response) => {
+publicCatalogRouter.get("/", cacheControl(CATALOG_LIST_TTL), async (req: Request, res: Response) => {
   try {
     const parsed = browseSchema.safeParse(req.query);
     if (!parsed.success) throw new ValidationError("Invalid query", parsed.error.errors);
@@ -142,7 +151,7 @@ function toSuggestion(p: any) {
 }
 
 // GET /api/app/products/suggest?q=
-publicCatalogRouter.get("/suggest", async (req: Request, res: Response) => {
+publicCatalogRouter.get("/suggest", cacheControl(CATALOG_LIST_TTL), async (req: Request, res: Response) => {
   try {
     const q = String(req.query.q || "").trim().slice(0, 100);
     if (q.length < 1) return res.json({ success: true, data: [] });
@@ -193,29 +202,32 @@ publicCatalogRouter.get("/suggest", async (req: Request, res: Response) => {
 
 // GET /api/app/products/trending — best-sellers (by ordered quantity), shown when
 // the search box is empty. Derived from existing order data; no extra tracking.
-publicCatalogRouter.get("/trending", async (_req: Request, res: Response) => {
+publicCatalogRouter.get("/trending", cacheControl(DISCOVERY_TTL_SECONDS), async (_req: Request, res: Response) => {
   try {
-    const grouped = await prisma.orderItem.groupBy({
-      by: ["variantId"],
-      _sum: { quantity: true },
-      where: { variantId: { not: null } },
-      orderBy: { _sum: { quantity: "desc" } },
-      take: 20,
-    });
-    const variantIds = grouped.map((g) => g.variantId).filter((v): v is string => !!v);
-    if (variantIds.length === 0) return res.json({ success: true, data: [] });
+    const data = await memoCache.get("products:trending", DISCOVERY_TTL_MS, async () => {
+      const grouped = await prisma.orderItem.groupBy({
+        by: ["variantId"],
+        _sum: { quantity: true },
+        where: { variantId: { not: null } },
+        orderBy: { _sum: { quantity: "desc" } },
+        take: 20,
+      });
+      const variantIds = grouped.map((g) => g.variantId).filter((v): v is string => !!v);
+      if (variantIds.length === 0) return [];
 
-    const variants = await prisma.productVariant.findMany({
-      where: { id: { in: variantIds }, isActive: true },
-      select: { productId: true },
-    });
-    const productIds = [...new Set(variants.map((v) => v.productId))].slice(0, 10);
+      const variants = await prisma.productVariant.findMany({
+        where: { id: { in: variantIds }, isActive: true },
+        select: { productId: true },
+      });
+      const productIds = [...new Set(variants.map((v) => v.productId))].slice(0, 10);
 
-    const products = await prisma.catalogProduct.findMany({
-      where: { id: { in: productIds }, isActive: true },
-      select: suggestSelect,
+      const products = await prisma.catalogProduct.findMany({
+        where: { id: { in: productIds }, isActive: true },
+        select: suggestSelect,
+      });
+      return products.map(toSuggestion);
     });
-    res.json({ success: true, data: products.map(toSuggestion) });
+    res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);
   }
@@ -224,8 +236,9 @@ publicCatalogRouter.get("/trending", async (_req: Request, res: Response) => {
 // GET /api/app/products/trending-products — full products most ordered in the last 7 days,
 // each with its weekly ordered-quantity count. Powers the Home "Trending this week" rail.
 // Real order data only; in-stock products; the client shows the count chip only above a floor.
-publicCatalogRouter.get("/trending-products", async (_req: Request, res: Response) => {
+publicCatalogRouter.get("/trending-products", cacheControl(DISCOVERY_TTL_SECONDS), async (_req: Request, res: Response) => {
   try {
+    const data = await memoCache.get("products:trending-products", DISCOVERY_TTL_MS, async () => {
     const since = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     const grouped = await prisma.orderItem.groupBy({
       by: ["variantId"],
@@ -238,7 +251,7 @@ publicCatalogRouter.get("/trending-products", async (_req: Request, res: Respons
       take: 50,
     });
     const variantIds = grouped.map((g) => g.variantId).filter((v): v is string => !!v);
-    if (variantIds.length === 0) return res.json({ success: true, data: [] });
+    if (variantIds.length === 0) return [];
 
     // Roll weekly quantity up from variants to their parent products.
     const variants = await prisma.productVariant.findMany({
@@ -254,7 +267,7 @@ publicCatalogRouter.get("/trending-products", async (_req: Request, res: Respons
       .sort((a, b) => b[1] - a[1])
       .slice(0, 10)
       .map(([id]) => id);
-    if (topProductIds.length === 0) return res.json({ success: true, data: [] });
+    if (topProductIds.length === 0) return [];
 
     const products = await prisma.catalogProduct.findMany({
       where: { id: { in: topProductIds }, isActive: true },
@@ -266,10 +279,11 @@ publicCatalogRouter.get("/trending-products", async (_req: Request, res: Respons
     });
     const byId = new Map(products.map((p) => [p.id, p]));
     // Preserve the most-ordered ordering, keep only in-stock products, attach the count.
-    const data = topProductIds
+    return topProductIds
       .map((id) => byId.get(id))
       .filter((p): p is NonNullable<typeof p> => !!p && p.variants.some((v: any) => Number(v.stock) > 0))
       .map((p) => ({ product: formatProductForApp(p), count: qtyByProduct.get(p.id) ?? 0 }));
+    });
     res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);
@@ -279,40 +293,43 @@ publicCatalogRouter.get("/trending-products", async (_req: Request, res: Respons
 // GET /api/app/products/deal-today — one deterministic "today's pick" per day. Picked from products
 // that ALREADY have a real discount (mrp > sellingPrice) — no fabricated pricing. Stable within the
 // IST day, changes daily. Returns null when nothing is genuinely discounted.
-publicCatalogRouter.get("/deal-today", async (_req: Request, res: Response) => {
+publicCatalogRouter.get("/deal-today", cacheControl(DISCOVERY_TTL_SECONDS), async (_req: Request, res: Response) => {
   try {
-    const products = await prisma.catalogProduct.findMany({
-      where: { isActive: true, variants: { some: { isActive: true, stock: { gt: 0 } } } },
-      include: {
-        variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
-        category: { select: { slug: true, name: true } },
-        seller: SELLER_SELECT,
-      },
-    });
+    const data = await memoCache.get("products:deal-today", DISCOVERY_TTL_MS, async () => {
+      const products = await prisma.catalogProduct.findMany({
+        where: { isActive: true, variants: { some: { isActive: true, stock: { gt: 0 } } } },
+        include: {
+          variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
+          category: { select: { slug: true, name: true } },
+          seller: SELLER_SELECT,
+        },
+      });
 
-    const pool = products
-      .map((p) => {
-        let best = 0;
-        for (const v of p.variants) {
-          const mrp = Number(v.mrp), sp = Number(v.sellingPrice);
-          if (mrp > sp && mrp > 0 && Number(v.stock) > 0) {
-            best = Math.max(best, Math.round(((mrp - sp) / mrp) * 100));
+      const pool = products
+        .map((p) => {
+          let best = 0;
+          for (const v of p.variants) {
+            const mrp = Number(v.mrp), sp = Number(v.sellingPrice);
+            if (mrp > sp && mrp > 0 && Number(v.stock) > 0) {
+              best = Math.max(best, Math.round(((mrp - sp) / mrp) * 100));
+            }
           }
-        }
-        return { p, discountPct: best };
-      })
-      .filter((x) => x.discountPct > 0)
-      .sort((a, b) => a.p.id.localeCompare(b.p.id)); // stable ordering for a stable daily pick
+          return { p, discountPct: best };
+        })
+        .filter((x) => x.discountPct > 0)
+        .sort((a, b) => a.p.id.localeCompare(b.p.id)); // stable ordering for a stable daily pick
 
-    if (pool.length === 0) return res.json({ success: true, data: null });
+      if (pool.length === 0) return null;
 
-    // Deterministic by IST calendar date so it matches the customer's "today" and rotates daily.
-    const istDate = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
-    let h = 0;
-    for (let i = 0; i < istDate.length; i++) h = (h * 31 + istDate.charCodeAt(i)) >>> 0;
-    const chosen = pool[h % pool.length]!;
+      // Deterministic by IST calendar date so it matches the customer's "today" and rotates daily.
+      const istDate = new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+      let h = 0;
+      for (let i = 0; i < istDate.length; i++) h = (h * 31 + istDate.charCodeAt(i)) >>> 0;
+      const chosen = pool[h % pool.length]!;
 
-    res.json({ success: true, data: { product: formatProductForApp(chosen.p), discountPct: chosen.discountPct } });
+      return { product: formatProductForApp(chosen.p), discountPct: chosen.discountPct };
+    });
+    res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);
   }
@@ -322,7 +339,7 @@ publicCatalogRouter.get("/deal-today", async (_req: Request, res: Response) => {
 // AND actually priced ₹99 or less (a cheapest active, in-stock variant ≤ 99), so the "everything
 // under ₹99" promise stays true even if a flagged item is later repriced. In-stock only. Declared
 // before "/:id" so the literal path isn't swallowed as a product id.
-publicCatalogRouter.get("/under-99", async (_req: Request, res: Response) => {
+publicCatalogRouter.get("/under-99", cacheControl(CATALOG_LIST_TTL), async (_req: Request, res: Response) => {
   try {
     const products = await prisma.catalogProduct.findMany({
       where: {
@@ -433,7 +450,7 @@ publicCatalogRouter.post("/stock-check", async (req: Request, res: Response) => 
 
 // GET /api/app/products/:id/alternatives — in-stock products from the same category.
 // Used on the PDP when the viewed product is out of stock (OOS substitution).
-publicCatalogRouter.get("/:id/alternatives", async (req: Request, res: Response) => {
+publicCatalogRouter.get("/:id/alternatives", cacheControl(CATALOG_LIST_TTL), async (req: Request, res: Response) => {
   try {
     const product = await prisma.catalogProduct.findUnique({
       where: { id: req.params.id },
@@ -466,7 +483,7 @@ publicCatalogRouter.get("/:id/alternatives", async (req: Request, res: Response)
 });
 
 // GET /api/app/products/:id
-publicCatalogRouter.get("/:id", async (req: Request, res: Response) => {
+publicCatalogRouter.get("/:id", cacheControl(CATALOG_LIST_TTL), async (req: Request, res: Response) => {
   try {
     const product = await prisma.catalogProduct.findUnique({
       where: { id: req.params.id },

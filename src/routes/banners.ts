@@ -4,31 +4,37 @@ import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { requireRole } from "../middleware/auth.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
+import { cacheControl, memoCache, PUBLIC_TTL_MS, PUBLIC_TTL_SECONDS } from "../lib/httpCache.js";
 
 // ─── Public router (no auth, mounted at /api/app/banners) ───────────
 
 export const publicBannerRouter = Router();
 
-publicBannerRouter.get("/", async (req: Request, res: Response) => {
+publicBannerRouter.get("/", cacheControl(PUBLIC_TTL_SECONDS), async (req: Request, res: Response) => {
   try {
-    const now = new Date();
     // Optional ?placement=HOME|CATEGORY filter so category-page banners are a distinct set from
     // the Home carousel. No param → all active banners (back-compat for any existing caller).
     const placement = typeof req.query.placement === "string" ? req.query.placement : undefined;
-    const banners = await prisma.banner.findMany({
-      where: {
-        isActive: true,
-        ...(placement ? { placement } : {}),
-        OR: [
-          { startDate: null, endDate: null },
-          { startDate: { lte: now }, endDate: null },
-          { startDate: null, endDate: { gte: now } },
-          { startDate: { lte: now }, endDate: { gte: now } },
-        ],
-      },
-      orderBy: { displayOrder: "asc" },
+    // Cache per placement. Note: the time-window filter (start/end dates) is evaluated inside the
+    // loader using "now" at cache-fill time, so a banner can be at most PUBLIC_TTL_MS late to
+    // appear/expire by schedule — acceptable for a 60s window; owner add/delete busts immediately.
+    const data = await memoCache.get(`banners:${placement ?? "all"}`, PUBLIC_TTL_MS, async () => {
+      const now = new Date();
+      return prisma.banner.findMany({
+        where: {
+          isActive: true,
+          ...(placement ? { placement } : {}),
+          OR: [
+            { startDate: null, endDate: null },
+            { startDate: { lte: now }, endDate: null },
+            { startDate: null, endDate: { gte: now } },
+            { startDate: { lte: now }, endDate: { gte: now } },
+          ],
+        },
+        orderBy: { displayOrder: "asc" },
+      });
     });
-    res.json({ success: true, data: banners });
+    res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);
   }
@@ -64,6 +70,7 @@ adminBannerRouter.post("/", requireRole("OWNER") as any, async (req: Request, re
     if (!parsed.success) throw new ValidationError("Invalid banner data", parsed.error.errors);
 
     const banner = await prisma.banner.create({ data: parsed.data });
+    memoCache.bust("banners");
     res.status(201).json({ success: true, data: banner });
   } catch (e) {
     sendError(res, e);
@@ -79,6 +86,7 @@ adminBannerRouter.put("/:id", requireRole("OWNER") as any, async (req: Request, 
     if (!parsed.success) throw new ValidationError("Invalid banner data", parsed.error.errors);
 
     const banner = await prisma.banner.update({ where: { id: req.params.id }, data: parsed.data });
+    memoCache.bust("banners");
     res.json({ success: true, data: banner });
   } catch (e) {
     sendError(res, e);
@@ -91,6 +99,7 @@ adminBannerRouter.delete("/:id", requireRole("OWNER") as any, async (req: Reques
     if (!existing) throw new NotFoundError("Banner", req.params.id!);
 
     await prisma.banner.update({ where: { id: req.params.id }, data: { isActive: false } });
+    memoCache.bust("banners");
     res.json({ success: true, message: "Banner deactivated" });
   } catch (e) {
     sendError(res, e);
@@ -123,6 +132,7 @@ ownerBannerRouter.post("/", async (req: Request, res: Response) => {
     if (!parsed.success) throw new ValidationError("Invalid banner data", parsed.error.errors);
 
     const banner = await prisma.banner.create({ data: parsed.data });
+    memoCache.bust("banners");
     res.status(201).json({ success: true, data: banner });
   } catch (e) {
     sendError(res, e);
@@ -137,6 +147,7 @@ ownerBannerRouter.delete("/:id", async (req: Request, res: Response) => {
     // Hard delete — the owner tapped the trash icon expecting it gone (the public list filters by
     // isActive, so a soft-delete would also disappear, but hard delete avoids accumulating rows).
     await prisma.banner.delete({ where: { id: req.params.id } });
+    memoCache.bust("banners");
     res.json({ success: true, message: "Banner deleted" });
   } catch (e) {
     sendError(res, e);

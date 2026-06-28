@@ -7,8 +7,15 @@ import {
   requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
+import { cacheControl, memoCache } from "../lib/httpCache.js";
 
 const router = Router();
+
+// Store config gates ordering (isOrderingAllowed) + operating hours, so it uses a SHORTER window
+// than the catalog reads (20s) — a customer who already cached "open" can be at most ~20s late to
+// see an owner pause. The PUT below busts the server cache immediately for everyone else.
+const CONFIG_TTL_MS = 20 * 1000;
+const CONFIG_TTL_SECONDS = 20;
 
 const updateSchema = z.object({
   storeName: z.string().min(1).max(200).optional(),
@@ -34,12 +41,13 @@ const updateSchema = z.object({
 });
 
 // GET /api/app/config — public, no auth
-router.get("/", async (_req, res: Response) => {
+router.get("/", cacheControl(CONFIG_TTL_SECONDS), async (_req, res: Response) => {
   try {
-    let config = await prisma.storeConfig.findFirst();
-    if (!config) {
-      config = await prisma.storeConfig.create({ data: {} });
-    }
+    const config = await memoCache.get("config", CONFIG_TTL_MS, async () => {
+      let c = await prisma.storeConfig.findFirst();
+      if (!c) c = await prisma.storeConfig.create({ data: {} });
+      return c;
+    });
     res.json({ success: true, data: config });
   } catch (e) {
     sendError(res, e);
@@ -71,6 +79,7 @@ router.put(
         });
       }
 
+      memoCache.bust("config");
       res.json({ success: true, data: config });
     } catch (e) {
       sendError(res, e);

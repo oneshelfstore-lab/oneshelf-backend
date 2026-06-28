@@ -4,25 +4,28 @@ import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib/errors.js";
 import { requireRole } from "../middleware/auth.js";
 import { SUBCATEGORIES, slugifySub } from "../data/subcategories.js";
+import { cacheControl, memoCache, PUBLIC_TTL_MS, PUBLIC_TTL_SECONDS } from "../lib/httpCache.js";
 
 // ─── Public router (no auth, mounted at /api/app/categories) ────────
 
 export const publicCategoryRouter = Router();
 
-publicCategoryRouter.get("/", async (_req: Request, res: Response) => {
+publicCategoryRouter.get("/", cacheControl(PUBLIC_TTL_SECONDS), async (_req: Request, res: Response) => {
   try {
-    const categories = await prisma.category.findMany({
-      where: { isActive: true },
-      orderBy: { displayOrder: "asc" },
-      include: { _count: { select: { catalogProducts: true } } },
+    const data = await memoCache.get("categories", PUBLIC_TTL_MS, async () => {
+      const categories = await prisma.category.findMany({
+        where: { isActive: true },
+        orderBy: { displayOrder: "asc" },
+        include: { _count: { select: { catalogProducts: true } } },
+      });
+      // Flatten the relation count into a plain productCount the app consumes
+      // (mirrors the admin endpoint's _count include; counts ALL catalog products
+      // in the category — active or not, matching the admin tile counts).
+      return categories.map(({ _count, ...c }) => ({
+        ...c,
+        productCount: _count.catalogProducts,
+      }));
     });
-    // Flatten the relation count into a plain productCount the app consumes
-    // (mirrors the admin endpoint's _count include; counts ALL catalog products
-    // in the category — active or not, matching the admin tile counts).
-    const data = categories.map(({ _count, ...c }) => ({
-      ...c,
-      productCount: _count.catalogProducts,
-    }));
     res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);
@@ -33,38 +36,41 @@ publicCategoryRouter.get("/", async (_req: Request, res: Response) => {
 // category, each with a live count of active products. Returns the curated list
 // (ordered) merged with any legacy/free-text values present in the data, so nothing
 // is hidden. Powers the category → sub-category browsing rail.
-publicCategoryRouter.get("/:slug/subcategories", async (req: Request, res: Response) => {
+publicCategoryRouter.get("/:slug/subcategories", cacheControl(PUBLIC_TTL_SECONDS), async (req: Request, res: Response) => {
   try {
     const slug = req.params.slug!;
-    const category = await prisma.category.findUnique({ where: { slug }, select: { id: true } });
-    if (!category) return res.json({ success: true, data: [] });
+    const data = await memoCache.get(`categories:sub:${slug}`, PUBLIC_TTL_MS, async () => {
+      const category = await prisma.category.findUnique({ where: { slug }, select: { id: true } });
+      if (!category) return [] as { slug: string; name: string; productCount: number }[];
 
-    const grouped = await prisma.catalogProduct.groupBy({
-      by: ["subcategory"],
-      where: { categoryId: category.id, isActive: true, subcategory: { not: null } },
-      _count: { _all: true },
+      const grouped = await prisma.catalogProduct.groupBy({
+        by: ["subcategory"],
+        where: { categoryId: category.id, isActive: true, subcategory: { not: null } },
+        _count: { _all: true },
+      });
+
+      // Sum counts by trimmed name (collapses "Rice" vs "Rice ").
+      const counts = new Map<string, number>();
+      for (const g of grouped) {
+        const name = (g.subcategory ?? "").trim();
+        if (name) counts.set(name, (counts.get(name) ?? 0) + g._count._all);
+      }
+
+      const canonical = SUBCATEGORIES[slug] ?? [];
+      const seen = new Set<string>();
+      const out: { slug: string; name: string; productCount: number }[] = [];
+
+      // Curated list first (preserves order), with live counts.
+      for (const name of canonical) {
+        seen.add(name);
+        out.push({ slug: slugifySub(name), name, productCount: counts.get(name) ?? 0 });
+      }
+      // Then any non-canonical values that exist in the data (legacy free-text).
+      for (const [name, count] of counts) {
+        if (!seen.has(name)) out.push({ slug: slugifySub(name), name, productCount: count });
+      }
+      return out;
     });
-
-    // Sum counts by trimmed name (collapses "Rice" vs "Rice ").
-    const counts = new Map<string, number>();
-    for (const g of grouped) {
-      const name = (g.subcategory ?? "").trim();
-      if (name) counts.set(name, (counts.get(name) ?? 0) + g._count._all);
-    }
-
-    const canonical = SUBCATEGORIES[slug] ?? [];
-    const seen = new Set<string>();
-    const data: { slug: string; name: string; productCount: number }[] = [];
-
-    // Curated list first (preserves order), with live counts.
-    for (const name of canonical) {
-      seen.add(name);
-      data.push({ slug: slugifySub(name), name, productCount: counts.get(name) ?? 0 });
-    }
-    // Then any non-canonical values that exist in the data (legacy free-text).
-    for (const [name, count] of counts) {
-      if (!seen.has(name)) data.push({ slug: slugifySub(name), name, productCount: count });
-    }
 
     res.json({ success: true, data });
   } catch (e) {
@@ -80,14 +86,16 @@ export const publicSuperCategoryRouter = Router();
 
 // GET / — ordered active super-categories (top tabs). Includes a childCount so the app can hide
 // empty groups if it wants.
-publicSuperCategoryRouter.get("/", async (_req: Request, res: Response) => {
+publicSuperCategoryRouter.get("/", cacheControl(PUBLIC_TTL_SECONDS), async (_req: Request, res: Response) => {
   try {
-    const supers = await prisma.superCategory.findMany({
-      where: { isActive: true },
-      orderBy: { displayOrder: "asc" },
-      include: { _count: { select: { categories: true } } },
+    const data = await memoCache.get("super-cats", PUBLIC_TTL_MS, async () => {
+      const supers = await prisma.superCategory.findMany({
+        where: { isActive: true },
+        orderBy: { displayOrder: "asc" },
+        include: { _count: { select: { categories: true } } },
+      });
+      return supers.map(({ _count, ...s }) => ({ ...s, childCount: _count.categories }));
     });
-    const data = supers.map(({ _count, ...s }) => ({ ...s, childCount: _count.categories }));
     res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);
@@ -96,26 +104,28 @@ publicSuperCategoryRouter.get("/", async (_req: Request, res: Response) => {
 
 // GET /:slug — one super-category + its child categories (each with a live product count) for the
 // storefront page. The app then loads products per child via the existing /products endpoint.
-publicSuperCategoryRouter.get("/:slug", async (req: Request, res: Response) => {
+publicSuperCategoryRouter.get("/:slug", cacheControl(PUBLIC_TTL_SECONDS), async (req: Request, res: Response) => {
   try {
     const slug = req.params.slug as string;
-    const sup = await prisma.superCategory.findUnique({
-      where: { slug },
-      include: {
-        categories: {
-          where: { isActive: true },
-          orderBy: { displayOrder: "asc" },
-          include: { _count: { select: { catalogProducts: true } } },
+    const data = await memoCache.get(`super-cats:${slug}`, PUBLIC_TTL_MS, async () => {
+      const sup = await prisma.superCategory.findUnique({
+        where: { slug },
+        include: {
+          categories: {
+            where: { isActive: true },
+            orderBy: { displayOrder: "asc" },
+            include: { _count: { select: { catalogProducts: true } } },
+          },
         },
-      },
-    });
-    if (!sup) throw new NotFoundError("SuperCategory", slug);
+      });
+      if (!sup) throw new NotFoundError("SuperCategory", slug);
 
-    const { categories, ...rest } = sup;
-    const data = {
-      ...rest,
-      categories: categories.map(({ _count, ...c }) => ({ ...c, productCount: _count.catalogProducts })),
-    };
+      const { categories, ...rest } = sup;
+      return {
+        ...rest,
+        categories: categories.map(({ _count, ...c }) => ({ ...c, productCount: _count.catalogProducts })),
+      };
+    });
     res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);
@@ -156,6 +166,7 @@ adminCategoryRouter.post("/", requireRole("OWNER") as any, async (req: Request, 
     if (existing) throw new ConflictError(`Category slug '${parsed.data.slug}' already exists`);
 
     const category = await prisma.category.create({ data: parsed.data });
+    memoCache.bust("categories", "super-cats");
     res.status(201).json({ success: true, data: category });
   } catch (e) {
     sendError(res, e);
@@ -176,6 +187,7 @@ adminCategoryRouter.put("/:id", requireRole("OWNER") as any, async (req: Request
     }
 
     const category = await prisma.category.update({ where: { id: req.params.id }, data: parsed.data });
+    memoCache.bust("categories", "super-cats");
     res.json({ success: true, data: category });
   } catch (e) {
     sendError(res, e);
@@ -188,6 +200,7 @@ adminCategoryRouter.delete("/:id", requireRole("OWNER") as any, async (req: Requ
     if (!existing) throw new NotFoundError("Category", req.params.id!);
 
     await prisma.category.update({ where: { id: req.params.id }, data: { isActive: false } });
+    memoCache.bust("categories", "super-cats");
     res.json({ success: true, message: "Category deactivated" });
   } catch (e) {
     sendError(res, e);
@@ -228,6 +241,7 @@ adminCategoryRouter.post("/import-csv", requireRole("OWNER") as any, async (req:
 
     const imported = results.filter(r => r.status === "ok").length;
     const errors = results.filter(r => r.status === "error").length;
+    if (imported > 0) memoCache.bust("categories", "super-cats");
     res.json({ success: true, data: { imported, errors, details: results } });
   } catch (e) {
     sendError(res, e);

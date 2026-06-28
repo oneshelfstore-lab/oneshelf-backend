@@ -349,4 +349,36 @@ router.get("/categories", async (_req: SellerRequest, res: Response) => {
   }
 });
 
+// ─── POST /categories — create a store category (HOUSE co-manager only) ───
+// Categories are store-wide, so only the HOUSE manager (the owner's co-manager) may create one —
+// third-party marketplace sellers cannot add global categories. Mirrors ownerCatalog's create
+// (upsert by slug); the house manager gets the same "add new category" power as the owner.
+router.post("/categories", async (req: SellerRequest, res: Response) => {
+  try {
+    if (!req.sellerIsHouse) {
+      return res.status(403).json({
+        success: false,
+        error: { code: "FORBIDDEN", message: "Only the store's house manager can create categories", details: [] },
+      });
+    }
+    const parsed = z.object({
+      slug: z.string().min(1).max(50).regex(/^[a-z0-9_]+$/, "Slug must be lowercase alphanumeric with underscores"),
+      name: z.string().min(1).max(100),
+      imageUrl: z.string().max(500).optional().nullable(),
+      displayOrder: z.number().int().min(0).default(0),
+      isActive: z.boolean().default(true),
+    }).safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid category data", parsed.error.errors);
+
+    const category = await prisma.category.upsert({
+      where: { slug: parsed.data.slug },
+      update: { name: parsed.data.name, imageUrl: parsed.data.imageUrl, displayOrder: parsed.data.displayOrder },
+      create: parsed.data,
+    });
+    res.status(201).json({ success: true, data: category });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 export default router;

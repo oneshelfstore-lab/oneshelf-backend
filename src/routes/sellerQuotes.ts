@@ -2,22 +2,36 @@ import { Router, type Response } from "express";
 import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
-import {
-  firebaseAuthMiddleware,
-  requireAppRole,
-  type FirebaseAuthRequest,
-} from "../middleware/firebaseAuth.js";
+import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
+import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
 import { shapeQuote } from "./appUser.js";
 import { notifyQuoteReady } from "../services/fcmNotifier.js";
 
-// Owner quote-request inbox. Mounted at /api/app/owner/quote-requests.
+// Bulk-order (quote-request) inbox for the HOUSE co-manager. Mounted at /api/app/seller/quote-requests.
+// Quote requests are store-wide (not per-seller), so this MIRRORS the owner inbox (routes/ownerQuotes.ts)
+// but is gated to the store's house manager only — third-party marketplace sellers (sellerIsHouse=false)
+// get 403. The owner keeps their own /api/app/owner/quote-requests routes unchanged.
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
-router.use(requireAppRole("OWNER") as any);
+router.use(requireAppRole("SELLER") as any);
+router.use(resolveSeller as any);
 
-// GET /api/app/owner/quote-requests → all requests + customer name/phone (newest first)
-router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
+// Every route here is house-manager-only — third-party sellers can't manage store bulk orders.
+function requireHouse(req: SellerRequest, res: Response): boolean {
+  if (req.sellerIsHouse !== true) {
+    res.status(403).json({
+      success: false,
+      error: { code: "FORBIDDEN", message: "Only the store's house manager can manage bulk orders", details: [] },
+    });
+    return false;
+  }
+  return true;
+}
+
+// GET /api/app/seller/quote-requests → all requests + customer name/phone (newest first)
+router.get("/", async (req: SellerRequest, res: Response) => {
   try {
+    if (!requireHouse(req, res)) return;
     const quotes = await prisma.quoteRequest.findMany({
       orderBy: { createdAt: "desc" },
       include: { user: { select: { name: true, phone: true } }, items: true },
@@ -43,10 +57,11 @@ const quoteSchema = z.object({
   message: z.string().max(2000).default(""),
 });
 
-// POST /api/app/owner/quote-requests/:id/quote → send an itemized price (status → QUOTED).
+// POST /api/app/seller/quote-requests/:id/quote → send an itemized price (status → QUOTED).
 // Replaces any previously-sent line items. `quotedAmount` is the grand total (Σ items + fee).
-router.post("/:id/quote", async (req: FirebaseAuthRequest, res: Response) => {
+router.post("/:id/quote", async (req: SellerRequest, res: Response) => {
   try {
+    if (!requireHouse(req, res)) return;
     const id = String(req.params.id ?? "");
     const parsed = quoteSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid quotation", parsed.error.errors);
@@ -97,9 +112,10 @@ router.post("/:id/quote", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
-// POST /api/app/owner/quote-requests/:id/fulfill → mark fulfilled
-router.post("/:id/fulfill", async (req: FirebaseAuthRequest, res: Response) => {
+// POST /api/app/seller/quote-requests/:id/fulfill → mark fulfilled
+router.post("/:id/fulfill", async (req: SellerRequest, res: Response) => {
   try {
+    if (!requireHouse(req, res)) return;
     const id = String(req.params.id ?? "");
     const existing = await prisma.quoteRequest.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError("Quote request", id);
@@ -107,7 +123,7 @@ router.post("/:id/fulfill", async (req: FirebaseAuthRequest, res: Response) => {
     const updated = await prisma.quoteRequest.update({
       where: { id },
       data: { status: "FULFILLED" },
-      include: { user: { select: { name: true, phone: true } } },
+      include: { user: { select: { name: true, phone: true } }, items: true },
     });
     res.json({ success: true, data: shapeQuote(updated) });
   } catch (e) {

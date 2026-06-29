@@ -521,7 +521,12 @@ model QuoteRequest {
   deliveryFee  Decimal?    @db.Decimal(10, 2) // owner-set delivery fee (₹0 = free)
   quoteMessage String?
   // Online-payment-on-approve (Razorpay). UNPAID until a captured payment is verified.
-  paymentStatus     String  @default("UNPAID") // UNPAID | PAID
+  // ADVANCE_PAID = the customer paid only the advance % online; the balance is collected on delivery.
+  paymentStatus     String  @default("UNPAID") // UNPAID | PAID | ADVANCE_PAID
+  // How the customer chose to settle when approving: FULL (whole total) or ADVANCE (advance % now).
+  paymentOption     String?  // FULL | ADVANCE
+  // Amount actually captured online (the full total for FULL, the advance for ADVANCE). 0 = pay-on-delivery.
+  amountPaid        Decimal? @db.Decimal(10, 2)
   razorpayOrderId   String?
   razorpayPaymentId String?
   items        QuoteItem[]
@@ -640,7 +645,7 @@ model Banner {
   imageUrl        String
   targetCategory  String?
   targetUrl       String?
-  placement       String    @default("HOME")  // HOME | CATEGORY — which surface shows this banner
+  placement       String    @default("HOME")  // HOME | CATEGORY | SPOTLIGHT | BULK — which surface shows this banner
   displayOrder    Int       @default(0)
   isActive        Boolean   @default(true)
   startDate       DateTime?
@@ -1148,6 +1153,9 @@ model StoreConfig {
   subscriptionsEnabled       Boolean @default(true)
   subscriptionBillingDay     Int     @default(1)
   defaultSubscriptionAgentId String?
+  // Bulk-quote advance payment: when a customer approves a quote with the "pay advance" option,
+  // this % of the grand total is charged online now; the rest is collected on delivery.
+  quoteAdvancePercent        Int     @default(10)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 }

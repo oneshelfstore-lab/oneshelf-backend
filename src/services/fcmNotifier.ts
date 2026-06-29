@@ -153,6 +153,21 @@ export async function notifyNewQuoteRequest(info: { id: string; type: string; cu
   });
 }
 
+// Tells the customer their bulk-quote estimate is ready to review/approve.
+export async function notifyQuoteReady(
+  userId: string,
+  info: { id: string; requestNumber: string; total: number },
+) {
+  const tokens = await getUserTokens(userId);
+  if (tokens.length === 0) return;
+  await sendToTokens(tokens, {
+    type: "quote_ready",
+    quoteId: info.id,
+    title: "Your estimate is ready!",
+    body: `Bulk order ${info.requestNumber}: Rs.${Math.round(info.total)}. Tap to review & approve.`,
+  });
+}
+
 /**
  * Owner broadcast → an FCM topic. Data-only (title/body in the data map) so the
  * app's MyFirebaseMessagingService builds the notification consistently in

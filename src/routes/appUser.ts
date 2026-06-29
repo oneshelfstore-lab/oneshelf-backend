@@ -14,6 +14,12 @@ import { notifyNewComplaint, notifyNewQuoteRequest } from "../services/fcmNotifi
 import { mintReferralWelcomeCoupon } from "../services/referralRewards.js";
 import { createTopup, creditTopup } from "../services/walletTopup.js";
 import { verifyPaymentSignature, createRazorpayOrder, isRazorpayConfigured } from "../services/razorpay.js";
+import {
+  markQuotePaid,
+  getQuoteAdvancePercent,
+  computeQuoteCharge,
+  reconcileQuotePayment,
+} from "../services/quotePayment.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -618,10 +624,12 @@ export function shapeComplaint(c: {
 export function shapeQuote(q: {
   id: string; type: string; note: string; eventDate: string | null;
   imageUrls: string[]; status: string; quotedAmount: unknown; deliveryFee?: unknown;
-  quoteMessage: string | null; paymentStatus?: string; createdAt: Date;
+  quoteMessage: string | null; paymentStatus?: string; paymentOption?: string | null;
+  amountPaid?: unknown; razorpayOrderId?: string | null; createdAt: Date;
   items?: { name: string; qty: string; amount: unknown; sortOrder: number }[];
   user?: { name: string; phone: string | null } | null;
 }) {
+  const paymentStatus = q.paymentStatus ?? "UNPAID";
   return {
     id: q.id,
     requestNumber: "QR-" + q.id.slice(-6).toUpperCase(),
@@ -632,7 +640,12 @@ export function shapeQuote(q: {
     status: q.status, // PENDING | QUOTED | ACCEPTED | DECLINED | FULFILLED
     quotedAmount: q.quotedAmount != null ? Number(q.quotedAmount) : 0,
     deliveryFee: q.deliveryFee != null ? Number(q.deliveryFee) : 0,
-    paymentStatus: q.paymentStatus ?? "UNPAID",
+    paymentStatus, // UNPAID | PAID | ADVANCE_PAID
+    paymentOption: q.paymentOption ?? "FULL", // FULL | ADVANCE
+    amountPaid: q.amountPaid != null ? Number(q.amountPaid) : 0,
+    // True when an online payment was started (Razorpay order created) but never confirmed — the app
+    // calls /reconcile on open so a killed-mid-pay payment is recovered.
+    hasPendingPayment: q.status === "QUOTED" && !!q.razorpayOrderId && paymentStatus === "UNPAID",
     quoteMessage: q.quoteMessage,
     items: (q.items ?? [])
       .slice()
@@ -769,13 +782,23 @@ router.post("/quote-requests/:id/respond", async (req: FirebaseAuthRequest, res:
   }
 });
 
+const approveQuoteSchema = z.object({
+  // FULL = pay the whole total online; ADVANCE = pay only the advance % now, rest on delivery.
+  paymentOption: z.enum(["FULL", "ADVANCE"]).default("FULL"),
+});
+
 // POST /api/app/me/quote-requests/:id/approve → customer approves a QUOTED price.
-// If the total is payable AND Razorpay is configured, this creates a Razorpay order and
-// returns { paymentRequired: true, razorpayOrderId, amountPaise } — the app then opens the
-// Razorpay SDK and confirms via /pay. Otherwise (₹0 / Razorpay off) the request is marked
-// ACCEPTED right away (settled as pay-on-delivery) and { paymentRequired: false } is returned.
+// Body { paymentOption: "FULL" | "ADVANCE" }. If the chargeable amount is payable AND Razorpay is
+// configured, this creates a Razorpay order for that amount (the whole total for FULL, the advance %
+// for ADVANCE) and returns { paymentRequired: true, razorpayOrderId, amountPaise, paymentOption } —
+// the app opens the Razorpay SDK and confirms via /pay. Otherwise (₹0 / Razorpay off) the request is
+// marked ACCEPTED right away (settled as pay-on-delivery) and { paymentRequired: false } is returned.
 router.post("/quote-requests/:id/approve", async (req: FirebaseAuthRequest, res: Response) => {
   try {
+    const parsed = approveQuoteSchema.safeParse(req.body ?? {});
+    if (!parsed.success) throw new ValidationError("Invalid approval", parsed.error.errors);
+    const paymentOption = parsed.data.paymentOption;
+
     const id = String(req.params.id ?? "");
     const quote = await prisma.quoteRequest.findFirst({
       where: { id, userId: req.appUser!.id },
@@ -786,24 +809,34 @@ router.post("/quote-requests/:id/approve", async (req: FirebaseAuthRequest, res:
     }
 
     const total = quote.quotedAmount != null ? Number(quote.quotedAmount) : 0;
+    const advancePercent = paymentOption === "ADVANCE" ? await getQuoteAdvancePercent() : 0;
+    const chargeAmount = computeQuoteCharge(total, paymentOption, advancePercent);
 
     if (total > 0 && isRazorpayConfigured()) {
-      const amountPaise = Math.round(total * 100);
+      const amountPaise = Math.round(chargeAmount * 100);
       const rp = await createRazorpayOrder(amountPaise, `quote_${quote.id}`);
+      // Record the chosen option so /pay + webhook + reconcile credit the right amount.
       await prisma.quoteRequest.update({
         where: { id: quote.id },
-        data: { razorpayOrderId: rp.id },
+        data: { razorpayOrderId: rp.id, paymentOption },
       });
-      res.json({ success: true, data: { paymentRequired: true, razorpayOrderId: rp.id, amountPaise } });
+      res.json({
+        success: true,
+        data: { paymentRequired: true, razorpayOrderId: rp.id, amountPaise, paymentOption },
+      });
       return;
     }
 
-    // No online payment needed/possible → accept now (pay on delivery).
+    // No online payment needed/possible → accept now (pay on delivery). The chosen option is still
+    // recorded so the owner knows the customer's intent.
     await prisma.quoteRequest.update({
       where: { id: quote.id },
-      data: { status: "ACCEPTED" },
+      data: { status: "ACCEPTED", paymentOption },
     });
-    res.json({ success: true, data: { paymentRequired: false, razorpayOrderId: null, amountPaise: 0 } });
+    res.json({
+      success: true,
+      data: { paymentRequired: false, razorpayOrderId: null, amountPaise: 0, paymentOption },
+    });
   } catch (e) {
     sendError(res, e);
   }
@@ -815,7 +848,8 @@ const quotePaySchema = z.object({
 });
 
 // POST /api/app/me/quote-requests/:id/pay → verify the Razorpay payment for an approved quote.
-// On a valid signature: paymentStatus → PAID and status → ACCEPTED (idempotent).
+// On a valid signature: paymentStatus → PAID/ADVANCE_PAID and status → ACCEPTED (idempotent, via the
+// shared markQuotePaid path that the webhook + reconcile also use).
 router.post("/quote-requests/:id/pay", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const parsed = quotePaySchema.safeParse(req.body);
@@ -827,7 +861,7 @@ router.post("/quote-requests/:id/pay", async (req: FirebaseAuthRequest, res: Res
       where: { id, userId: req.appUser!.id },
     });
     if (!quote) throw new NotFoundError("Quote request", id);
-    if (quote.paymentStatus === "PAID") {
+    if (quote.paymentStatus !== "UNPAID") {
       const fresh = await prisma.quoteRequest.findUnique({ where: { id: quote.id }, include: { items: true } });
       res.json({ success: true, data: shapeQuote({ ...fresh! }) });
       return;
@@ -837,12 +871,30 @@ router.post("/quote-requests/:id/pay", async (req: FirebaseAuthRequest, res: Res
     const isValid = verifyPaymentSignature(quote.razorpayOrderId, razorpayPaymentId, razorpaySignature);
     if (!isValid) throw new AppError(400, "PAYMENT_INVALID", "Payment signature verification failed");
 
-    const updated = await prisma.quoteRequest.update({
-      where: { id: quote.id },
-      data: { status: "ACCEPTED", paymentStatus: "PAID", razorpayPaymentId },
-      include: { items: true },
+    await markQuotePaid(quote.id, razorpayPaymentId);
+    const updated = await prisma.quoteRequest.findUnique({ where: { id: quote.id }, include: { items: true } });
+    res.json({ success: true, message: "Payment verified", data: shapeQuote({ ...updated! }) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// POST /api/app/me/quote-requests/:id/reconcile → recover a stranded quote payment.
+// Belt-and-suspenders for "paid but app closed": the app calls this on opening a quote whose online
+// payment was started but never confirmed. The server asks Razorpay whether the payment was captured
+// and, if so, marks the quote PAID/ADVANCE_PAID (idempotent; harmless otherwise). Returns the quote.
+router.post("/quote-requests/:id/reconcile", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const quote = await prisma.quoteRequest.findFirst({
+      where: { id, userId: req.appUser!.id },
+      select: { id: true },
     });
-    res.json({ success: true, message: "Payment verified", data: shapeQuote({ ...updated }) });
+    if (!quote) throw new NotFoundError("Quote request", id);
+
+    await reconcileQuotePayment(quote.id);
+    const fresh = await prisma.quoteRequest.findUnique({ where: { id: quote.id }, include: { items: true } });
+    res.json({ success: true, data: shapeQuote({ ...fresh! }) });
   } catch (e) {
     sendError(res, e);
   }

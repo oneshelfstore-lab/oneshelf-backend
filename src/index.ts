@@ -41,6 +41,7 @@ import ownerGstr8Routes from "./routes/ownerGstr8.js";
 import sellerCatalogRoutes from "./routes/sellerCatalog.js";
 import sellerOrdersRoutes from "./routes/sellerOrders.js";
 import sellerAccountRoutes from "./routes/sellerAccount.js";
+import sellerQuoteRoutes from "./routes/sellerQuotes.js";
 import appUserRoutes from "./routes/appUser.js";
 import subscriptionRoutes from "./routes/subscriptions.js";
 import ownerSubscriptionRoutes from "./routes/ownerSubscriptions.js";
@@ -55,6 +56,7 @@ import { initFirebase } from "./lib/firebase.js";
 import { startOrderExpirySweeper } from "./services/orderExpiry.js";
 import { startAbandonedCartSweeper } from "./services/abandonedCart.js";
 import { startSubscriptionSweeper } from "./services/subscriptionEngine.js";
+import { startQuotePaymentSweeper } from "./services/quotePayment.js";
 import prisma from "./lib/prisma.js";
 
 const app = express();
@@ -223,6 +225,7 @@ app.use("/api/app/seller/catalog", sellerCatalogRoutes);
 app.use("/api/app/seller/brands", sellerBrandRouter);
 app.use("/api/app/seller/orders", sellerOrdersRoutes);
 app.use("/api/app/seller/me", sellerAccountRoutes);
+app.use("/api/app/seller/quote-requests", sellerQuoteRoutes);
 app.use("/api/app/delivery/orders", deliveryRoutes);
 // More-specific than "/api/app/me" → MUST be mounted before it (Express matches prefixes in order).
 app.use("/api/app/me/subscriptions", subscriptionRoutes);
@@ -312,4 +315,6 @@ app.listen(PORT, '0.0.0.0', () => {
   // Generate due subscription orders + close monthly statements (backup driver — the external cron
   // hitting POST /api/app/internal/subscriptions/run is the reliable one on the free tier).
   startSubscriptionSweeper();
+  // Recover bulk-quote payments captured at Razorpay but whose /pay confirmation never reached us.
+  startQuotePaymentSweeper();
 });

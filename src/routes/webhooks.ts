@@ -4,6 +4,7 @@ import { verifyWebhookSignature } from "../services/razorpay.js";
 import { markOrderPaid } from "../services/orderPayment.js";
 import { reconcileOrderPayment } from "../services/paymentReconciliation.js";
 import { creditTopupByRazorpayOrder } from "../services/walletTopup.js";
+import { creditQuoteByRazorpayOrder } from "../services/quotePayment.js";
 
 const router = Router();
 
@@ -43,8 +44,10 @@ router.post("/razorpay", async (req: Request, res: Response) => {
         if (razorpayPaymentId) await markOrderPaid(order.id, razorpayPaymentId);
         else await reconcileOrderPayment(order.id);
       } else if (razorpayPaymentId) {
-        // Not an order → maybe a wallet top-up keyed by the same Razorpay order id.
-        await creditTopupByRazorpayOrder(razorpayOrderId, razorpayPaymentId);
+        // Not an order → maybe a wallet top-up, else a bulk-quote payment, keyed by the same
+        // Razorpay order id. Both are idempotent and short-circuit when the id isn't theirs.
+        const creditedTopup = await creditTopupByRazorpayOrder(razorpayOrderId, razorpayPaymentId);
+        if (!creditedTopup) await creditQuoteByRazorpayOrder(razorpayOrderId, razorpayPaymentId);
       }
     }
 

@@ -51,6 +51,7 @@ const collageSchema = z.object({
   headerImageUrl: z.string().max(500).optional().nullable(),
   ctaText: z.string().max(120).default(""),
   ctaSubtext: z.string().max(120).default(""),
+  ctaEmoji: z.string().max(16).default("🛒"),
   ctaTargetCategory: z.string().max(60).optional().nullable(),
 });
 

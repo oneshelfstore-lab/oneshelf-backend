@@ -676,6 +676,7 @@ model DealCollage {
   // CTA footer
   ctaText           String   @default("")
   ctaSubtext        String   @default("")
+  ctaEmoji          String   @default("🛒")        // decorative emoji on the right of the CTA footer
   ctaTargetCategory String?                        // category slug the footer links to (optional)
 
   cards             DealCollageCard[]

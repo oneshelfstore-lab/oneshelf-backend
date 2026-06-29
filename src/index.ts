@@ -20,6 +20,7 @@ import { publicCategoryRouter, adminCategoryRouter, publicSuperCategoryRouter } 
 import ownerSuperCategoryRoutes from "./routes/ownerSuperCategories.js";
 import { publicCatalogRouter, adminCatalogRouter } from "./routes/catalog.js";
 import { publicBannerRouter, adminBannerRouter, ownerBannerRouter } from "./routes/banners.js";
+import { publicDealCollageRouter, ownerDealCollageRouter } from "./routes/dealCollages.js";
 import { publicBrandRouter, ownerBrandRouter, sellerBrandRouter } from "./routes/brands.js";
 import cartRoutes from "./routes/cart.js";
 import { appCouponRouter, adminCouponRouter } from "./routes/coupons.js";
@@ -189,6 +190,7 @@ app.use("/api/app/categories", publicCategoryRouter);
 app.use("/api/app/super-categories", publicSuperCategoryRouter);
 app.use("/api/app/products", publicCatalogRouter);
 app.use("/api/app/banners", publicBannerRouter);
+app.use("/api/app/deal-collages", publicDealCollageRouter);
 app.use("/api/app/brands", publicBrandRouter);
 // Public — submitted from the login page, before the user has an account.
 app.use("/api/app/partner-applications", partnerApplicationRoutes);
@@ -212,6 +214,7 @@ app.use("/api/app/owner/quote-requests", ownerQuoteRoutes);
 app.use("/api/app/owner/partner-applications", ownerPartnerApplicationRoutes);
 app.use("/api/app/owner/broadcast", ownerBroadcastRoutes);
 app.use("/api/app/owner/banners", ownerBannerRouter);
+app.use("/api/app/owner/deal-collages", ownerDealCollageRouter);
 app.use("/api/app/owner/super-categories", ownerSuperCategoryRoutes);
 app.use("/api/app/owner/brands", ownerBrandRouter);
 app.use("/api/app/owner/users", ownerUsersRoutes);

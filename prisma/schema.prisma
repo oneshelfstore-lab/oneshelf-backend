@@ -656,6 +656,52 @@ model Banner {
   @@index([isActive, displayOrder])
 }
 
+// ─── 6a2. Deal collage (editable grid banner) ────────────────────────
+// A Zepto/Blinkit-style "deals collage": an editable gradient sponsor header, a grid of small
+// product-area cards (one featured + several small), and a CTA footer. This is the "dynamic look"
+// banner — distinct from the single-image Banner carousel above, which it sits alongside on Home.
+// One row per collage; the cards are children (cascade-deleted). All additive — safe via db push.
+model DealCollage {
+  id                String   @id @default(cuid())
+  title             String   @default("")          // internal owner-facing name
+  placement         String   @default("HOME")      // HOME (room for CATEGORY etc. later)
+  isActive          Boolean  @default(true)
+  displayOrder      Int      @default(0)
+  // Sponsor header
+  sponsorLabel      String   @default("PRESENTED BY")
+  sponsorName       String   @default("")
+  bgFrom            String   @default("#6b8cde")   // header gradient start (hex)
+  bgTo              String   @default("#a8b8f0")   // header gradient end (hex)
+  headerImageUrl    String?                        // optional right-side illustration / logo
+  // CTA footer
+  ctaText           String   @default("")
+  ctaSubtext        String   @default("")
+  ctaTargetCategory String?                        // category slug the footer links to (optional)
+
+  cards             DealCollageCard[]
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([isActive, placement, displayOrder])
+}
+
+model DealCollageCard {
+  id              String      @id @default(cuid())
+  collageId       String
+  collage         DealCollage @relation(fields: [collageId], references: [id], onDelete: Cascade)
+  title           String      @default("")
+  price           String      @default("")         // free-text badge ("₹440" / "Starting @ ₹15")
+  originalPrice   String?                           // optional struck-through price
+  emoji           String      @default("🛍️")        // shown when no imageUrl
+  imageUrl        String?                           // product photo (overrides emoji)
+  bgColor         String      @default("#eef1ff")  // card background (hex)
+  featured        Boolean     @default(false)       // the one tall left card
+  targetCategory  String?                           // category slug this card links to
+  displayOrder    Int         @default(0)
+
+  @@index([collageId, displayOrder])
+}
+
 // ─── 6b. Brand ───────────────────────────────────────────────────────
 // Owner-managed company/brand with an optional logo. CatalogProduct.brand stays the brand NAME
 // (a string), so products reference a brand by name and the logo is looked up here — no product

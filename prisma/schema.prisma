@@ -644,6 +644,7 @@ model Banner {
   id              String    @id @default(cuid())
   imageUrl        String
   targetCategory  String?
+  targetProduct   String?                       // product id — when set, tapping opens the PDP (wins over category)
   targetUrl       String?
   placement       String    @default("HOME")  // HOME | CATEGORY | SPOTLIGHT | BULK — which surface shows this banner
   displayOrder    Int       @default(0)
@@ -678,6 +679,7 @@ model DealCollage {
   ctaSubtext        String   @default("")
   ctaEmoji          String   @default("🛒")        // decorative emoji on the right of the CTA footer
   ctaTargetCategory String?                        // category slug the footer links to (optional)
+  ctaTargetProduct  String?                        // product id the footer links to (wins over category)
 
   cards             DealCollageCard[]
   createdAt         DateTime @default(now())
@@ -698,6 +700,7 @@ model DealCollageCard {
   bgColor         String      @default("#eef1ff")  // card background (hex)
   featured        Boolean     @default(false)       // the one tall left card
   targetCategory  String?                           // category slug this card links to
+  targetProduct   String?                           // product id this card links to (wins over category)
   displayOrder    Int         @default(0)
 
   @@index([collageId, displayOrder])

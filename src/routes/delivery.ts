@@ -44,6 +44,8 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         createdAt: true, updatedAt: true,
         // Customer-uploaded gate/door photo, shown on the delivery card to help find the address.
         gatePhotoUrl: true,
+        // Customer-recorded voice note, played on the delivery card.
+        voiceNoteUrl: true,
         // Set when this order was auto-generated from a subscription → the app shows a 🔁 chip.
         subscriptionId: true,
         _count: { select: { items: true } },

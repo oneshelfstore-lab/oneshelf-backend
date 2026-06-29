@@ -51,6 +51,8 @@ const placeOrderSchema = z.object({
   deliverySlot: z.string().max(60).optional().nullable(),
   // Optional URL of a customer-uploaded gate/door photo, surfaced to the delivery agent.
   gatePhotoUrl: z.string().max(500).optional().nullable(),
+  // Optional URL of a customer-recorded voice note, played by the delivery agent.
+  voiceNoteUrl: z.string().max(500).optional().nullable(),
   // Store credit the customer chose to apply (clamped server-side to balance + grand total).
   walletCredit: z.number().min(0).optional().nullable(),
 });
@@ -59,7 +61,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const parsed = placeOrderSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid order data", parsed.error.errors);
-    const { addressId, fulfillmentType, paymentMethod, couponCode, notes, deliverySlot, gatePhotoUrl, walletCredit } = parsed.data;
+    const { addressId, fulfillmentType, paymentMethod, couponCode, notes, deliverySlot, gatePhotoUrl, voiceNoteUrl, walletCredit } = parsed.data;
     const userId = req.appUser!.id;
 
     // Idempotency: if the client sends an Idempotency-Key and we already created an
@@ -221,6 +223,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           idempotencyKey,
           deliverySlot: fulfillmentType === "DELIVERY" ? (deliverySlot ?? null) : null,
           gatePhotoUrl: fulfillmentType === "DELIVERY" ? (gatePhotoUrl ?? null) : null,
+          voiceNoteUrl: fulfillmentType === "DELIVERY" ? (voiceNoteUrl ?? null) : null,
           items: { create: orderItems },
         },
         include: { items: true },

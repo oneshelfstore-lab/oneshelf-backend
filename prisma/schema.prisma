@@ -954,6 +954,8 @@ model Order {
   deliverySlot          String?
   // Optional customer-uploaded photo of their home gate/door, shown to the delivery agent.
   gatePhotoUrl          String?
+  // Optional customer-recorded voice note (delivery clarification), played by the delivery agent.
+  voiceNoteUrl          String?
 
   // Subscriptions — set when this order was auto-generated from a standing Subscription.
   // subscriptionDate is the IST-midnight date this delivery is FOR; the composite unique below is

@@ -517,12 +517,32 @@ model QuoteRequest {
   eventDate    String?     // free-text date the customer typed (kept verbatim)
   imageUrls    String[]    @default([]) // Firebase Storage public URLs (uploaded client-side)
   status       QuoteStatus @default(PENDING)
-  quotedAmount Decimal?    @db.Decimal(10, 2)
+  quotedAmount Decimal?    @db.Decimal(10, 2) // grand total (Σ items + deliveryFee) — kept for back-compat
+  deliveryFee  Decimal?    @db.Decimal(10, 2) // owner-set delivery fee (₹0 = free)
   quoteMessage String?
+  // Online-payment-on-approve (Razorpay). UNPAID until a captured payment is verified.
+  paymentStatus     String  @default("UNPAID") // UNPAID | PAID
+  razorpayOrderId   String?
+  razorpayPaymentId String?
+  items        QuoteItem[]
   createdAt    DateTime    @default(now())
 
   @@index([userId])
   @@index([status])
+}
+
+// One itemized line of an owner's quotation. `qty` is a free-text label ("5kg", "2 pkt")
+// since bulk lists mix weights/packs; `amount` is the line total the owner priced.
+model QuoteItem {
+  id             String       @id @default(cuid())
+  quoteRequestId String
+  quoteRequest   QuoteRequest @relation(fields: [quoteRequestId], references: [id], onDelete: Cascade)
+  name           String
+  qty            String       @default("")
+  amount         Decimal      @db.Decimal(10, 2)
+  sortOrder      Int          @default(0)
+
+  @@index([quoteRequestId])
 }
 
 // ─── PartnerApplication ("Partner with us" — seller / delivery onboarding lead) ──

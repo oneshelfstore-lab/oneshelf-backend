@@ -19,7 +19,7 @@ router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
   try {
     const quotes = await prisma.quoteRequest.findMany({
       orderBy: { createdAt: "desc" },
-      include: { user: { select: { name: true, phone: true } } },
+      include: { user: { select: { name: true, phone: true } }, items: true },
     });
     res.json({ success: true, data: quotes.map((q) => shapeQuote(q)) });
   } catch (e) {
@@ -28,11 +28,22 @@ router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
 });
 
 const quoteSchema = z.object({
-  amount: z.number().positive(),
+  items: z
+    .array(
+      z.object({
+        name: z.string().min(1).max(120),
+        qty: z.string().max(40).default(""),
+        amount: z.number().nonnegative(),
+      }),
+    )
+    .min(1, "Add at least one item")
+    .max(60),
+  deliveryFee: z.number().nonnegative().default(0),
   message: z.string().max(2000).default(""),
 });
 
-// POST /api/app/owner/quote-requests/:id/quote → send a price (status → QUOTED)
+// POST /api/app/owner/quote-requests/:id/quote → send an itemized price (status → QUOTED).
+// Replaces any previously-sent line items. `quotedAmount` is the grand total (Σ items + fee).
 router.post("/:id/quote", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const id = String(req.params.id ?? "");
@@ -42,14 +53,30 @@ router.post("/:id/quote", async (req: FirebaseAuthRequest, res: Response) => {
     const existing = await prisma.quoteRequest.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError("Quote request", id);
 
-    const updated = await prisma.quoteRequest.update({
-      where: { id },
-      data: {
-        quotedAmount: parsed.data.amount,
-        quoteMessage: parsed.data.message.trim(),
-        status: "QUOTED",
-      },
-      include: { user: { select: { name: true, phone: true } } },
+    const subtotal = parsed.data.items.reduce((sum, it) => sum + it.amount, 0);
+    const total = subtotal + parsed.data.deliveryFee;
+
+    const updated = await prisma.$transaction(async (tx) => {
+      await tx.quoteItem.deleteMany({ where: { quoteRequestId: id } });
+      await tx.quoteItem.createMany({
+        data: parsed.data.items.map((it, i) => ({
+          quoteRequestId: id,
+          name: it.name.trim(),
+          qty: it.qty.trim(),
+          amount: it.amount,
+          sortOrder: i,
+        })),
+      });
+      return tx.quoteRequest.update({
+        where: { id },
+        data: {
+          quotedAmount: total,
+          deliveryFee: parsed.data.deliveryFee,
+          quoteMessage: parsed.data.message.trim(),
+          status: "QUOTED",
+        },
+        include: { user: { select: { name: true, phone: true } }, items: true },
+      });
     });
     res.json({ success: true, data: shapeQuote(updated) });
   } catch (e) {

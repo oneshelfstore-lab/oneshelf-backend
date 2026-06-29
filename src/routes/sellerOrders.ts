@@ -28,6 +28,10 @@ function shape(so: any) {
     commissionAmount: Number(so.commissionAmount),
     netPayable: Number(so.netPayable),
     settled: so.settled,
+    // Customer's special request (text) + recorded voice note — the co-manager packing these
+    // items needs them too (clarifies item names STT mangles), not just the delivery agent.
+    notes: so.order?.notes ?? null,
+    voiceNoteUrl: so.order?.voiceNoteUrl ?? null,
     items: (so.items ?? []).map((it: any) => ({
       id: it.id,
       productName: it.productName,
@@ -44,7 +48,7 @@ function shape(so: any) {
 }
 
 const ORDER_INCLUDE = {
-  order: { select: { orderNumber: true, status: true, fulfillmentType: true, shippingName: true, shippingPhone: true } },
+  order: { select: { orderNumber: true, status: true, fulfillmentType: true, shippingName: true, shippingPhone: true, notes: true, voiceNoteUrl: true } },
   items: { select: { id: true, productName: true, variantSku: true, imageUrl: true, quantity: true, unitPrice: true, lineTotal: true, isLoose: true, stepSize: true, stepUnit: true } },
 } as const;
 

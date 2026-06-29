@@ -58,6 +58,7 @@ import { startOrderExpirySweeper } from "./services/orderExpiry.js";
 import { startAbandonedCartSweeper } from "./services/abandonedCart.js";
 import { startSubscriptionSweeper } from "./services/subscriptionEngine.js";
 import { startQuotePaymentSweeper } from "./services/quotePayment.js";
+import { startAccountDeletionSweeper } from "./services/accountDeletion.js";
 import prisma from "./lib/prisma.js";
 
 const app = express();
@@ -320,4 +321,6 @@ app.listen(PORT, '0.0.0.0', () => {
   startSubscriptionSweeper();
   // Recover bulk-quote payments captured at Razorpay but whose /pay confirmation never reached us.
   startQuotePaymentSweeper();
+  // Permanently purge soft-deleted accounts whose grace window has elapsed (refund wallet + scrub PII).
+  startAccountDeletionSweeper();
 });

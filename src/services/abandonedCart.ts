@@ -13,6 +13,7 @@ export async function sweepAbandonedCarts(): Promise<number> {
   const candidates = await prisma.user.findMany({
     where: {
       isActive: true,
+      deletionStatus: "ACTIVE", // don't nudge accounts pending deletion
       AND: [
         { cartItems: { some: { savedForLater: false, updatedAt: { lt: idleCutoff } } } },
         { fcmTokens: { some: {} } },

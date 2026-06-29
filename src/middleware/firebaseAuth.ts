@@ -52,6 +52,16 @@ export async function firebaseAuthMiddleware(
       where: { firebaseUid: decoded.uid },
     });
 
+    // Restore-on-login: a soft-deleted account still within its grace window is reactivated the
+    // moment the user signs back in — this is how "sign in again to cancel deletion" works. (A
+    // fully purged account has firebaseUid=null, so it isn't found here and gets a fresh row below.)
+    if (user && user.deletionStatus === "PENDING_DELETION") {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { deletionStatus: "ACTIVE", deletedAt: null },
+      });
+    }
+
     if (!user) {
       const email = decoded.email ?? null;
       // Bare-10-digit phone (matches how we store it: strip +91 / spaces / dashes).

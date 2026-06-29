@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from "express";
 import { sendError } from "../lib/errors.js";
 import { generateDueSubscriptionOrders, closeMonthlyStatements } from "../services/subscriptionEngine.js";
+import { purgeExpiredDeletions } from "../services/accountDeletion.js";
 
 // Internal automation endpoints — NOT behind Firebase/JWT auth (an external scheduler with no user
 // identity calls them). Protected by a shared secret header instead. Mounted in index.ts BEFORE the
@@ -29,7 +30,9 @@ router.post("/subscriptions/run", async (req: Request, res: Response) => {
     if (!authorize(req, res)) return;
     const gen = await generateDueSubscriptionOrders();
     const bill = await closeMonthlyStatements();
-    res.json({ success: true, data: { generated: gen.generated, skipped: gen.skipped, billed: bill.billed } });
+    // Piggyback the daily account-deletion purge on the same reliable external cron (free-tier safe).
+    const purged = await purgeExpiredDeletions();
+    res.json({ success: true, data: { generated: gen.generated, skipped: gen.skipped, billed: bill.billed, purged } });
   } catch (e) {
     sendError(res, e);
   }

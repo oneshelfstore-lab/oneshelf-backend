@@ -287,6 +287,13 @@ enum SubscriptionStatementStatus {
   VOID
 }
 
+// Account-deletion lifecycle (soft-delete + grace period).
+enum AccountStatus {
+  ACTIVE
+  PENDING_DELETION // soft-deleted; within the grace window, restored on next login
+  DELETED          // grace expired → PII scrubbed, records retained
+}
+
 // ─── 0. User ────────────────────────────────────────────────────────
 
 model User {
@@ -325,6 +332,15 @@ model User {
   // WalletTransaction ledger row in the SAME db transaction (balance never drifts from the ledger).
   walletBalance    Decimal   @default(0) @db.Decimal(10, 2)
 
+  // Account-deletion lifecycle (soft-delete + grace period). PENDING_DELETION during the grace
+  // window (restored on next login); DELETED after the sweeper scrubs PII. deletedAt = grace clock.
+  deletionStatus   AccountStatus @default(ACTIVE)
+  deletedAt        DateTime?
+  deletionReason   String?
+  // SHA-256 of the bare-10 phone, captured at PURGE before the number is nulled. Survives the scrub
+  // so a future re-signup with the same number can be recognised (referral/coupon-farming throttle).
+  phoneHash        String?
+
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
@@ -347,6 +363,7 @@ model User {
   subscriptionStatements SubscriptionStatement[]
 
   @@index([phone])
+  @@index([deletionStatus, deletedAt]) // the deletion sweeper's hot query
 }
 
 // ─── 1. Company ──────────────────────────────────────────────────────
@@ -1206,6 +1223,9 @@ model StoreConfig {
   // Bulk-quote advance payment: when a customer approves a quote with the "pay advance" option,
   // this % of the grand total is charged online now; the rest is collected on delivery.
   quoteAdvancePercent        Int     @default(10)
+  // Account-deletion grace window: days a soft-deleted account is kept (restorable by signing in)
+  // before the sweeper permanently scrubs PII + refunds any wallet money.
+  accountDeletionGraceDays   Int     @default(15)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 }

@@ -20,6 +20,11 @@ import {
   computeQuoteCharge,
   reconcileQuotePayment,
 } from "../services/quotePayment.js";
+import {
+  requestAccountDeletion,
+  getDeletionBlockers,
+  analyzeWallet,
+} from "../services/accountDeletion.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -904,48 +909,40 @@ router.post("/quote-requests/:id/reconcile", async (req: FirebaseAuthRequest, re
 // Account deletion (required by Google Play account-deletion policy)
 // ═══════════════════════════════════════════════════════════════════════
 
-// DELETE /api/app/me
-// Permanently deletes the user's personal data and Firebase credential. Orders
-// are RETAINED but anonymized — the Order→User relation is Restrict and invoices
-// must be kept for GST/accounting/legal retention, so we scrub PII on the user
-// row rather than removing it.
-router.delete("/", async (req: FirebaseAuthRequest, res: Response) => {
+// GET /api/app/me/deletion-eligibility
+// Pre-flight: lets the app show the user what (if anything) blocks deletion, plus how their
+// wallet money will be handled (refundable real money vs forfeited promotional credit), BEFORE
+// they confirm. Literal path — safe ahead of the me-root routes (no GET /:param wildcard exists).
+router.get("/deletion-eligibility", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
-    const firebaseUid = req.appUser!.firebaseUid;
-
-    await prisma.$transaction(async (tx) => {
-      await tx.address.deleteMany({ where: { userId } });
-      await tx.cartItem.deleteMany({ where: { userId } });
-      await tx.fcmToken.deleteMany({ where: { userId } });
-      await tx.favorite.deleteMany({ where: { userId } });
-      await tx.complaint.deleteMany({ where: { userId } });
-      await tx.quoteRequest.deleteMany({ where: { userId } });
-      await tx.user.update({
-        where: { id: userId },
-        data: {
-          name: "Deleted User",
-          email: null,
-          phone: null,
-          photoUrl: null,
-          phoneVerified: false,
-          isActive: false,
-          firebaseUid: null,
-          passwordHash: null,
-        },
-      });
+    const [blockers, wallet] = await Promise.all([
+      getDeletionBlockers(userId),
+      analyzeWallet(userId),
+    ]);
+    res.json({
+      success: true,
+      data: { canDelete: blockers.length === 0, blockers, wallet },
     });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
 
-    // Revoke the Firebase credential so the account cannot be used again.
-    if (firebaseUid && isFirebaseInitialized()) {
-      try {
-        await admin.auth().deleteUser(firebaseUid);
-      } catch (err: any) {
-        console.warn("Firebase user deletion failed (data already anonymized):", err?.message);
-      }
-    }
-
-    res.json({ success: true, message: "Account deleted" });
+// DELETE /api/app/me
+// Obligation-aware SOFT deletion (see services/accountDeletion.ts): refuses while subscriptions /
+// khata / a bulk advance / in-flight orders are open (409 with a readable message), else marks the
+// account PENDING_DELETION and starts the grace clock. Money + records stay intact during the
+// window so the user can restore by signing in again; the sweeper refunds the wallet + scrubs PII
+// only once the grace window elapses.
+router.delete("/", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const result = await requestAccountDeletion(req.appUser!.id);
+    res.json({
+      success: true,
+      message: `Your account will be permanently deleted in ${result.graceDays} days. Sign in again before then to cancel.`,
+      data: result,
+    });
   } catch (e) {
     sendError(res, e);
   }

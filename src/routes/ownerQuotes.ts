@@ -9,6 +9,7 @@ import {
 } from "../middleware/firebaseAuth.js";
 import { shapeQuote } from "./appUser.js";
 import { notifyQuoteReady } from "../services/fcmNotifier.js";
+import { materializeQuoteOrder } from "../services/quoteToOrder.js";
 
 // Owner quote-request inbox. Mounted at /api/app/owner/quote-requests.
 const router = Router();
@@ -35,6 +36,8 @@ const quoteSchema = z.object({
         name: z.string().min(1).max(120),
         qty: z.string().max(40).default(""),
         amount: z.number().nonnegative(),
+        // Optional SKU link — when set, converting the quote to an order decrements this variant's stock.
+        variantId: z.string().max(40).optional().nullable(),
       }),
     )
     .min(1, "Add at least one item")
@@ -66,6 +69,7 @@ router.post("/:id/quote", async (req: FirebaseAuthRequest, res: Response) => {
           qty: it.qty.trim(),
           amount: it.amount,
           sortOrder: i,
+          variantId: it.variantId || null,
         })),
       });
       return tx.quoteRequest.update({
@@ -97,17 +101,42 @@ router.post("/:id/quote", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
-// POST /api/app/owner/quote-requests/:id/fulfill → mark fulfilled
+// POST /api/app/owner/quote-requests/:id/fulfill → push an ACCEPTED quote into the delivery pipeline.
+// A1 (Bulk Express): an accepted quote is now FULFILLED by materializing a real Order that flows
+// through the owner board + delivery dashboard (assign agent → deliver via OTP). This endpoint is
+// the owner-side safety net: it idempotently CONVERTS the quote to an order (covering legacy quotes
+// accepted before A1, or a conversion that failed on approve). It deliberately does NOT flip the
+// quote to FULFILLED when an order exists — the linked order's real status now drives fulfillment.
+// Only when conversion isn't possible (no items / no house seller / already terminal) does it fall
+// back to the legacy FULFILLED flip so the button still resolves edge-case quotes.
 router.post("/:id/fulfill", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const id = String(req.params.id ?? "");
     const existing = await prisma.quoteRequest.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError("Quote request", id);
 
+    let converted: Awaited<ReturnType<typeof materializeQuoteOrder>> = null;
+    try {
+      converted = await materializeQuoteOrder(id);
+    } catch (convErr) {
+      console.warn("materializeQuoteOrder (owner fulfill) failed:", convErr);
+    }
+
+    if (converted) {
+      // Order exists (just created or already linked) — return the quote with its orderId.
+      const fresh = await prisma.quoteRequest.findUnique({
+        where: { id },
+        include: { user: { select: { name: true, phone: true } }, items: true },
+      });
+      res.json({ success: true, data: shapeQuote(fresh!) });
+      return;
+    }
+
+    // Legacy fallback: nothing to convert → keep the old behaviour.
     const updated = await prisma.quoteRequest.update({
       where: { id },
       data: { status: "FULFILLED" },
-      include: { user: { select: { name: true, phone: true } } },
+      include: { user: { select: { name: true, phone: true } }, items: true },
     });
     res.json({ success: true, data: shapeQuote(updated) });
   } catch (e) {

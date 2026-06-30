@@ -20,6 +20,7 @@ import {
   computeQuoteCharge,
   reconcileQuotePayment,
 } from "../services/quotePayment.js";
+import { materializeQuoteOrder } from "../services/quoteToOrder.js";
 import {
   requestAccountDeletion,
   getDeletionBlockers,
@@ -630,8 +631,8 @@ export function shapeQuote(q: {
   id: string; type: string; note: string; eventDate: string | null;
   imageUrls: string[]; status: string; quotedAmount: unknown; deliveryFee?: unknown;
   quoteMessage: string | null; paymentStatus?: string; paymentOption?: string | null;
-  amountPaid?: unknown; razorpayOrderId?: string | null; createdAt: Date;
-  items?: { name: string; qty: string; amount: unknown; sortOrder: number }[];
+  amountPaid?: unknown; razorpayOrderId?: string | null; orderId?: string | null; createdAt: Date;
+  items?: { name: string; qty: string; amount: unknown; sortOrder: number; variantId?: string | null }[];
   user?: { name: string; phone: string | null } | null;
 }) {
   const paymentStatus = q.paymentStatus ?? "UNPAID";
@@ -652,10 +653,13 @@ export function shapeQuote(q: {
     // calls /reconcile on open so a killed-mid-pay payment is recovered.
     hasPendingPayment: q.status === "QUOTED" && !!q.razorpayOrderId && paymentStatus === "UNPAID",
     quoteMessage: q.quoteMessage,
+    // Bulk Express: set once the quote is converted to a fulfillment order → the app deep-links the
+    // customer to live order tracking and drives the status stepper from the order's real status.
+    orderId: q.orderId ?? null,
     items: (q.items ?? [])
       .slice()
       .sort((a, b) => a.sortOrder - b.sortOrder)
-      .map((it) => ({ name: it.name, qty: it.qty, amount: Number(it.amount) })),
+      .map((it) => ({ name: it.name, qty: it.qty, amount: Number(it.amount), variantId: it.variantId ?? null })),
     createdAt: q.createdAt.getTime(),
     customerName: q.user?.name ?? null,
     customerPhone: q.user?.phone ?? null,
@@ -781,7 +785,16 @@ router.post("/quote-requests/:id/respond", async (req: FirebaseAuthRequest, res:
       data: { status: parsed.data.accept ? "ACCEPTED" : "DECLINED" },
       include: { items: true },
     });
-    res.json({ success: true, data: shapeQuote({ ...updated }) });
+    // Bulk Express: a direct accept (pay-on-delivery) also materializes the fulfillment order.
+    if (parsed.data.accept) {
+      try {
+        await materializeQuoteOrder(quote.id);
+      } catch (convErr) {
+        console.warn("materializeQuoteOrder (respond accept) failed:", convErr);
+      }
+    }
+    const fresh = await prisma.quoteRequest.findUnique({ where: { id: quote.id }, include: { items: true } });
+    res.json({ success: true, data: shapeQuote({ ...(fresh ?? updated) }) });
   } catch (e) {
     sendError(res, e);
   }
@@ -838,6 +851,14 @@ router.post("/quote-requests/:id/approve", async (req: FirebaseAuthRequest, res:
       where: { id: quote.id },
       data: { status: "ACCEPTED", paymentOption },
     });
+    // Bulk Express: turn the accepted quote into a real fulfillment Order (delivery pipeline +
+    // invoice + OTP). Best-effort — a conversion hiccup must not fail the approval the customer just
+    // made; the owner can re-trigger via /fulfill, and the order is idempotent on re-run.
+    try {
+      await materializeQuoteOrder(quote.id);
+    } catch (convErr) {
+      console.warn("materializeQuoteOrder (pay-on-delivery) failed:", convErr);
+    }
     res.json({
       success: true,
       data: { paymentRequired: false, razorpayOrderId: null, amountPaise: 0, paymentOption },

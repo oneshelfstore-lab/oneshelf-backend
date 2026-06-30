@@ -96,10 +96,15 @@ router.get("/cash-summary", async (req: FirebaseAuthRequest, res: Response) => {
         status: "DELIVERED",
         deliveredAt: { gte: startUtc },
       },
-      select: { totalAmount: true },
+      select: { totalAmount: true, amountPaid: true },
     });
 
-    const totalCollected = orders.reduce((sum, o) => sum + Number(o.totalAmount), 0);
+    // Cash actually collected at the door = total − anything already captured online (bulk advance).
+    // amountPaid is 0 for normal COD orders, so this is unchanged for them.
+    const totalCollected = orders.reduce(
+      (sum, o) => sum + Math.max(0, Number(o.totalAmount) - Number(o.amountPaid)),
+      0,
+    );
     res.json({
       success: true,
       data: { date: startUtc.toISOString(), orderCount: orders.length, totalCollected },
@@ -128,11 +133,11 @@ async function buildDeliveryProfile(userId: string) {
   const startUtc = istTodayStartUtc();
   const delivered = await prisma.order.findMany({
     where: { deliveryBoyId: userId, status: "DELIVERED", deliveredAt: { gte: startUtc } },
-    select: { totalAmount: true, paymentMethod: true },
+    select: { totalAmount: true, amountPaid: true, paymentMethod: true },
   });
   const todayCash = delivered
     .filter((o) => o.paymentMethod === "COD")
-    .reduce((sum, o) => sum + Number(o.totalAmount), 0);
+    .reduce((sum, o) => sum + Math.max(0, Number(o.totalAmount) - Number(o.amountPaid)), 0);
 
   return {
     name: user.name,

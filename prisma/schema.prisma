@@ -546,6 +546,10 @@ model QuoteRequest {
   amountPaid        Decimal? @db.Decimal(10, 2)
   razorpayOrderId   String?
   razorpayPaymentId String?
+  // Bulk Express: the fulfillment Order materialized once this quote is ACCEPTED. Back-link to
+  // Order.quoteRequestId (scalar, not a Prisma relation, to avoid a mandatory back-reference array).
+  // Null until conversion; lets the app deep-link the customer to live order tracking.
+  orderId      String?
   items        QuoteItem[]
   createdAt    DateTime    @default(now())
 
@@ -563,6 +567,10 @@ model QuoteItem {
   qty            String       @default("")
   amount         Decimal      @db.Decimal(10, 2)
   sortOrder      Int          @default(0)
+  // Optional SKU link (Bulk Express): when the owner maps this priced line to a real ProductVariant,
+  // converting the quote to an order decrements that variant's stock. Plain scalar (no relation) so
+  // ProductVariant needs no back-reference; free-text lines leave it null and never touch inventory.
+  variantId      String?
 
   @@index([quoteRequestId])
 }
@@ -604,6 +612,10 @@ model ProductVariant {
   mrp               Decimal        @db.Decimal(10, 2)
   sellingPrice      Decimal        @db.Decimal(10, 2)
   costPrice         Decimal?       @db.Decimal(10, 2)
+  // Seller-consented minimum sale price (>= costPrice). PRIVATE — never sent to customers (stripped by
+  // formatVariantForApp, same as costPrice). Lets the owner run sales down to this floor without asking
+  // the seller and without a below-cost loss. Stored per-base-unit like sellingPrice.
+  saleFloor         Decimal?       @db.Decimal(10, 2)
   stock             Decimal        @db.Decimal(12, 3)
   lowStockThreshold Int            @default(5)
   bulkMinQty        Int            @default(0)
@@ -1037,6 +1049,15 @@ model Order {
 
   // Invoice link
   invoiceId             String?            @unique
+
+  // Bulk Express: set when this order was materialized from an approved QuoteRequest. @unique is the
+  // idempotency guard — a quote can produce exactly one order. source tags how the order originated
+  // ("APP" normal checkout | "BULK_QUOTE" bulk fulfillment).
+  quoteRequestId        String?            @unique
+  source                String             @default("APP")
+  // Amount already captured online before fulfillment (bulk advance). balanceDue = totalAmount −
+  // amountPaid is what the delivery agent collects (0 for fully-paid / pure-COD orders).
+  amountPaid            Decimal            @default(0) @db.Decimal(12, 2)
 
   notes                 String?
   // Client-supplied key to make order placement idempotent (dedupes double-tap/retry).

@@ -57,7 +57,18 @@ export async function markQuotePaid(quoteId: string, razorpayPaymentId: string):
       razorpayPaymentId,
     },
   });
-  return flip.count === 1;
+  if (flip.count !== 1) return false;
+
+  // Bulk Express: the paid quote is now ACCEPTED → materialize the fulfillment Order (delivery
+  // pipeline + invoice + OTP). Best-effort + idempotent, so the concurrent /pay-vs-webhook winner
+  // creates exactly one order and a failure here never reverts a confirmed payment.
+  try {
+    const { materializeQuoteOrder } = await import("./quoteToOrder.js");
+    await materializeQuoteOrder(quoteId);
+  } catch (convErr) {
+    console.warn("materializeQuoteOrder (paid) failed:", convErr);
+  }
+  return true;
 }
 
 /** Webhook/reconcile entry: confirm a quote identified by its Razorpay order id. No-op if unknown. */

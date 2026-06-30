@@ -6,6 +6,7 @@ import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAu
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
 import { shapeQuote } from "./appUser.js";
 import { notifyQuoteReady } from "../services/fcmNotifier.js";
+import { materializeQuoteOrder } from "../services/quoteToOrder.js";
 
 // Bulk-order (quote-request) inbox for the HOUSE co-manager. Mounted at /api/app/seller/quote-requests.
 // Quote requests are store-wide (not per-seller), so this MIRRORS the owner inbox (routes/ownerQuotes.ts)
@@ -49,6 +50,7 @@ const quoteSchema = z.object({
         name: z.string().min(1).max(120),
         qty: z.string().max(40).default(""),
         amount: z.number().nonnegative(),
+        variantId: z.string().max(40).optional().nullable(),
       }),
     )
     .min(1, "Add at least one item")
@@ -81,6 +83,7 @@ router.post("/:id/quote", async (req: SellerRequest, res: Response) => {
           qty: it.qty.trim(),
           amount: it.amount,
           sortOrder: i,
+          variantId: it.variantId || null,
         })),
       });
       return tx.quoteRequest.update({
@@ -112,13 +115,31 @@ router.post("/:id/quote", async (req: SellerRequest, res: Response) => {
   }
 });
 
-// POST /api/app/seller/quote-requests/:id/fulfill → mark fulfilled
+// POST /api/app/seller/quote-requests/:id/fulfill → push an accepted quote into delivery.
+// A1 (Bulk Express): mirrors the owner route — idempotently materialize the fulfillment order;
+// only fall back to the legacy FULFILLED flip when conversion isn't possible.
 router.post("/:id/fulfill", async (req: SellerRequest, res: Response) => {
   try {
     if (!requireHouse(req, res)) return;
     const id = String(req.params.id ?? "");
     const existing = await prisma.quoteRequest.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError("Quote request", id);
+
+    let converted: Awaited<ReturnType<typeof materializeQuoteOrder>> = null;
+    try {
+      converted = await materializeQuoteOrder(id);
+    } catch (convErr) {
+      console.warn("materializeQuoteOrder (seller fulfill) failed:", convErr);
+    }
+
+    if (converted) {
+      const fresh = await prisma.quoteRequest.findUnique({
+        where: { id },
+        include: { user: { select: { name: true, phone: true } }, items: true },
+      });
+      res.json({ success: true, data: shapeQuote(fresh!) });
+      return;
+    }
 
     const updated = await prisma.quoteRequest.update({
       where: { id },

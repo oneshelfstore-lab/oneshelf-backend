@@ -23,7 +23,7 @@ import { publicBannerRouter, adminBannerRouter, ownerBannerRouter } from "./rout
 import { publicDealCollageRouter, ownerDealCollageRouter } from "./routes/dealCollages.js";
 import { publicBrandRouter, ownerBrandRouter, sellerBrandRouter } from "./routes/brands.js";
 import cartRoutes from "./routes/cart.js";
-import { appCouponRouter, adminCouponRouter } from "./routes/coupons.js";
+import { appCouponRouter, adminCouponRouter, ownerCouponRouter } from "./routes/coupons.js";
 import orderRoutes from "./routes/orders.js";
 import ownerOrderRoutes from "./routes/ownerOrders.js";
 import adminOrderRoutes from "./routes/adminOrders.js";
@@ -215,6 +215,7 @@ app.use("/api/app/owner/quote-requests", ownerQuoteRoutes);
 app.use("/api/app/owner/partner-applications", ownerPartnerApplicationRoutes);
 app.use("/api/app/owner/broadcast", ownerBroadcastRoutes);
 app.use("/api/app/owner/banners", ownerBannerRouter);
+app.use("/api/app/owner/coupons", ownerCouponRouter);
 app.use("/api/app/owner/deal-collages", ownerDealCollageRouter);
 app.use("/api/app/owner/super-categories", ownerSuperCategoryRoutes);
 app.use("/api/app/owner/brands", ownerBrandRouter);

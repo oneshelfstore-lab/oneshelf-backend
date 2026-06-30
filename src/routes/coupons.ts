@@ -5,6 +5,7 @@ import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib
 import { requireRole } from "../middleware/auth.js";
 import {
   firebaseAuthMiddleware,
+  requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 
@@ -189,6 +190,83 @@ adminCouponRouter.put("/:id", requireRole("OWNER") as any, async (req: Request, 
 
 // DELETE /api/coupons/:id — deactivate
 adminCouponRouter.delete("/:id", requireRole("OWNER") as any, async (req: Request, res: Response) => {
+  try {
+    const existing = await prisma.coupon.findUnique({ where: { id: req.params.id } });
+    if (!existing) throw new NotFoundError("Coupon", req.params.id!);
+
+    await prisma.coupon.update({ where: { id: req.params.id }, data: { isActive: false } });
+    res.json({ success: true, message: "Coupon deactivated" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// Owner router (FIREBASE auth, mounted at /api/app/owner/coupons)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// The Android owner app authenticates with Firebase (not the dashboard's JWT). The adminCouponRouter
+// above is JWT-only, so the owner had no way to create/manage coupons FROM THE APP — the same
+// split-brain we fixed for banners (see ownerBannerRouter). This mirrors that auth + reuses the same
+// couponSchema + Coupon model, so it's purely a new Firebase-auth surface (no schema change).
+//
+// Coupons created here are PLATFORM-funded: the discount reduces the customer's order total only — it
+// never touches a seller's netPayable (each SubOrder.subtotal is the seller's gross pre-coupon total in
+// orders.ts), so multi-seller payouts stay correct with zero extra work.
+
+export const ownerCouponRouter = Router();
+ownerCouponRouter.use(firebaseAuthMiddleware as any);
+ownerCouponRouter.use(requireAppRole("OWNER") as any);
+
+// GET / — list all coupons (incl. inactive + usageCount) for the owner manager.
+ownerCouponRouter.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const coupons = await prisma.coupon.findMany({ orderBy: { code: "asc" }, take: 500 });
+    res.json({ success: true, data: coupons });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// POST / — create a coupon (reuses the admin couponSchema).
+ownerCouponRouter.post("/", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = couponSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid coupon data", parsed.error.errors);
+
+    const existing = await prisma.coupon.findUnique({ where: { code: parsed.data.code } });
+    if (existing) throw new ConflictError(`Coupon '${parsed.data.code}' already exists`);
+
+    const coupon = await prisma.coupon.create({ data: parsed.data });
+    res.status(201).json({ success: true, data: coupon });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// PUT /:id — update a coupon.
+ownerCouponRouter.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const existing = await prisma.coupon.findUnique({ where: { id: req.params.id } });
+    if (!existing) throw new NotFoundError("Coupon", req.params.id!);
+
+    const parsed = couponSchema.partial().safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid coupon data", parsed.error.errors);
+
+    if (parsed.data.code && parsed.data.code !== existing.code) {
+      const dup = await prisma.coupon.findUnique({ where: { code: parsed.data.code } });
+      if (dup) throw new ConflictError(`Coupon '${parsed.data.code}' already exists`);
+    }
+
+    const coupon = await prisma.coupon.update({ where: { id: req.params.id }, data: parsed.data });
+    res.json({ success: true, data: coupon });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// DELETE /:id — soft-deactivate (keeps the coupon + its redemption history for the record).
+ownerCouponRouter.delete("/:id", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const existing = await prisma.coupon.findUnique({ where: { id: req.params.id } });
     if (!existing) throw new NotFoundError("Coupon", req.params.id!);

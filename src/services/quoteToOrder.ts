@@ -126,17 +126,26 @@ export async function materializeQuoteOrder(quoteId: string): Promise<Materializ
   }
 
   const order = await prisma.$transaction(async (tx) => {
-    // Best-effort stock decrement for owner-mapped variant lines. A bulk line's qty is free-text
-    // ("5kg"), so we decrement ONE unit of the mapped variant — the owner is hand-packing bulk and
-    // uses the link only for rough inventory tracking. Insufficient stock never fails the order
-    // (the quote was already approved/paid); we just record a warning for the owner.
+    // Best-effort stock decrement for owner-mapped variant lines. The qty is free-text ("5kg", "2 pkt",
+    // "3"), so we decrement the leading number from it (default 1) — close enough for the owner's rough
+    // bulk inventory tracking. Insufficient stock never fails the order (the quote was already
+    // approved/paid); if stock is short we decrement what's available and warn the owner.
     for (const it of quote.items) {
       if (!it.variantId) continue;
-      const dec = await tx.productVariant.updateMany({
-        where: { id: it.variantId, isActive: true, stock: { gte: 1 } },
-        data: { stock: { decrement: 1 } },
-      });
-      if (dec.count === 0) warnings.push(`Could not decrement stock for "${it.name}" (out of stock or inactive).`);
+      const qtyMatch = (it.qty ?? "").match(/[\d.]+/);
+      let want = qtyMatch ? Math.ceil(parseFloat(qtyMatch[0])) : 1;
+      if (!Number.isFinite(want) || want < 1) want = 1;
+      // Decrement up to what's in stock (clamped), so a too-large bulk qty doesn't fail or oversell.
+      const variant = await tx.productVariant.findUnique({ where: { id: it.variantId }, select: { stock: true, isActive: true } });
+      const available = variant && variant.isActive ? Math.floor(Number(variant.stock)) : 0;
+      const take = Math.min(want, available);
+      if (take > 0) {
+        await tx.productVariant.updateMany({
+          where: { id: it.variantId, stock: { gte: take } },
+          data: { stock: { decrement: take } },
+        });
+      }
+      if (take < want) warnings.push(`Stock short for "${it.name}": needed ${want}, deducted ${take}.`);
     }
 
     const created = await tx.order.create({

@@ -550,6 +550,10 @@ model QuoteRequest {
   // Order.quoteRequestId (scalar, not a Prisma relation, to avoid a mandatory back-reference array).
   // Null until conversion; lets the app deep-link the customer to live order tracking.
   orderId      String?
+  // Delivery address the customer chose when approving (bulk collects no address at submission).
+  // Validated to belong to the customer; the conversion snapshots it onto the order, falling back to
+  // the customer's default address when null.
+  addressId    String?
   items        QuoteItem[]
   createdAt    DateTime    @default(now())
 

@@ -92,9 +92,12 @@ export async function materializeQuoteOrder(quoteId: string): Promise<Materializ
     select: { id: true, commissionPct: true },
   });
 
-  // Snapshot the customer's default delivery address (bulk never collected a per-order address;
-  // owner has the customer phone regardless). Fall back to any saved address.
+  // Snapshot the delivery address: the one the customer chose at approval (quote.addressId, validated
+  // to be theirs when stored), else their default, else any saved address. Owner has their phone too.
   const address =
+    (quote.addressId
+      ? await prisma.address.findFirst({ where: { id: quote.addressId, userId: quote.userId } })
+      : null) ??
     (await prisma.address.findFirst({ where: { userId: quote.userId, isDefault: true } })) ??
     (await prisma.address.findFirst({ where: { userId: quote.userId } }));
 

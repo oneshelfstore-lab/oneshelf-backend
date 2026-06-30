@@ -42,6 +42,9 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         deliveryOtpRequired: true, shippingName: true, shippingPhone: true,
         shippingAddress: true, shippingPincode: true,
         createdAt: true, updatedAt: true,
+        // Bulk Express: "BULK_QUOTE" → delivery card shows a BULK badge. amountPaid (advance already
+        // captured) lets the card show the correct cash-to-collect = totalAmount − amountPaid.
+        source: true, amountPaid: true,
         // Customer-uploaded gate/door photo, shown on the delivery card to help find the address.
         gatePhotoUrl: true,
         // Customer-recorded voice note, played on the delivery card.

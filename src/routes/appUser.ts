@@ -762,7 +762,11 @@ router.get("/quote-requests", async (req: FirebaseAuthRequest, res: Response) =>
   }
 });
 
-const respondQuoteSchema = z.object({ accept: z.boolean() });
+const respondQuoteSchema = z.object({
+  accept: z.boolean(),
+  // Delivery address chosen on a direct (pay-on-delivery) accept.
+  addressId: z.string().max(40).optional().nullable(),
+});
 
 // POST /api/app/me/quote-requests/:id/respond → customer declines (or accepts pay-on-delivery)
 // a QUOTED price. Online payment goes through /approve + /pay instead (see below).
@@ -778,6 +782,11 @@ router.post("/quote-requests/:id/respond", async (req: FirebaseAuthRequest, res:
     if (!quote) throw new NotFoundError("Quote request", id);
     if (quote.status !== "QUOTED") {
       throw new ValidationError("This request isn't awaiting your response.");
+    }
+
+    // Store the chosen delivery address before conversion (accept path only).
+    if (parsed.data.accept) {
+      await setQuoteAddress(quote.id, req.appUser!.id, parsed.data.addressId);
     }
 
     const updated = await prisma.quoteRequest.update({
@@ -803,7 +812,19 @@ router.post("/quote-requests/:id/respond", async (req: FirebaseAuthRequest, res:
 const approveQuoteSchema = z.object({
   // FULL = pay the whole total online; ADVANCE = pay only the advance % now, rest on delivery.
   paymentOption: z.enum(["FULL", "ADVANCE"]).default("FULL"),
+  // Delivery address the customer chose at approval (validated to belong to them, then stored on the
+  // quote so the conversion snapshots it onto the order). Null → fall back to the default address.
+  addressId: z.string().max(40).optional().nullable(),
 });
+
+// Validates an addressId belongs to the caller and persists it on the quote so materializeQuoteOrder
+// can snapshot it. No-op when addressId is null/blank. Throws if the address isn't the caller's.
+async function setQuoteAddress(quoteId: string, userId: string, addressId?: string | null) {
+  if (!addressId) return;
+  const addr = await prisma.address.findFirst({ where: { id: addressId, userId }, select: { id: true } });
+  if (!addr) throw new ValidationError("That delivery address was not found.");
+  await prisma.quoteRequest.update({ where: { id: quoteId }, data: { addressId } });
+}
 
 // POST /api/app/me/quote-requests/:id/approve → customer approves a QUOTED price.
 // Body { paymentOption: "FULL" | "ADVANCE" }. If the chargeable amount is payable AND Razorpay is
@@ -825,6 +846,10 @@ router.post("/quote-requests/:id/approve", async (req: FirebaseAuthRequest, res:
     if (quote.status !== "QUOTED") {
       throw new ValidationError("This request isn't awaiting your approval.");
     }
+
+    // Persist the chosen delivery address before any conversion runs (the paid path materializes the
+    // order later in markQuotePaid, so it must already be on the quote).
+    await setQuoteAddress(quote.id, req.appUser!.id, parsed.data.addressId);
 
     const total = quote.quotedAmount != null ? Number(quote.quotedAmount) : 0;
     const advancePercent = paymentOption === "ADVANCE" ? await getQuoteAdvancePercent() : 0;

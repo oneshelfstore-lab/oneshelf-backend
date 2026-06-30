@@ -58,6 +58,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
           paymentMethod: true, paymentStatus: true, totalAmount: true,
           deliveryOtpRequired: true, deliveryBoyId: true, couponCode: true,
           shippingName: true, shippingPhone: true, shippingAddress: true,
+          source: true, // "BULK_QUOTE" → owner board shows a BULK badge
           createdAt: true, updatedAt: true,
           customer: { select: { id: true, name: true, phone: true } },
           _count: { select: { items: true } },

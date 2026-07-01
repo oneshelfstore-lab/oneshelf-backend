@@ -4,8 +4,8 @@ import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
-import { shapeQuote } from "./appUser.js";
-import { notifyQuoteReady } from "../services/fcmNotifier.js";
+import { shapeQuote, quoteMessageSchema, quoteMessagePreview, quoteFullInclude } from "./appUser.js";
+import { notifyQuoteReady, notifyQuoteMessage } from "../services/fcmNotifier.js";
 import { materializeQuoteOrder } from "../services/quoteToOrder.js";
 
 // Bulk-order (quote-request) inbox for the HOUSE co-manager. Mounted at /api/app/seller/quote-requests.
@@ -29,15 +29,52 @@ function requireHouse(req: SellerRequest, res: Response): boolean {
   return true;
 }
 
-// GET /api/app/seller/quote-requests → all requests + customer name/phone (newest first)
+// GET /api/app/seller/quote-requests → all requests + customer name/phone + thread (newest first)
 router.get("/", async (req: SellerRequest, res: Response) => {
   try {
     if (!requireHouse(req, res)) return;
     const quotes = await prisma.quoteRequest.findMany({
       orderBy: { createdAt: "desc" },
-      include: { user: { select: { name: true, phone: true } }, items: true },
+      include: quoteFullInclude,
     });
     res.json({ success: true, data: quotes.map((q) => shapeQuote(q)) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// POST /api/app/seller/quote-requests/:id/messages → house co-manager replies on the thread (as store).
+router.post("/:id/messages", async (req: SellerRequest, res: Response) => {
+  try {
+    if (!requireHouse(req, res)) return;
+    const parsed = quoteMessageSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid message", parsed.error.errors);
+    const id = String(req.params.id ?? "");
+    const quote = await prisma.quoteRequest.findUnique({ where: { id }, select: { id: true, userId: true } });
+    if (!quote) throw new NotFoundError("Quote request", id);
+
+    await prisma.quoteMessage.create({
+      data: {
+        quoteRequestId: id,
+        sender: "OWNER",
+        text: parsed.data.text?.trim() || null,
+        voiceUrl: parsed.data.voiceUrl || null,
+        imageUrls: parsed.data.imageUrls ?? [],
+      },
+    });
+    try {
+      await notifyQuoteMessage({
+        quoteId: id,
+        requestNumber: "QR-" + id.slice(-6).toUpperCase(),
+        fromSender: "OWNER",
+        customerUserId: quote.userId,
+        preview: quoteMessagePreview(parsed.data),
+      });
+    } catch (e) {
+      console.warn("notifyQuoteMessage failed:", e);
+    }
+    const fresh = await prisma.quoteRequest.findUnique({ where: { id }, include: quoteFullInclude });
+    res.json({ success: true, data: shapeQuote(fresh!) });
   } catch (e) {
     sendError(res, e);
   }
@@ -94,7 +131,7 @@ router.post("/:id/quote", async (req: SellerRequest, res: Response) => {
           quoteMessage: parsed.data.message.trim(),
           status: "QUOTED",
         },
-        include: { user: { select: { name: true, phone: true } }, items: true },
+        include: quoteFullInclude,
       });
     });
 
@@ -135,7 +172,7 @@ router.post("/:id/fulfill", async (req: SellerRequest, res: Response) => {
     if (converted) {
       const fresh = await prisma.quoteRequest.findUnique({
         where: { id },
-        include: { user: { select: { name: true, phone: true } }, items: true },
+        include: quoteFullInclude,
       });
       res.json({ success: true, data: shapeQuote(fresh!) });
       return;
@@ -144,7 +181,7 @@ router.post("/:id/fulfill", async (req: SellerRequest, res: Response) => {
     const updated = await prisma.quoteRequest.update({
       where: { id },
       data: { status: "FULFILLED" },
-      include: { user: { select: { name: true, phone: true } }, items: true },
+      include: quoteFullInclude,
     });
     res.json({ success: true, data: shapeQuote(updated) });
   } catch (e) {

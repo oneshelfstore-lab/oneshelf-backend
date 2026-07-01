@@ -10,7 +10,7 @@ import { admin, isFirebaseInitialized } from "../lib/firebase.js";
 import { formatProductForApp } from "./catalog.js";
 import { computeUserSavings } from "../services/savings.js";
 import { computeUserLoyalty } from "../services/loyalty.js";
-import { notifyNewComplaint, notifyNewQuoteRequest } from "../services/fcmNotifier.js";
+import { notifyNewComplaint, notifyNewQuoteRequest, notifyQuoteMessage } from "../services/fcmNotifier.js";
 import { mintReferralWelcomeCoupon } from "../services/referralRewards.js";
 import { createTopup, creditTopup } from "../services/walletTopup.js";
 import { verifyPaymentSignature, createRazorpayOrder, isRazorpayConfigured } from "../services/razorpay.js";
@@ -634,6 +634,7 @@ export function shapeQuote(q: {
   quoteMessage: string | null; paymentStatus?: string; paymentOption?: string | null;
   amountPaid?: unknown; razorpayOrderId?: string | null; orderId?: string | null; createdAt: Date;
   items?: { name: string; qty: string; amount: unknown; sortOrder: number; variantId?: string | null }[];
+  messages?: { id: string; sender: string; text: string | null; voiceUrl: string | null; imageUrls: string[]; createdAt: Date }[];
   user?: { name: string; phone: string | null } | null;
 }) {
   const paymentStatus = q.paymentStatus ?? "UNPAID";
@@ -661,6 +662,11 @@ export function shapeQuote(q: {
       .slice()
       .sort((a, b) => a.sortOrder - b.sortOrder)
       .map((it) => ({ name: it.name, qty: it.qty, amount: Number(it.amount), variantId: it.variantId ?? null })),
+    // Conversation thread (oldest → newest). Empty for legacy quotes with no messages.
+    messages: (q.messages ?? [])
+      .slice()
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .map((m) => ({ id: m.id, sender: m.sender, text: m.text, voiceUrl: m.voiceUrl, imageUrls: m.imageUrls ?? [], createdAt: m.createdAt.getTime() })),
     createdAt: q.createdAt.getTime(),
     customerName: q.user?.name ?? null,
     customerPhone: q.user?.phone ?? null,
@@ -723,6 +729,8 @@ const quoteRequestSchema = z.object({
   note: z.string().max(2000).default(""),
   eventDate: z.string().max(100).optional().nullable(),
   imageUrls: z.array(z.string().max(1000)).max(8).default([]),
+  // Optional voice note recorded on submit — becomes the first message on the thread.
+  voiceUrl: z.string().max(500).optional().nullable(),
 });
 
 // POST /api/app/me/quote-requests → submit a quote request (+ best-effort owner push)
@@ -738,7 +746,12 @@ router.post("/quote-requests", async (req: FirebaseAuthRequest, res: Response) =
         note: parsed.data.note.trim(),
         eventDate: parsed.data.eventDate || null,
         imageUrls: parsed.data.imageUrls,
+        // A voice note recorded at submit lands as the customer's first thread message.
+        ...(parsed.data.voiceUrl
+          ? { messages: { create: { sender: "CUSTOMER", voiceUrl: parsed.data.voiceUrl } } }
+          : {}),
       },
+      include: quoteFullInclude,
     });
 
     try {
@@ -759,7 +772,7 @@ router.get("/quote-requests", async (req: FirebaseAuthRequest, res: Response) =>
     const quotes = await prisma.quoteRequest.findMany({
       where: { userId: req.appUser!.id },
       orderBy: { createdAt: "desc" },
-      include: { items: true },
+      include: quoteFullInclude,
     });
     res.json({ success: true, data: quotes.map((q) => shapeQuote({ ...q })) });
   } catch (e) {
@@ -797,7 +810,7 @@ router.post("/quote-requests/:id/respond", async (req: FirebaseAuthRequest, res:
     const updated = await prisma.quoteRequest.update({
       where: { id: quote.id },
       data: { status: parsed.data.accept ? "ACCEPTED" : "DECLINED" },
-      include: { items: true },
+      include: quoteFullInclude,
     });
     // Bulk Express: a direct accept (pay-on-delivery) also materializes the fulfillment order.
     if (parsed.data.accept) {
@@ -807,7 +820,7 @@ router.post("/quote-requests/:id/respond", async (req: FirebaseAuthRequest, res:
         console.warn("materializeQuoteOrder (respond accept) failed:", convErr);
       }
     }
-    const fresh = await prisma.quoteRequest.findUnique({ where: { id: quote.id }, include: { items: true } });
+    const fresh = await prisma.quoteRequest.findUnique({ where: { id: quote.id }, include: quoteFullInclude });
     res.json({ success: true, data: shapeQuote({ ...(fresh ?? updated) }) });
   } catch (e) {
     sendError(res, e);
@@ -918,7 +931,7 @@ router.post("/quote-requests/:id/pay", async (req: FirebaseAuthRequest, res: Res
     });
     if (!quote) throw new NotFoundError("Quote request", id);
     if (quote.paymentStatus !== "UNPAID") {
-      const fresh = await prisma.quoteRequest.findUnique({ where: { id: quote.id }, include: { items: true } });
+      const fresh = await prisma.quoteRequest.findUnique({ where: { id: quote.id }, include: quoteFullInclude });
       res.json({ success: true, data: shapeQuote({ ...fresh! }) });
       return;
     }
@@ -928,7 +941,7 @@ router.post("/quote-requests/:id/pay", async (req: FirebaseAuthRequest, res: Res
     if (!isValid) throw new AppError(400, "PAYMENT_INVALID", "Payment signature verification failed");
 
     await markQuotePaid(quote.id, razorpayPaymentId);
-    const updated = await prisma.quoteRequest.findUnique({ where: { id: quote.id }, include: { items: true } });
+    const updated = await prisma.quoteRequest.findUnique({ where: { id: quote.id }, include: quoteFullInclude });
     res.json({ success: true, message: "Payment verified", data: shapeQuote({ ...updated! }) });
   } catch (e) {
     sendError(res, e);
@@ -949,7 +962,70 @@ router.post("/quote-requests/:id/reconcile", async (req: FirebaseAuthRequest, re
     if (!quote) throw new NotFoundError("Quote request", id);
 
     await reconcileQuotePayment(quote.id);
-    const fresh = await prisma.quoteRequest.findUnique({ where: { id: quote.id }, include: { items: true } });
+    const fresh = await prisma.quoteRequest.findUnique({ where: { id: quote.id }, include: quoteFullInclude });
+    res.json({ success: true, data: shapeQuote({ ...fresh! }) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── Bulk-quote conversation thread (shared shape — owner/seller routes reuse these) ───────────────
+// A message carries any of: text, a voice-note URL, image URLs (uploaded client-side to Storage).
+export const quoteMessageSchema = z
+  .object({
+    text: z.string().max(2000).optional().nullable(),
+    voiceUrl: z.string().max(500).optional().nullable(),
+    imageUrls: z.array(z.string().max(500)).max(8).default([]),
+  })
+  .refine((d) => Boolean(d.text?.trim()) || Boolean(d.voiceUrl) || (d.imageUrls?.length ?? 0) > 0, {
+    message: "A message needs text, a voice note, or a photo.",
+  });
+
+/** One-line push/notification preview for a thread message. */
+export function quoteMessagePreview(m: { text?: string | null; voiceUrl?: string | null; imageUrls?: string[] }): string {
+  if (m.text?.trim()) return m.text.trim().slice(0, 120);
+  if (m.voiceUrl) return "🎤 Voice message";
+  if ((m.imageUrls?.length ?? 0) > 0) return "📷 Photo";
+  return "New message";
+}
+
+/** Full include for returning a shaped quote with its items + thread + customer identity. */
+export const quoteFullInclude = {
+  items: true,
+  messages: true,
+  user: { select: { name: true, phone: true } },
+} as const;
+
+// POST /api/app/me/quote-requests/:id/messages → customer appends a message to the thread (notifies store).
+router.post("/quote-requests/:id/messages", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = quoteMessageSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid message", parsed.error.errors);
+    const id = String(req.params.id ?? "");
+    const quote = await prisma.quoteRequest.findFirst({ where: { id, userId: req.appUser!.id }, select: { id: true, userId: true } });
+    if (!quote) throw new NotFoundError("Quote request", id);
+
+    await prisma.quoteMessage.create({
+      data: {
+        quoteRequestId: id,
+        sender: "CUSTOMER",
+        text: parsed.data.text?.trim() || null,
+        voiceUrl: parsed.data.voiceUrl || null,
+        imageUrls: parsed.data.imageUrls ?? [],
+      },
+    });
+    try {
+      await notifyQuoteMessage({
+        quoteId: id,
+        requestNumber: "QR-" + id.slice(-6).toUpperCase(),
+        fromSender: "CUSTOMER",
+        customerUserId: quote.userId,
+        preview: quoteMessagePreview(parsed.data),
+      });
+    } catch (e) {
+      console.warn("notifyQuoteMessage failed:", e);
+    }
+    const fresh = await prisma.quoteRequest.findUnique({ where: { id }, include: quoteFullInclude });
     res.json({ success: true, data: shapeQuote({ ...fresh! }) });
   } catch (e) {
     sendError(res, e);

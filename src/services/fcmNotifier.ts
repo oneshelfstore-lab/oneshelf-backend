@@ -153,6 +153,34 @@ export async function notifyNewQuoteRequest(info: { id: string; type: string; cu
   });
 }
 
+// A new message on a bulk-quote thread. Notifies the OTHER party: a CUSTOMER message pings the owner
+// topic; an OWNER (store/co-manager) message pings the customer's devices.
+export async function notifyQuoteMessage(info: {
+  quoteId: string;
+  requestNumber: string;
+  fromSender: string; // "CUSTOMER" | "OWNER"
+  customerUserId: string;
+  preview: string;
+}) {
+  if (info.fromSender === "CUSTOMER") {
+    await sendToTopic("owner_orders", {
+      type: "quote_message",
+      quoteId: info.quoteId,
+      title: `New message on ${info.requestNumber}`,
+      body: info.preview,
+    });
+  } else {
+    const tokens = await getUserTokens(info.customerUserId);
+    if (tokens.length === 0) return;
+    await sendToTokens(tokens, {
+      type: "quote_message",
+      quoteId: info.quoteId,
+      title: `Store replied on ${info.requestNumber}`,
+      body: info.preview,
+    });
+  }
+}
+
 // Tells the customer their bulk-quote estimate is ready to review/approve.
 export async function notifyQuoteReady(
   userId: string,

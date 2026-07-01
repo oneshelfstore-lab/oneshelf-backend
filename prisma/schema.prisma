@@ -556,10 +556,28 @@ model QuoteRequest {
   // the customer's default address when null.
   addressId    String?
   items        QuoteItem[]
+  messages     QuoteMessage[]
   createdAt    DateTime    @default(now())
 
   @@index([userId])
   @@index([status])
+}
+
+// A single message in the bulk-quote conversation thread (customer ⇄ store). Carries any of:
+// free text, a voice-note URL, and/or image URLs (all uploaded client-side to Firebase Storage).
+// This is what turns a bulk quote into a two-way chat: voice-on-submit, the owner attaching photos to
+// an estimate, and the customer asking for changes are all just messages on the thread.
+model QuoteMessage {
+  id             String       @id @default(cuid())
+  quoteRequestId String
+  quoteRequest   QuoteRequest @relation(fields: [quoteRequestId], references: [id], onDelete: Cascade)
+  sender         String       // "CUSTOMER" | "OWNER" (store: owner or house co-manager)
+  text           String?
+  voiceUrl       String?
+  imageUrls      String[]     @default([])
+  createdAt      DateTime     @default(now())
+
+  @@index([quoteRequestId])
 }
 
 // One itemized line of an owner's quotation. `qty` is a free-text label ("5kg", "2 pkt")

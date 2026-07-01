@@ -7,8 +7,8 @@ import {
   requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
-import { shapeQuote } from "./appUser.js";
-import { notifyQuoteReady } from "../services/fcmNotifier.js";
+import { shapeQuote, quoteMessageSchema, quoteMessagePreview, quoteFullInclude } from "./appUser.js";
+import { notifyQuoteReady, notifyQuoteMessage } from "../services/fcmNotifier.js";
 import { materializeQuoteOrder } from "../services/quoteToOrder.js";
 
 // Owner quote-request inbox. Mounted at /api/app/owner/quote-requests.
@@ -16,14 +16,50 @@ const router = Router();
 router.use(firebaseAuthMiddleware as any);
 router.use(requireAppRole("OWNER") as any);
 
-// GET /api/app/owner/quote-requests → all requests + customer name/phone (newest first)
+// GET /api/app/owner/quote-requests → all requests + customer name/phone + thread (newest first)
 router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
   try {
     const quotes = await prisma.quoteRequest.findMany({
       orderBy: { createdAt: "desc" },
-      include: { user: { select: { name: true, phone: true } }, items: true },
+      include: quoteFullInclude,
     });
     res.json({ success: true, data: quotes.map((q) => shapeQuote(q)) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// POST /api/app/owner/quote-requests/:id/messages → store replies on the thread (notifies the customer).
+router.post("/:id/messages", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = quoteMessageSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid message", parsed.error.errors);
+    const id = String(req.params.id ?? "");
+    const quote = await prisma.quoteRequest.findUnique({ where: { id }, select: { id: true, userId: true } });
+    if (!quote) throw new NotFoundError("Quote request", id);
+
+    await prisma.quoteMessage.create({
+      data: {
+        quoteRequestId: id,
+        sender: "OWNER",
+        text: parsed.data.text?.trim() || null,
+        voiceUrl: parsed.data.voiceUrl || null,
+        imageUrls: parsed.data.imageUrls ?? [],
+      },
+    });
+    try {
+      await notifyQuoteMessage({
+        quoteId: id,
+        requestNumber: "QR-" + id.slice(-6).toUpperCase(),
+        fromSender: "OWNER",
+        customerUserId: quote.userId,
+        preview: quoteMessagePreview(parsed.data),
+      });
+    } catch (e) {
+      console.warn("notifyQuoteMessage failed:", e);
+    }
+    const fresh = await prisma.quoteRequest.findUnique({ where: { id }, include: quoteFullInclude });
+    res.json({ success: true, data: shapeQuote(fresh!) });
   } catch (e) {
     sendError(res, e);
   }
@@ -80,7 +116,7 @@ router.post("/:id/quote", async (req: FirebaseAuthRequest, res: Response) => {
           quoteMessage: parsed.data.message.trim(),
           status: "QUOTED",
         },
-        include: { user: { select: { name: true, phone: true } }, items: true },
+        include: quoteFullInclude,
       });
     });
 
@@ -126,7 +162,7 @@ router.post("/:id/fulfill", async (req: FirebaseAuthRequest, res: Response) => {
       // Order exists (just created or already linked) — return the quote with its orderId.
       const fresh = await prisma.quoteRequest.findUnique({
         where: { id },
-        include: { user: { select: { name: true, phone: true } }, items: true },
+        include: quoteFullInclude,
       });
       res.json({ success: true, data: shapeQuote(fresh!) });
       return;
@@ -136,7 +172,7 @@ router.post("/:id/fulfill", async (req: FirebaseAuthRequest, res: Response) => {
     const updated = await prisma.quoteRequest.update({
       where: { id },
       data: { status: "FULFILLED" },
-      include: { user: { select: { name: true, phone: true } }, items: true },
+      include: quoteFullInclude,
     });
     res.json({ success: true, data: shapeQuote(updated) });
   } catch (e) {

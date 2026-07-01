@@ -4,7 +4,7 @@ import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
-import { formatVariantForApp, fromAppFormat } from "../utils/looseUnitConverter.js";
+import { formatVariantForApp, fromAppFormat, toAppFormat, assertVariantFloors } from "../utils/looseUnitConverter.js";
 
 // Seller-scoped catalog. Mounted at /api/app/seller/catalog. Every query is hard-filtered to the
 // caller's own sellerId — a seller can never see or edit another seller's products. New products are
@@ -64,10 +64,17 @@ function formatProductForApp(product: any) {
     // can't change them anyway).
     featuredIn99Store: product.featuredIn99Store,
     isSampleEligible: product.isSampleEligible,
+    isBuyOneGetOne: product.isBuyOneGetOne,
     imageUrls: product.imageUrls,
     searchKeywords: product.searchKeywords,
     isActive: product.isActive,
-    variants: product.variants?.map((v: any) => formatVariantForApp(v, isLoose)) ?? [],
+    variants: product.variants?.map((v: any) => {
+      const base = formatVariantForApp(v, isLoose);
+      // Private merchant fields — exposed ONLY on this seller-scoped serializer (never the customer one)
+      // so the editor prefills costPrice/saleFloor on edit and a re-save doesn't wipe them.
+      const app = toAppFormat(v, isLoose);
+      return { ...base, costPrice: app.costPrice, saleFloor: app.saleFloor };
+    }) ?? [],
   };
 }
 
@@ -80,6 +87,7 @@ const variantSchema = z.object({
   mrp: z.number().positive(),
   sellingPrice: z.number().positive(),
   costPrice: z.number().min(0).optional().nullable(),
+  saleFloor: z.number().min(0).optional().nullable(),
   stock: z.number().min(0),
   lowStockThreshold: z.number().int().min(0).default(5),
   bulkMinQty: z.number().int().min(0).default(0),
@@ -108,6 +116,7 @@ const productSchema = z.object({
   // third-party sellers below, so they keep the limited editor).
   isSampleEligible: z.boolean().optional(),
   featuredIn99Store: z.boolean().optional(),
+  isBuyOneGetOne: z.boolean().optional(),
   isActive: z.boolean().optional(),
   imageUrls: z.array(z.string()).default([]),
   searchKeywords: z.array(z.string()).default([]),
@@ -151,7 +160,7 @@ router.post("/", async (req: SellerRequest, res: Response) => {
   try {
     const parsed = productSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid product data", parsed.error.errors);
-    const { variants, categorySlug, isActive, isSampleEligible, featuredIn99Store, ...productData } = parsed.data;
+    const { variants, categorySlug, isActive, isSampleEligible, featuredIn99Store, isBuyOneGetOne, ...productData } = parsed.data;
 
     const cat = await prisma.category.findUnique({ where: { slug: categorySlug } });
     if (!cat) throw new ValidationError(`Category '${categorySlug}' not found`);
@@ -165,6 +174,7 @@ router.post("/", async (req: SellerRequest, res: Response) => {
           isActive: isActive ?? true,
           isSampleEligible: isSampleEligible ?? false,
           featuredIn99Store: featuredIn99Store ?? false,
+          isBuyOneGetOne: isBuyOneGetOne ?? false,
         }
       : { isActive: false };
 
@@ -188,11 +198,20 @@ router.post("/", async (req: SellerRequest, res: Response) => {
     });
 
     const isLoose = isLooseType(productData.productType);
+    // Two-number pricing guardrail: block a below-cost selling/sale-floor price (the SELLER's own
+    // guardrail, not a platform-set price). The house manager may run loss-leaders → allowBelowCost.
+    for (const v of variants) {
+      const floorErr = assertVariantFloors(
+        { mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: v.costPrice ?? null, saleFloor: v.saleFloor ?? null },
+        isHouse,
+      );
+      if (floorErr) throw new ValidationError(floorErr);
+    }
     const convertedVariants = variants.map((v) => {
-      const c = fromAppFormat({ mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: v.costPrice, stock: v.stock, bulkPrice: v.bulkPrice, packageSize: v.packageSize }, isLoose);
+      const c = fromAppFormat({ mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: v.costPrice, saleFloor: v.saleFloor, stock: v.stock, bulkPrice: v.bulkPrice, packageSize: v.packageSize }, isLoose);
       return {
         sku: v.sku, barcode: v.barcode, packageSize: v.packageSize, packageUnit: v.packageUnit,
-        mrp: c.mrp, sellingPrice: c.sellingPrice, costPrice: c.costPrice, stock: c.stock,
+        mrp: c.mrp, sellingPrice: c.sellingPrice, costPrice: c.costPrice, saleFloor: c.saleFloor, stock: c.stock,
         lowStockThreshold: v.lowStockThreshold, bulkMinQty: v.bulkMinQty, bulkPrice: c.bulkPrice, gstRateOverride: v.gstRateOverride,
       };
     });
@@ -251,6 +270,7 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
         delete updateData.isActive;
         delete updateData.isSampleEligible;
         delete updateData.featuredIn99Store;
+        delete updateData.isBuyOneGetOne;
       }
 
       if (Object.keys(updateData).length > 0) {
@@ -279,14 +299,20 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
             usedSkus.add(sku);
           });
         }
+        const isHouseUpd = req.sellerIsHouse === true;
         for (const v of variantUpdates) {
-          const c = fromAppFormat({ mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: (v as any).costPrice, stock: v.stock, bulkPrice: v.bulkPrice, packageSize: v.packageSize }, isLoose);
+          const floorErr = assertVariantFloors(
+            { mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: (v as any).costPrice ?? null, saleFloor: (v as any).saleFloor ?? null },
+            isHouseUpd,
+          );
+          if (floorErr) throw new ValidationError(floorErr);
+          const c = fromAppFormat({ mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: (v as any).costPrice, saleFloor: (v as any).saleFloor, stock: v.stock, bulkPrice: v.bulkPrice, packageSize: v.packageSize }, isLoose);
           if (v.id) {
             const { id: vid, ...rest } = v;
-            await tx.productVariant.update({ where: { id: vid }, data: { ...rest, mrp: c.mrp, sellingPrice: c.sellingPrice, stock: c.stock, bulkPrice: c.bulkPrice } });
+            await tx.productVariant.update({ where: { id: vid }, data: { ...rest, mrp: c.mrp, sellingPrice: c.sellingPrice, costPrice: c.costPrice, saleFloor: c.saleFloor, stock: c.stock, bulkPrice: c.bulkPrice } });
           } else {
             const { id: _unused, ...rest } = v;
-            await tx.productVariant.create({ data: { ...rest, mrp: c.mrp, sellingPrice: c.sellingPrice, stock: c.stock, bulkPrice: c.bulkPrice, productId } });
+            await tx.productVariant.create({ data: { ...rest, mrp: c.mrp, sellingPrice: c.sellingPrice, costPrice: c.costPrice, saleFloor: c.saleFloor, stock: c.stock, bulkPrice: c.bulkPrice, productId } });
           }
         }
       }

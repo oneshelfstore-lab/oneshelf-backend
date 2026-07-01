@@ -7,7 +7,7 @@ import {
   requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
-import { formatVariantForApp, fromAppFormat } from "../utils/looseUnitConverter.js";
+import { formatVariantForApp, fromAppFormat, toAppFormat, assertVariantFloors } from "../utils/looseUnitConverter.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -41,7 +41,13 @@ function formatProductForApp(product: any) {
     searchKeywords: product.searchKeywords,
     isActive: product.isActive,
     sellerName: product.seller?.name ?? null,
-    variants: product.variants?.map((v: any) => formatVariantForApp(v, isLoose)) ?? [],
+    variants: product.variants?.map((v: any) => {
+      const base = formatVariantForApp(v, isLoose);
+      // Private merchant fields — exposed ONLY on this owner serializer (never the customer one) so the
+      // editor prefills costPrice/saleFloor on edit and a re-save doesn't wipe them.
+      const app = toAppFormat(v, isLoose);
+      return { ...base, costPrice: app.costPrice, saleFloor: app.saleFloor };
+    }) ?? [],
   };
 }
 
@@ -97,6 +103,7 @@ const variantCreateSchema = z.object({
   mrp: z.number().positive(),
   sellingPrice: z.number().positive(),
   costPrice: z.number().min(0).optional().nullable(),
+  saleFloor: z.number().min(0).optional().nullable(),
   stock: z.number().min(0),
   lowStockThreshold: z.number().int().min(0).default(5),
   bulkMinQty: z.number().int().min(0).default(0),
@@ -163,9 +170,18 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
 
     // Convert loose variant prices from app format (per-increment) to API format (per-base-unit)
     const isLoose = isLooseType(productData.productType);
+    // Two-number pricing chain check. Owner manages the store catalog (house) and may run loss-leaders,
+    // so below-cost is allowed (warning-only) — we only block a sale floor above the selling price.
+    for (const v of variants) {
+      const floorErr = assertVariantFloors(
+        { mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: v.costPrice ?? null, saleFloor: v.saleFloor ?? null },
+        true,
+      );
+      if (floorErr) throw new ValidationError(floorErr);
+    }
     const convertedVariants = variants.map(v => {
       const converted = fromAppFormat(
-        { mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: v.costPrice, stock: v.stock, bulkPrice: v.bulkPrice, packageSize: v.packageSize },
+        { mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: v.costPrice, saleFloor: v.saleFloor, stock: v.stock, bulkPrice: v.bulkPrice, packageSize: v.packageSize },
         isLoose
       );
       return {
@@ -176,6 +192,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         mrp: converted.mrp,
         sellingPrice: converted.sellingPrice,
         costPrice: converted.costPrice,
+        saleFloor: converted.saleFloor,
         stock: converted.stock,
         lowStockThreshold: v.lowStockThreshold,
         bulkMinQty: v.bulkMinQty,
@@ -248,8 +265,13 @@ router.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
         }
 
         for (const v of variantUpdates) {
+          const floorErr = assertVariantFloors(
+            { mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: (v as any).costPrice ?? null, saleFloor: (v as any).saleFloor ?? null },
+            true,
+          );
+          if (floorErr) throw new ValidationError(floorErr);
           const converted = fromAppFormat(
-            { mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: (v as any).costPrice, stock: v.stock, bulkPrice: v.bulkPrice, packageSize: v.packageSize },
+            { mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: (v as any).costPrice, saleFloor: (v as any).saleFloor, stock: v.stock, bulkPrice: v.bulkPrice, packageSize: v.packageSize },
             isLoose
           );
           if (v.id) {
@@ -260,6 +282,8 @@ router.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
                 ...rest,
                 mrp: converted.mrp,
                 sellingPrice: converted.sellingPrice,
+                costPrice: converted.costPrice,
+                saleFloor: converted.saleFloor,
                 stock: converted.stock,
                 bulkPrice: converted.bulkPrice,
               },
@@ -271,6 +295,8 @@ router.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
                 ...rest,
                 mrp: converted.mrp,
                 sellingPrice: converted.sellingPrice,
+                costPrice: converted.costPrice,
+                saleFloor: converted.saleFloor,
                 stock: converted.stock,
                 bulkPrice: converted.bulkPrice,
                 productId,

@@ -24,6 +24,7 @@ const cartItemInclude = {
         select: {
           id: true, name: true, handle: true, brand: true, productType: true,
           imageUrls: true, hsnCode: true, gstRate: true, isPackaged: true, categoryId: true,
+          isBuyOneGetOne: true, // BOGO must be in the select or calculateCartTotals silently omits the discount
         },
       },
     },

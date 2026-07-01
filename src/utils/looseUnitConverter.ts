@@ -19,6 +19,7 @@ interface VariantLike {
   mrp: Decimal | number;
   sellingPrice: Decimal | number;
   costPrice?: Decimal | number | null;
+  saleFloor?: Decimal | number | null;
   stock: Decimal | number;
   bulkPrice?: Decimal | number | null;
 }
@@ -39,6 +40,7 @@ export interface AppVariantFormat {
   mrp: number;
   sellingPrice: number;
   costPrice: number | null;
+  saleFloor: number | null;
   stock: number;
   bulkPrice: number | null;
   packageSize: number;
@@ -49,11 +51,12 @@ export function toAppFormat(variant: VariantLike, isLoose: boolean): AppVariantF
   const mrp = toNum(variant.mrp);
   const sellingPrice = toNum(variant.sellingPrice);
   const costPrice = variant.costPrice != null ? toNum(variant.costPrice) : null;
+  const saleFloor = variant.saleFloor != null ? toNum(variant.saleFloor) : null;
   const stock = toNum(variant.stock);
   const bulkPrice = variant.bulkPrice != null ? toNum(variant.bulkPrice) : null;
 
   if (!isLoose) {
-    return { mrp, sellingPrice, costPrice, stock, bulkPrice, packageSize };
+    return { mrp, sellingPrice, costPrice, saleFloor, stock, bulkPrice, packageSize };
   }
 
   // API: per-base-unit → App: per-increment
@@ -61,6 +64,7 @@ export function toAppFormat(variant: VariantLike, isLoose: boolean): AppVariantF
     mrp: round2(mrp * packageSize),
     sellingPrice: round2(sellingPrice * packageSize),
     costPrice: costPrice != null ? round2(costPrice * packageSize) : null,
+    saleFloor: saleFloor != null ? round2(saleFloor * packageSize) : null,
     stock: Math.round(stock / packageSize),
     bulkPrice: bulkPrice != null ? round2(bulkPrice * packageSize) : null,
     packageSize,
@@ -68,14 +72,15 @@ export function toAppFormat(variant: VariantLike, isLoose: boolean): AppVariantF
 }
 
 export function fromAppFormat(
-  appData: { mrp: number; sellingPrice: number; costPrice?: number | null; stock: number; bulkPrice?: number | null; packageSize: number },
+  appData: { mrp: number; sellingPrice: number; costPrice?: number | null; saleFloor?: number | null; stock: number; bulkPrice?: number | null; packageSize: number },
   isLoose: boolean,
-): { mrp: number; sellingPrice: number; costPrice: number | null; stock: number; bulkPrice: number | null } {
+): { mrp: number; sellingPrice: number; costPrice: number | null; saleFloor: number | null; stock: number; bulkPrice: number | null } {
   if (!isLoose) {
     return {
       mrp: appData.mrp,
       sellingPrice: appData.sellingPrice,
       costPrice: appData.costPrice ?? null,
+      saleFloor: appData.saleFloor ?? null,
       stock: appData.stock,
       bulkPrice: appData.bulkPrice ?? null,
     };
@@ -86,9 +91,38 @@ export function fromAppFormat(
     mrp: round2(appData.mrp / packageSize),
     sellingPrice: round2(appData.sellingPrice / packageSize),
     costPrice: appData.costPrice != null ? round2(appData.costPrice / packageSize) : null,
+    saleFloor: appData.saleFloor != null ? round2(appData.saleFloor / packageSize) : null,
     stock: round3(appData.stock * packageSize),
     bulkPrice: appData.bulkPrice != null ? round2(appData.bulkPrice / packageSize) : null,
   };
+}
+
+/**
+ * Validate the merchant pricing chain on a variant (values in any consistent scale — app-format request
+ * values work since the comparison is scale-invariant). Returns a human error string, or null if OK.
+ *
+ * `allowBelowCost` = true for the house seller / owner (they may legitimately run loss-leaders), so the
+ * below-cost checks become advisory (skipped here; the editor still warns). For external sellers it's the
+ * seller's own guardrail against an accidental loss — NOT a platform-imposed price (FDI: seller owns price).
+ */
+export function assertVariantFloors(
+  v: { mrp: number; sellingPrice: number; costPrice?: number | null; saleFloor?: number | null },
+  allowBelowCost: boolean,
+): string | null {
+  const cost = v.costPrice ?? null;
+  const floor = v.saleFloor ?? null;
+  if (floor != null && floor > v.sellingPrice) {
+    return `Sale floor (₹${floor}) can't be higher than the selling price (₹${v.sellingPrice}).`;
+  }
+  if (!allowBelowCost && cost != null) {
+    if (floor != null && floor < cost) {
+      return `Sale floor (₹${floor}) is below your cost (₹${cost}) — you'd lose money on a sale.`;
+    }
+    if (v.sellingPrice < cost) {
+      return `Selling price (₹${v.sellingPrice}) is below your cost (₹${cost}) — you'd lose money.`;
+    }
+  }
+  return null;
 }
 
 /**

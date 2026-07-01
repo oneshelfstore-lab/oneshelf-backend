@@ -88,6 +88,30 @@ export async function notifyDeliveryAssignment(order: { id: string; orderNumber:
   });
 }
 
+// An UNASSIGNED order just became ready (e.g. the house co-manager packed it). It enters the shared
+// "Available" pool — ping every available delivery agent so one can grab it. Data-only, like the rest.
+export async function notifyNewDeliveryAvailable(order: { id: string; orderNumber: string }) {
+  const agents = await prisma.user.findMany({
+    where: { role: "DELIVERY", isAvailableForDelivery: true },
+    select: { id: true },
+  });
+  if (agents.length === 0) return;
+  const tokenRows = await prisma.fcmToken.findMany({
+    where: { userId: { in: agents.map((a) => a.id) } },
+    select: { token: true },
+  });
+  await sendToTokens(
+    tokenRows.map((t) => t.token),
+    {
+      type: "delivery_available",
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      title: "New delivery available",
+      body: `Order #${order.orderNumber} is ready to pick up. Tap to accept.`,
+    },
+  );
+}
+
 export async function notifyDeliveryArrived(order: { id: string; orderNumber: string; customerId: string }) {
   const tokens = await getUserTokens(order.customerId);
   await sendToTokens(tokens, {

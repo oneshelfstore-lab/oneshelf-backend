@@ -4,6 +4,44 @@ import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
+import { notifyOrderStatusChange, notifyNewDeliveryAvailable } from "../services/fcmNotifier.js";
+
+// When a seller marks their slice PACKED, the PARENT order may now be fully ready. If every sub-order
+// is PACKED/COLLECTED/CANCELLED and the parent is still pre-packed (PLACED/CONFIRMED), advance it:
+//   DELIVERY → PACKED  (enters the delivery "Available" pool — any agent can accept it)
+//   PICKUP   → READY_FOR_PICKUP  (customer collects; no delivery agent)
+// Without this, packing at the seller/co-manager level never pushes the order into the delivery
+// pipeline — it just sat "awaiting pickup" and no delivery boy ever saw it.
+async function maybeAdvanceParentOrder(orderId: string) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: {
+      id: true, status: true, fulfillmentType: true, orderNumber: true,
+      deliveryBoyId: true, paymentMethod: true, paymentStatus: true, customerId: true,
+    },
+  });
+  if (!order) return;
+  if (order.status !== "PLACED" && order.status !== "CONFIRMED") return;
+
+  // Never ship an online order that hasn't been paid yet (COD is collected at the door, so it's fine).
+  if (order.paymentMethod !== "COD" && order.paymentStatus === "PENDING") return;
+
+  const subs = await prisma.subOrder.findMany({
+    where: { orderId }, select: { status: true },
+  });
+  const allReady = subs.length > 0 &&
+    subs.every((s) => s.status === "PACKED" || s.status === "COLLECTED" || s.status === "CANCELLED");
+  if (!allReady) return;
+
+  const newStatus = order.fulfillmentType === "PICKUP" ? "READY_FOR_PICKUP" : "PACKED";
+  await prisma.order.update({ where: { id: orderId }, data: { status: newStatus } });
+
+  notifyOrderStatusChange({ ...order, status: newStatus }).catch(() => {});
+  // Unassigned delivery order → it's now in the shared pool; ping available agents.
+  if (newStatus === "PACKED" && !order.deliveryBoyId) {
+    notifyNewDeliveryAvailable({ id: order.id, orderNumber: order.orderNumber }).catch(() => {});
+  }
+}
 
 // Seller-scoped orders. Mounted at /api/app/seller/orders. A seller sees only their own SubOrders
 // (their slice of each parent order) and can mark their slice ACCEPTED / PACKED. The delivery
@@ -83,6 +121,15 @@ router.patch("/:id/status", async (req: SellerRequest, res: Response) => {
     if (status === "PACKED") data.packedAt = new Date();
 
     const updated = await prisma.subOrder.update({ where: { id }, data, include: ORDER_INCLUDE });
+
+    // Packing a slice may complete the parent order → push it into the delivery pipeline.
+    // Best-effort: a hiccup here must never fail the seller's pack action.
+    if (status === "PACKED") {
+      await maybeAdvanceParentOrder(sub.orderId).catch((e) =>
+        console.error("maybeAdvanceParentOrder failed:", e),
+      );
+    }
+
     res.json({ success: true, data: shape(updated) });
   } catch (e) {
     sendError(res, e);

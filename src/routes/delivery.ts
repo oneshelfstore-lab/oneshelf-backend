@@ -22,9 +22,15 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     const userId = req.appUser!.id;
     const since = req.query.since as string | undefined;
 
+    // Two buckets in one feed:
+    //  • assigned to me (PACKED = accept, OUT_FOR_DELIVERY = active), and
+    //  • the shared "Available" pool: any UNASSIGNED, PACKED delivery order. A house order the
+    //    co-manager just packed lands here so every agent can see + accept it (first to claim wins).
     const where: any = {
-      deliveryBoyId: userId,
-      status: { in: ["PACKED", "OUT_FOR_DELIVERY"] },
+      OR: [
+        { deliveryBoyId: userId, status: { in: ["PACKED", "OUT_FOR_DELIVERY"] } },
+        { deliveryBoyId: null, status: "PACKED", fulfillmentType: "DELIVERY" },
+      ],
     };
 
     if (since) {
@@ -249,7 +255,18 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
-// ─── POST /api/app/delivery/orders/:id/accept — accept assignment ───
+// Atomically claim an unassigned order for this delivery boy. Returns false if someone else grabbed
+// it first (the conditional updateMany only matches while deliveryBoyId is still null). Idempotent
+// when the caller already owns it.
+async function claimForAgent(orderId: string, userId: string): Promise<boolean> {
+  const r = await prisma.order.updateMany({
+    where: { id: orderId, deliveryBoyId: null },
+    data: { deliveryBoyId: userId },
+  });
+  return r.count > 0;
+}
+
+// ─── POST /api/app/delivery/orders/:id/accept — accept (and claim if pooled) ───
 
 router.post("/:id/accept", async (req: FirebaseAuthRequest, res: Response) => {
   try {
@@ -257,8 +274,16 @@ router.post("/:id/accept", async (req: FirebaseAuthRequest, res: Response) => {
 
     const order = await prisma.order.findUnique({ where: { id: req.params.id } });
     if (!order) throw new NotFoundError("Order", req.params.id!);
-    if (order.deliveryBoyId !== userId) throw new AppError(403, "FORBIDDEN", "Not assigned to you");
     if (order.status !== "PACKED") throw new ValidationError("Can only accept orders in PACKED status");
+
+    // Assigned to someone else → hands off. Unassigned (shared pool) → claim it atomically.
+    if (order.deliveryBoyId && order.deliveryBoyId !== userId) {
+      throw new AppError(403, "FORBIDDEN", "This order was already taken by another delivery partner");
+    }
+    if (!order.deliveryBoyId) {
+      const claimed = await claimForAgent(order.id, userId);
+      if (!claimed) throw new ValidationError("This order was just taken by another delivery partner");
+    }
 
     await prisma.order.update({
       where: { id: order.id },
@@ -287,11 +312,19 @@ router.post("/:id/collect/:subOrderId", async (req: FirebaseAuthRequest, res: Re
 
     const order = await prisma.order.findUnique({ where: { id: orderId } });
     if (!order) throw new NotFoundError("Order", orderId);
-    if (!isOwner && order.deliveryBoyId !== userId) {
-      throw new AppError(403, "FORBIDDEN", "Not assigned to you");
-    }
     if (order.status !== "PACKED") {
       throw new ValidationError(`Can only collect for orders in PACKED status (order is '${order.status}')`);
+    }
+    // Assigned to someone else → forbidden. Unassigned (shared pool) → the agent claims it by
+    // starting the collection run. Owner is exempt.
+    if (!isOwner) {
+      if (order.deliveryBoyId && order.deliveryBoyId !== userId) {
+        throw new AppError(403, "FORBIDDEN", "This order was already taken by another delivery partner");
+      }
+      if (!order.deliveryBoyId) {
+        const claimed = await claimForAgent(order.id, userId);
+        if (!claimed) throw new ValidationError("This order was just taken by another delivery partner");
+      }
     }
 
     const sub = await prisma.subOrder.findFirst({

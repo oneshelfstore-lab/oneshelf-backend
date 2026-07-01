@@ -46,6 +46,7 @@ export const adminBannerRouter = Router();
 
 const bannerSchema = z.object({
   imageUrl: z.string().min(1).max(500),
+  mediaType: z.enum(["IMAGE", "GIF"]).default("IMAGE"),
   targetCategory: z.string().max(50).optional().nullable(),
   targetProduct: z.string().max(60).optional().nullable(),
   targetUrl: z.string().max(500).optional().nullable(),

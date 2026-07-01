@@ -695,6 +695,7 @@ model Product {
 model Banner {
   id              String    @id @default(cuid())
   imageUrl        String
+  mediaType       String    @default("IMAGE")  // IMAGE | GIF — GIF = animated GIF/WebP (rendered animated; upload bypasses the bitmap cropper)
   targetCategory  String?
   targetProduct   String?                       // product id — when set, tapping opens the PDP (wins over category)
   targetUrl       String?

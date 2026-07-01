@@ -515,6 +515,7 @@ model Complaint {
   orderId    String?         // optional link to a specific order
   subject    String
   message    String
+  imageUrl   String?         // optional camera-captured evidence photo (Firebase Storage public URL)
   status     ComplaintStatus @default(OPEN)
   createdAt  DateTime        @default(now())
   resolvedAt DateTime?

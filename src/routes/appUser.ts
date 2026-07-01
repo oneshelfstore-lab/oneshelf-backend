@@ -610,7 +610,7 @@ router.post("/referral/apply", async (req: FirebaseAuthRequest, res: Response) =
 // Short human-facing ids derived from the cuid (the app shows these).
 export function shapeComplaint(c: {
   id: string; subject: string; message: string; status: string;
-  orderId: string | null; createdAt: Date; resolvedAt: Date | null;
+  orderId: string | null; imageUrl?: string | null; createdAt: Date; resolvedAt: Date | null;
   user?: { name: string; phone: string | null } | null;
 }) {
   return {
@@ -620,6 +620,7 @@ export function shapeComplaint(c: {
     message: c.message,
     status: c.status, // OPEN | RESOLVED
     orderId: c.orderId,
+    imageUrl: c.imageUrl ?? null, // camera-captured evidence photo, if any
     createdAt: c.createdAt.getTime(),
     resolvedAt: c.resolvedAt ? c.resolvedAt.getTime() : null,
     customerName: c.user?.name ?? null,
@@ -670,6 +671,9 @@ const complaintSchema = z.object({
   subject: z.string().min(1).max(200),
   message: z.string().min(1).max(2000),
   orderId: z.string().max(100).optional().nullable(),
+  // Optional camera-captured evidence photo. Uploaded client-side to Firebase Storage;
+  // only the resulting public URL reaches the backend (gallery uploads are blocked in-app).
+  imageUrl: z.string().max(1000).optional().nullable(),
 });
 
 // POST /api/app/me/complaints → register a complaint (+ best-effort owner push)
@@ -684,6 +688,7 @@ router.post("/complaints", async (req: FirebaseAuthRequest, res: Response) => {
         subject: parsed.data.subject.trim(),
         message: parsed.data.message.trim(),
         orderId: parsed.data.orderId || null,
+        imageUrl: parsed.data.imageUrl || null,
       },
     });
 

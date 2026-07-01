@@ -1168,11 +1168,14 @@ model OrderSecret {
   id            String   @id @default(cuid())
   orderId       String   @unique
   order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  otp           String   @db.VarChar(4)
+  otp           String   @db.VarChar(6)
   customerId    String
   fulfillmentType String
   attempts      Int      @default(0)
   maxAttempts   Int      @default(5)
+  // Set when the attempt cap is hit → verification is paused until this time (then attempts reset).
+  // Replaces the old permanent hard-lock so a mistyped code can never brick the handover forever.
+  lockedUntil   DateTime?
   verified      Boolean  @default(false)
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt

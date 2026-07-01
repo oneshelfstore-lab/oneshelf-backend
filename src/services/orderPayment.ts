@@ -1,9 +1,6 @@
 import prisma from "../lib/prisma.js";
 import { generateOrderInvoice } from "./orderInvoice.js";
-
-function generateOtp(): string {
-  return String(Math.floor(1000 + Math.random() * 9000));
-}
+import { generateOtp } from "../lib/otp.js";
 
 /**
  * The single, idempotent "this order's online payment is confirmed" routine. ALL THREE confirmation

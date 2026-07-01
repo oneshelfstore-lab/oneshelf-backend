@@ -20,6 +20,7 @@ import { generateInvoicePdf } from "../services/pdfGenerator.js";
 import { refundWalletOnCancel } from "../services/referralRewards.js";
 import { markOrderPaid } from "../services/orderPayment.js";
 import { reconcileOrderPayment } from "../services/paymentReconciliation.js";
+import { generateOtp, orderRequiresOtp } from "../lib/otp.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -29,16 +30,6 @@ function isLooseType(t: string) { return t === "LOOSE" || t === "PRODUCE"; }
 // GST Sec-52 TCS rate the platform (e-commerce operator) collects on external sellers' net taxable
 // supplies. ⚠️ CA-gated — confirm before launch. 1% total = 0.5% CGST + 0.5% SGST (intra-state).
 const TCS_RATE_PCT = 1;
-
-function generateOtp(): string {
-  return String(Math.floor(1000 + Math.random() * 9000));
-}
-
-function orderRequiresOtp(paymentMethod: string, paymentStatus: string, total: number): boolean {
-  if (paymentStatus === "PAID" || paymentStatus === "ADVANCE_PAID") return true;
-  if (total > 2000) return true;
-  return false;
-}
 
 // ─── POST /api/app/orders — place order ─────────────────────────────
 
@@ -122,7 +113,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     // to charge via Razorpay → settle it as PAID right at placement.
     const fullyWalletPaid = paymentMethod !== "COD" && totals.totalAmount === 0 && totals.walletApplied > 0;
     const initialPaymentStatus = fullyWalletPaid ? "PAID" : "PENDING";
-    const needsOtp = orderRequiresOtp(paymentMethod, initialPaymentStatus, totals.totalAmount);
+    const needsOtp = orderRequiresOtp(initialPaymentStatus, totals.totalAmount);
 
     // Honest ETA (range or chosen slot) — computed once, stored on the order, and echoed
     // back so the celebration screen renders it without a second round-trip.
@@ -674,9 +665,25 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
       prisma.order.count({ where: { customerId: userId } }),
     ]);
 
+    // Attach the handover code to active, unverified OTP orders so the customer can see it on
+    // Home / the Orders list without opening detail. Same exposure rule as GET /:id (owner-only
+    // data, active states, unverified). One batched query over the ≤50 orders on this page.
+    const activeStatuses = ["PLACED", "CONFIRMED", "PACKED", "OUT_FOR_DELIVERY", "READY_FOR_PICKUP"];
+    const otpOrderIds = orders
+      .filter((o) => o.deliveryOtpRequired && activeStatuses.includes(o.status))
+      .map((o) => o.id);
+    const secrets = otpOrderIds.length
+      ? await prisma.orderSecret.findMany({
+          where: { orderId: { in: otpOrderIds }, verified: false },
+          select: { orderId: true, otp: true },
+        })
+      : [];
+    const otpByOrder = new Map(secrets.map((s) => [s.orderId, s.otp]));
+    const data = orders.map((o) => ({ ...o, deliveryOtp: otpByOrder.get(o.id) ?? null }));
+
     res.json({
       success: true,
-      data: orders,
+      data,
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     });
   } catch (e) {

@@ -2,6 +2,7 @@ import prisma from "../lib/prisma.js";
 import { getNextOrderNumber } from "./orderNumbering.js";
 import { generateOrderInvoice } from "./orderInvoice.js";
 import { notifyNewOrder } from "./fcmNotifier.js";
+import { generateOtp, orderRequiresOtp } from "../lib/otp.js";
 
 // ─── Bulk Express: materialize an approved QuoteRequest into a real Order ───────────────────────
 // This is what connects bulk orders to the delivery pipeline. Before this, an approved/paid quote
@@ -14,17 +15,6 @@ import { notifyNewOrder } from "./fcmNotifier.js";
 //
 // Idempotent: guarded by Order.quoteRequestId @unique + the quote's own orderId back-link, so the
 // two call sites (pay-on-delivery approve AND payment confirmation) can both fire safely.
-
-function generateOtp(): string {
-  return String(Math.floor(1000 + Math.random() * 9000));
-}
-
-// Mirrors orders.ts: prepaid OR a large total gets a 4-digit handover code. Bulk totals are
-// typically large, so a collection at the door is verified.
-function orderRequiresOtp(paymentStatus: string, total: number): boolean {
-  if (paymentStatus === "PAID" || paymentStatus === "ADVANCE_PAID") return true;
-  return total > 2000;
-}
 
 export interface MaterializeResult {
   orderId: string;

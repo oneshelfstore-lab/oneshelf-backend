@@ -9,6 +9,7 @@ import {
 } from "../middleware/firebaseAuth.js";
 import { notifyOrderStatusChange, notifyDeliveryArrived } from "../services/fcmNotifier.js";
 import { creditReferrerOnFirstDelivered } from "../services/referralRewards.js";
+import { OTP_LOCK_SECONDS } from "../lib/otp.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -357,7 +358,7 @@ router.post("/:id/collect/:subOrderId", async (req: FirebaseAuthRequest, res: Re
 // ─── POST /api/app/delivery/orders/:id/deliver — OTP-verified delivery
 
 const deliverSchema = z.object({
-  code: z.string().length(4).optional(),
+  code: z.string().length(6).optional(),
 });
 
 router.post("/:id/deliver", async (req: FirebaseAuthRequest, res: Response) => {
@@ -388,26 +389,39 @@ router.post("/:id/deliver", async (req: FirebaseAuthRequest, res: Response) => {
 
       const secret = await prisma.orderSecret.findUnique({ where: { orderId: order.id } });
       if (!secret) throw new AppError(500, "INTERNAL_ERROR", "OTP secret not found");
-
       if (secret.verified) throw new ValidationError("Code already verified");
-      if (secret.attempts >= secret.maxAttempts) {
-        throw new ValidationError("Maximum verification attempts exceeded. Contact support.");
+
+      // Cooldown lock (DoS-safe — never a permanent brick). The OWNER is trusted and exempt, so a
+      // jammed order can always be completed by the store.
+      const now = new Date();
+      if (!isOwner && secret.lockedUntil && secret.lockedUntil > now) {
+        const wait = Math.ceil((secret.lockedUntil.getTime() - now.getTime()) / 1000);
+        throw new ValidationError(`Too many incorrect attempts. Try again in ${wait}s.`);
       }
 
       if (secret.otp !== code) {
-        // Increment attempts (standalone write so it persists even if we throw)
+        const nextAttempts = secret.attempts + 1;
+        // Standalone write so the attempt/lock persists even though we throw below.
+        if (!isOwner && nextAttempts >= secret.maxAttempts) {
+          // Cap hit → lock for a cooldown window and reset the counter (fresh tries after it lapses).
+          await prisma.orderSecret.update({
+            where: { orderId: order.id },
+            data: { attempts: 0, lockedUntil: new Date(now.getTime() + OTP_LOCK_SECONDS * 1000) },
+          });
+          throw new ValidationError(`Incorrect code. Too many attempts — try again in ${OTP_LOCK_SECONDS}s.`);
+        }
         await prisma.orderSecret.update({
           where: { orderId: order.id },
           data: { attempts: { increment: 1 } },
         });
-        throw new ValidationError(`Incorrect code. ${secret.maxAttempts - secret.attempts - 1} attempts remaining.`);
+        throw new ValidationError(`Incorrect code. ${secret.maxAttempts - nextAttempts} attempts remaining.`);
       }
 
-      // Code matches — mark verified + deliver in one batch
+      // Code matches — mark verified (+ clear any lock) and deliver in one batch.
       await prisma.$transaction([
         prisma.orderSecret.update({
           where: { orderId: order.id },
-          data: { verified: true },
+          data: { verified: true, attempts: 0, lockedUntil: null },
         }),
         prisma.order.update({
           where: { id: order.id },

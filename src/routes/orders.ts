@@ -20,7 +20,7 @@ import { generateInvoicePdf } from "../services/pdfGenerator.js";
 import { refundWalletOnCancel } from "../services/referralRewards.js";
 import { markOrderPaid } from "../services/orderPayment.js";
 import { reconcileOrderPayment } from "../services/paymentReconciliation.js";
-import { generateOtp, orderRequiresOtp } from "../lib/otp.js";
+import { generateOtp, orderRequiresOtp, OTP_VISIBLE_STATUSES } from "../lib/otp.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -665,12 +665,11 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
       prisma.order.count({ where: { customerId: userId } }),
     ]);
 
-    // Attach the handover code to active, unverified OTP orders so the customer can see it on
+    // Attach the handover code to shipped, unverified OTP orders so the customer can see it on
     // Home / the Orders list without opening detail. Same exposure rule as GET /:id (owner-only
-    // data, active states, unverified). One batched query over the ≤50 orders on this page.
-    const activeStatuses = ["PLACED", "CONFIRMED", "PACKED", "OUT_FOR_DELIVERY", "READY_FOR_PICKUP"];
+    // data, out-for-delivery/ready-for-pickup only, unverified). One batched query over the page.
     const otpOrderIds = orders
-      .filter((o) => o.deliveryOtpRequired && activeStatuses.includes(o.status))
+      .filter((o) => o.deliveryOtpRequired && OTP_VISIBLE_STATUSES.includes(o.status))
       .map((o) => o.id);
     const secrets = otpOrderIds.length
       ? await prisma.orderSecret.findMany({
@@ -773,11 +772,12 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     });
     if (!order) throw new NotFoundError("Order", req.params.id!);
 
-    // Include OTP for customer (only if active + not verified)
+    // Include OTP for the customer only once handover is imminent (out for delivery / ready for
+    // pickup) and it's not yet verified — never while PLACED/CONFIRMED/PACKED.
     let deliveryOtp: string | null = null;
     if (order.deliveryOtpRequired) {
       const secret = await prisma.orderSecret.findUnique({ where: { orderId: order.id } });
-      if (secret && !secret.verified && ["PLACED", "CONFIRMED", "PACKED", "OUT_FOR_DELIVERY", "READY_FOR_PICKUP"].includes(order.status)) {
+      if (secret && !secret.verified && OTP_VISIBLE_STATUSES.includes(order.status)) {
         deliveryOtp = secret.otp;
       }
     }

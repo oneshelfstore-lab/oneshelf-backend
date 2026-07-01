@@ -30,3 +30,8 @@ export function orderRequiresOtp(paymentStatus: string, total: number): boolean 
 // counter resets) instead of being permanently bricked. The OWNER is exempt from the lock so a
 // jammed order can always be completed by the store.
 export const OTP_LOCK_SECONDS = 60;
+
+// The handover code is only revealed to the customer once the order is actually on its way (out
+// for delivery) or ready at the counter (pickup) — i.e. handover is imminent. It stays hidden
+// while PLACED/CONFIRMED/PACKED so it can't be seen (or screenshotted) long before it's needed.
+export const OTP_VISIBLE_STATUSES = ["OUT_FOR_DELIVERY", "READY_FOR_PICKUP"];

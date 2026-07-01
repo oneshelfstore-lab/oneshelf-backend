@@ -194,9 +194,13 @@ export async function calculateCartTotals(
 
   let deliveryCharge = 0;
   const isPickup = fulfillmentType === "PICKUP";
+  // Free-delivery threshold is measured on what the customer actually pays for goods — the free
+  // Buy-1-Get-1 units don't count (otherwise 2×₹300 BOGO would "spend" ₹600 and unlock free delivery
+  // while the customer only pays ₹300). Coupon/loyalty discounts still count toward the threshold.
+  const deliveryEligibleSubtotal = round2(subtotal - bogoDiscount);
   // Pickup never incurs a delivery charge. Otherwise charge the store's standard fee unless the
   // order qualifies for free delivery (threshold, FREE_DELIVERY coupon, or a member tier perk).
-  if (!isPickup && subtotal < freeDeliveryAbove && !isFreeDelivery && !tierFreeDelivery) {
+  if (!isPickup && deliveryEligibleSubtotal < freeDeliveryAbove && !isFreeDelivery && !tierFreeDelivery) {
     deliveryCharge = standardDelivery; // single source of truth: store config
   }
 

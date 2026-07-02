@@ -8,6 +8,7 @@ import {
 } from "../middleware/firebaseAuth.js";
 import { toAppFormat } from "../utils/looseUnitConverter.js";
 import { calculateCartTotals } from "../services/cartPricing.js";
+import { bustUserSpend } from "../services/loyalty.js";
 import { computeOrderEta } from "../services/orderEta.js";
 import { computeUserSavings } from "../services/savings.js";
 import { rollScratchReward, getScratchForCelebration, revealScratchReward } from "../services/scratchReward.js";
@@ -206,6 +207,10 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           totalTax: totals.totalTax,
           totalAmount: totals.totalAmount,
           savedAmount: totals.savedAmount,
+          // Membership attribution, snapshotted for the owner cost dashboard (both already reflected
+          // in `discount`/`deliveryCharge` above — these just record how much the program funded).
+          loyaltyDiscount: totals.loyaltyDiscount,
+          tierDeliveryWaived: totals.tierDeliveryWaived,
           couponCode: totals.couponCode,
           walletApplied: totals.walletApplied,
           estimatedReadyAt: eta.estimatedReadyAt,
@@ -359,6 +364,10 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
 
       return created;
     });
+
+    // A new order changes the customer's rolling spend → drop their cached loyalty spend so they
+    // re-tier promptly (otherwise the memo could serve stale spend for up to its TTL).
+    bustUserSpend(userId);
 
     // Roll the scratch-card outcome once, now (idempotent, keyed by orderId), so the celebration
     // screen has it ready. Best-effort — a failure here must never block order placement.
@@ -515,6 +524,9 @@ router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
         console.error("Refund failed for order", order.id, refundErr);
       }
     }
+
+    // Cancelling removes this order from the rolling spend → re-tier the customer promptly.
+    bustUserSpend(order.customerId);
 
     notifyOrderStatusChange({ ...order, status: "CANCELLED" }).catch(() => {});
     syncInvoicePaymentStatus(order.id).catch((e) => console.error("Invoice sync failed:", e));

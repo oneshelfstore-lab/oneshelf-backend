@@ -1075,6 +1075,13 @@ model Order {
   // Store credit applied as a payment tender (Phase 2): reduces the amount DUE after GST, does NOT
   // change taxableValue/totalTax. Refunded to the wallet if the order is cancelled.
   walletApplied         Decimal            @default(0) @db.Decimal(10, 2)
+  // Loyalty (membership) attribution, snapshotted at placement so the owner's cost dashboard is
+  // honest & immutable. loyaltyDiscount = the standing member % this order gave (already folded into
+  // `discount`); tierDeliveryWaived = the delivery fee this order avoided SPECIFICALLY because of the
+  // member free-delivery perk (0 if it was free anyway via threshold/coupon/pickup). 0 for
+  // pre-migration orders and orders placed by non-members.
+  loyaltyDiscount       Decimal            @default(0) @db.Decimal(10, 2)
+  tierDeliveryWaived    Decimal            @default(0) @db.Decimal(10, 2)
 
   // Delivery
   deliveryBoyId         String?
@@ -1302,6 +1309,13 @@ model StoreConfig {
   // Account-deletion grace window: days a soft-deleted account is kept (restorable by signing in)
   // before the sweeper permanently scrubs PII + refunds any wallet money.
   accountDeletionGraceDays   Int     @default(15)
+  // Loyalty / membership program (Oneshelf Rewards). Owner-tunable tier ladder stored as JSON so the
+  // owner can retune thresholds/perks from the app without a code deploy:
+  //   { enabled, windowDays, tiers: [{ key, name, minSpend, freeDelivery, discountPct, perks[] }] }
+  // NULL ⇒ fall back to the code-defined LOYALTY_TIERS (loyaltyTiers.ts). Validated (≤6 tiers,
+  // discountPct ≤ 15, ascending minSpend) on every write AND read; an invalid stored value falls
+  // back rather than crashing the pricing hot path. enabled=false is the master kill switch.
+  loyaltyConfig              Json?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 }

@@ -46,6 +46,7 @@ import sellerQuoteRoutes from "./routes/sellerQuotes.js";
 import appUserRoutes from "./routes/appUser.js";
 import subscriptionRoutes from "./routes/subscriptions.js";
 import ownerSubscriptionRoutes from "./routes/ownerSubscriptions.js";
+import ownerMembershipRoutes from "./routes/ownerMembership.js";
 import internalRoutes from "./routes/internal.js";
 import webhookRoutes from "./routes/webhooks.js";
 import productIntakeRoutes from "./routes/productIntake.js";
@@ -224,6 +225,7 @@ app.use("/api/app/owner/sellers", ownerSellersRoutes);
 app.use("/api/app/owner/analytics", ownerAnalyticsRoutes);
 app.use("/api/app/owner/gstr8", ownerGstr8Routes);
 app.use("/api/app/owner/subscriptions", ownerSubscriptionRoutes);
+app.use("/api/app/owner/membership", ownerMembershipRoutes);
 // Owner review queue for the product-intake form (Firebase OWNER auth) — approve/reject/delete.
 app.use("/api/app/owner/product-intake", ownerProductIntakeRoutes);
 app.use("/api/app/seller/catalog", sellerCatalogRoutes);

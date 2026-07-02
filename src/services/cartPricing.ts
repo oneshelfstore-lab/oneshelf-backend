@@ -1,6 +1,6 @@
 import prisma from "../lib/prisma.js";
 import { toAppFormat } from "../utils/looseUnitConverter.js";
-import { getUserSpend365 } from "./loyalty.js";
+import { getUserSpend365, resolveLoyaltyConfig } from "./loyalty.js";
 import { tierForSpend } from "../data/loyaltyTiers.js";
 
 function round2(n: number): number {
@@ -37,6 +37,10 @@ export interface CartTotals {
   // Standing loyalty (tier) member discount applied to this cart, and the tier key that earned it.
   loyaltyDiscount: number;
   loyaltyTier: string | null;
+  // Delivery fee this order avoided SPECIFICALLY because of the member free-delivery perk (would
+  // otherwise have been charged — i.e. below the free-delivery threshold, no free-delivery coupon,
+  // not pickup). 0 when delivery was free for another reason. Powers the owner cost dashboard.
+  tierDeliveryWaived: number;
   // Buy-1-Get-1: value of the free units across BOGO lines (Σ floor(qty/2) × effectiveUnitPrice).
   bogoDiscount: number;
   // Store credit (Phase 2) — a payment tender applied AFTER GST. walletApplied reduces totalAmount
@@ -175,13 +179,17 @@ export async function calculateCartTotals(
   let loyaltyTier: string | null = null;
   let tierFreeDelivery = false;
   if (userId) {
-    const tier = tierForSpend(await getUserSpend365(userId));
-    loyaltyTier = tier.key;
-    tierFreeDelivery = tier.freeDelivery;
-    if (tier.discountPct > 0) {
-      // Applied on the post-coupon, post-BOGO subtotal so the discounts don't compound oddly
-      // (no member % on the free BOGO units).
-      loyaltyDiscount = round2((subtotal - discount - bogoDiscount) * tier.discountPct / 100);
+    const loyaltyCfg = await resolveLoyaltyConfig();
+    // Master kill switch: when the owner turns the program off, NO tier perk applies.
+    if (loyaltyCfg.enabled) {
+      const tier = tierForSpend(await getUserSpend365(userId), loyaltyCfg.tiers);
+      loyaltyTier = tier.key;
+      tierFreeDelivery = tier.freeDelivery;
+      if (tier.discountPct > 0) {
+        // Applied on the post-coupon, post-BOGO subtotal so the discounts don't compound oddly
+        // (no member % on the free BOGO units).
+        loyaltyDiscount = round2((subtotal - discount - bogoDiscount) * tier.discountPct / 100);
+      }
     }
   }
 
@@ -203,6 +211,14 @@ export async function calculateCartTotals(
   if (!isPickup && deliveryEligibleSubtotal < freeDeliveryAbove && !isFreeDelivery && !tierFreeDelivery) {
     deliveryCharge = standardDelivery; // single source of truth: store config
   }
+
+  // Attribute the delivery waiver to the tier ONLY when the tier was the reason it's free — the order
+  // is a delivery order, below the free-delivery threshold, with no free-delivery coupon, so it would
+  // have been charged if not for the member perk. Otherwise the waiver isn't the program's cost.
+  const tierDeliveryWaived =
+    tierFreeDelivery && !isPickup && !isFreeDelivery && deliveryEligibleSubtotal < freeDeliveryAbove
+      ? standardDelivery
+      : 0;
 
   const afterDiscount = round2(subtotal - discount - loyaltyDiscount - bogoDiscount);
 
@@ -254,6 +270,7 @@ export async function calculateCartTotals(
     savedAmount,
     loyaltyDiscount,
     loyaltyTier,
+    tierDeliveryWaived,
     bogoDiscount,
     walletApplied,
     walletAvailable,

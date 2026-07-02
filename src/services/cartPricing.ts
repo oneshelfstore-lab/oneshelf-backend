@@ -1,7 +1,7 @@
 import prisma from "../lib/prisma.js";
 import { toAppFormat } from "../utils/looseUnitConverter.js";
 import { getUserSpend365, resolveLoyaltyConfig } from "./loyalty.js";
-import { tierForSpend } from "../data/loyaltyTiers.js";
+import { tierForSpend, nextTier } from "../data/loyaltyTiers.js";
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -37,6 +37,12 @@ export interface CartTotals {
   // Standing loyalty (tier) member discount applied to this cart, and the tier key that earned it.
   loyaltyDiscount: number;
   loyaltyTier: string | null;
+  // Display name of the member's current tier (for named bill rows), and the next tier up + how much
+  // more spend reaches it (drives the "add ₹X more to become <tier>" near-miss checkout nudge).
+  // All null/0 for non-members and when the program is off.
+  loyaltyTierName: string | null;
+  nextTierName: string | null;
+  amountToNext: number;
   // Delivery fee this order avoided SPECIFICALLY because of the member free-delivery perk (would
   // otherwise have been charged — i.e. below the free-delivery threshold, no free-delivery coupon,
   // not pickup). 0 when delivery was free for another reason. Powers the owner cost dashboard.
@@ -177,13 +183,21 @@ export async function calculateCartTotals(
   // aggregate query when a user is known; absent for anonymous quotes. Spend-based tier.
   let loyaltyDiscount = 0;
   let loyaltyTier: string | null = null;
+  let loyaltyTierName: string | null = null;
+  let nextTierName: string | null = null;
+  let amountToNext = 0;
   let tierFreeDelivery = false;
   if (userId) {
     const loyaltyCfg = await resolveLoyaltyConfig();
     // Master kill switch: when the owner turns the program off, NO tier perk applies.
     if (loyaltyCfg.enabled) {
-      const tier = tierForSpend(await getUserSpend365(userId), loyaltyCfg.tiers);
+      const spend = await getUserSpend365(userId);
+      const tier = tierForSpend(spend, loyaltyCfg.tiers);
+      const next = nextTier(spend, loyaltyCfg.tiers);
       loyaltyTier = tier.key;
+      loyaltyTierName = tier.name;
+      nextTierName = next?.name ?? null;
+      amountToNext = next ? Math.max(0, next.minSpend - spend) : 0;
       tierFreeDelivery = tier.freeDelivery;
       if (tier.discountPct > 0) {
         // Applied on the post-coupon, post-BOGO subtotal so the discounts don't compound oddly
@@ -270,6 +284,9 @@ export async function calculateCartTotals(
     savedAmount,
     loyaltyDiscount,
     loyaltyTier,
+    loyaltyTierName,
+    nextTierName,
+    amountToNext,
     tierDeliveryWaived,
     bogoDiscount,
     walletApplied,

@@ -652,9 +652,13 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit as string) || 20));
 
+    // Subscription-generated orders are EXCLUDED from the main "My Orders" list — a daily milk
+    // subscription would otherwise flood it with ~30 rows/month. They live in the Subscriptions screen
+    // instead. subscriptionId is null for normal checkout orders.
+    const listWhere = { customerId: userId, subscriptionId: null };
     const [orders, total] = await Promise.all([
       prisma.order.findMany({
-        where: { customerId: userId },
+        where: listWhere,
         orderBy: { createdAt: "desc" },
         skip: (page - 1) * limit,
         take: limit,
@@ -662,7 +666,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
           items: { select: { productName: true, quantity: true, unitPrice: true, mrp: true, lineTotal: true, imageUrl: true, isLoose: true, stepSize: true, stepUnit: true, packageUnit: true, hsnCode: true, gstRate: true, variantId: true } },
         },
       }),
-      prisma.order.count({ where: { customerId: userId } }),
+      prisma.order.count({ where: listWhere }),
     ]);
 
     // Attach the handover code to shipped, unverified OTP orders so the customer can see it on

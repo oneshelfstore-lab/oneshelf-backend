@@ -36,6 +36,11 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
 
     const where: any = {};
 
+    // Exclude subscription-generated orders from the owner's main board — they auto-pack + auto-assign
+    // to the single subscription runner, and the owner plans them via the subscription "tomorrow totals"
+    // view. Keeps the board to real one-off customer orders. (subscriptionId is null for normal orders.)
+    where.subscriptionId = null;
+
     if (since) {
       const sinceDate = new Date(since);
       if (!isNaN(sinceDate.getTime())) {

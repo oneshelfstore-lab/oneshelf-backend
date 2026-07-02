@@ -144,7 +144,7 @@ router.get("/settings", async (_req: FirebaseAuthRequest, res: Response) => {
       success: true,
       data: {
         subscriptionsEnabled: config?.subscriptionsEnabled ?? true,
-        subscriptionBillingDay: config?.subscriptionBillingDay ?? 1,
+        subscriptionCutoffHour: config?.subscriptionCutoffHour ?? 21,
         defaultSubscriptionAgentId: config?.defaultSubscriptionAgentId ?? null,
       },
     });
@@ -156,7 +156,8 @@ router.get("/settings", async (_req: FirebaseAuthRequest, res: Response) => {
 // ─── PUT /settings  — update owner subscription controls ─────────────
 const settingsSchema = z.object({
   subscriptionsEnabled: z.boolean().optional(),
-  subscriptionBillingDay: z.number().int().min(1).max(28).optional(),
+  // IST hour (0..23) after which the NEXT day's delivery is locked — a skip/cancel must happen before it.
+  subscriptionCutoffHour: z.number().int().min(0).max(23).optional(),
   // "" or null clears the default agent (back to manual assignment). A non-empty id must be a
   // real DELIVERY-role user. Changing it only affects FUTURE generated orders — existing ones keep
   // their assignment (owner reassigns those via the normal assign-delivery dropdown if needed).
@@ -174,11 +175,11 @@ router.put("/settings", async (req: FirebaseAuthRequest, res: Response) => {
 
     const data: {
       subscriptionsEnabled?: boolean;
-      subscriptionBillingDay?: number;
+      subscriptionCutoffHour?: number;
       defaultSubscriptionAgentId?: string | null;
     } = {};
     if (d.subscriptionsEnabled !== undefined) data.subscriptionsEnabled = d.subscriptionsEnabled;
-    if (d.subscriptionBillingDay !== undefined) data.subscriptionBillingDay = d.subscriptionBillingDay;
+    if (d.subscriptionCutoffHour !== undefined) data.subscriptionCutoffHour = d.subscriptionCutoffHour;
     if (d.defaultSubscriptionAgentId !== undefined) {
       const agentId = d.defaultSubscriptionAgentId?.trim() || null;
       if (agentId) {
@@ -193,7 +194,7 @@ router.put("/settings", async (req: FirebaseAuthRequest, res: Response) => {
       success: true,
       data: {
         subscriptionsEnabled: updated.subscriptionsEnabled,
-        subscriptionBillingDay: updated.subscriptionBillingDay,
+        subscriptionCutoffHour: updated.subscriptionCutoffHour,
         defaultSubscriptionAgentId: updated.defaultSubscriptionAgentId,
       },
     });

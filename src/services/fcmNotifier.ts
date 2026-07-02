@@ -270,6 +270,18 @@ export async function notifySubscriptionSkipped(userId: string, productName: str
   });
 }
 
+// Prepaid-wallet subscription couldn't be funded today — the balance was too low (or autopay couldn't
+// collect). We skip the delivery rather than deliver unpaid; it resumes the next cycle once topped up.
+export async function notifySubscriptionLowBalance(userId: string, productName: string) {
+  const tokens = await getUserTokens(userId);
+  if (tokens.length === 0) return;
+  await sendToTokens(tokens, {
+    type: "subscription_low_balance",
+    title: "Add money to resume delivery",
+    body: `We couldn't fund today's ${productName} delivery from your store credit. Top up and it resumes automatically.`,
+  });
+}
+
 // Monthly khata bill is ready (consolidated statement). For COD it's "please pay"; for wallet it's
 // "auto-paid from your store credit".
 export async function notifySubscriptionStatement(

@@ -8,14 +8,34 @@ import {
   firstDeliveryOnOrAfter,
   computeNextDeliveryDate,
   upcomingDates,
+  isValidDeliveryDay,
   type CadenceLike,
 } from "../services/subscriptionEngine.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
 
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+const MS_DAY = 24 * 60 * 60 * 1000;
+
 function isLooseType(t: string) {
   return t === "LOOSE" || t === "PRODUCE";
+}
+
+// The earliest IST-midnight date a customer can still edit (skip/un-skip), given the store's cutoff hour.
+// Rule: to change a delivery you must act "the day before". So tomorrow is editable only until the cutoff
+// hour today; after the cutoff, the earliest editable day is the day-after-tomorrow. Today is never editable.
+function firstEditableDate(cutoffHour: number): Date {
+  const istNow = new Date(Date.now() + IST_OFFSET_MS);
+  const hour = istNow.getUTCHours();
+  const today = istMidnight(new Date());
+  const daysAhead = hour < cutoffHour ? 1 : 2;
+  return istMidnight(new Date(today.getTime() + daysAhead * MS_DAY));
+}
+
+async function getCutoffHour(): Promise<number> {
+  const config = await prisma.storeConfig.findFirst({ select: { subscriptionCutoffHour: true } });
+  return config?.subscriptionCutoffHour ?? 21;
 }
 
 // ─── validation ──────────────────────────────────────────────────────
@@ -30,16 +50,18 @@ const cadenceShape = {
 
 const createSchema = z.object({
   variantId: z.string().min(1),
-  quantity: z.number().positive(),
+  quantity: z.number().positive().max(50), // sane cap — a subscription isn't a bulk order
   addressId: z.string().min(1),
-  billing: z.enum(["COD", "WALLET"]).default("COD"), // AUTOPAY is Phase 4
+  // Prepaid-first (no postpaid): WALLET = prepaid wallet auto-debit; COD = pay-on-delivery daily cash;
+  // AUTOPAY = UPI mandate (inert until a live Razorpay merchant + a set-up mandate exist).
+  billing: z.enum(["COD", "WALLET", "AUTOPAY"]).default("WALLET"),
   ...cadenceShape,
 });
 
 const updateSchema = z.object({
-  quantity: z.number().positive().optional(),
+  quantity: z.number().positive().max(50).optional(),
   addressId: z.string().min(1).optional(),
-  billing: z.enum(["COD", "WALLET"]).optional(),
+  billing: z.enum(["COD", "WALLET", "AUTOPAY"]).optional(),
   frequency: z.enum(["DAILY", "WEEKLY", "MONTHLY", "CUSTOM"]).optional(),
   intervalDays: z.number().int().min(1).max(90).optional().nullable(),
   daysOfWeek: z.array(z.number().int().min(0).max(6)).max(7).optional(),
@@ -84,6 +106,7 @@ function serialize(sub: any) {
     ...sub,
     quantity: Number(sub.quantity),
     stepSize: sub.stepSize == null ? null : Number(sub.stepSize),
+    unitPriceSnapshot: sub.unitPriceSnapshot == null ? null : Number(sub.unitPriceSnapshot),
   };
 }
 
@@ -166,6 +189,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         productName: variant.product.name,
         imageUrl: variant.product.imageUrls?.[0] ?? null,
         quantity: d.quantity,
+        unitPriceSnapshot: variant.sellingPrice, // price at subscribe (display + "price changed" hint)
         isLoose,
         stepSize: isLoose ? variant.packageSize : null,
         stepUnit: isLoose ? variant.packageUnit : null,
@@ -331,6 +355,105 @@ router.get("/:id/upcoming", async (req: FirebaseAuthRequest, res: Response) => {
     const existing = await ownedSub(userId, req.params.id as string);
     const dates = upcomingDates({ ...toCadence(existing), nextDeliveryDate: existing.nextDeliveryDate }, 10);
     res.json({ success: true, data: dates.map((d) => d.toISOString()) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── GET /:id/calendar?month=YYYY-MM  — month grid for the calendar UI ─
+// Every day of the month with flags: scheduled (a cadence delivery day), skipped (customer set an
+// exception), locked (past / today / past-cutoff → not editable). The app renders dots + lock state.
+router.get("/:id/calendar", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const existing = await ownedSub(userId, req.params.id as string);
+    const cutoffHour = await getCutoffHour();
+    const firstEditable = firstEditableDate(cutoffHour);
+
+    const monthParam = (req.query.month as string | undefined) ?? "";
+    const m = /^(\d{4})-(\d{2})$/.exec(monthParam);
+    const nowIst = new Date(Date.now() + IST_OFFSET_MS);
+    const year = m ? Number(m[1]) : nowIst.getUTCFullYear();
+    const month = m ? Number(m[2]) : nowIst.getUTCMonth() + 1; // 1..12
+    if (month < 1 || month > 12) throw new ValidationError("Invalid month");
+
+    const cadence = toCadence(existing);
+    const skips = await prisma.subscriptionException.findMany({
+      where: { subscriptionId: existing.id, type: "SKIP" },
+      select: { date: true },
+    });
+    const skipSet = new Set(skips.map((s) => istMidnight(s.date).getTime()));
+
+    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const days = [];
+    for (let d = 1; d <= daysInMonth; d++) {
+      const day = istMidnight(new Date(Date.UTC(year, month - 1, d)));
+      const withinRange =
+        day.getTime() >= istMidnight(existing.startDate).getTime() &&
+        (!existing.endDate || day.getTime() <= istMidnight(existing.endDate).getTime());
+      const scheduled = withinRange && isValidDeliveryDay(cadence, day);
+      const skipped = skipSet.has(day.getTime());
+      const locked = day.getTime() < firstEditable.getTime();
+      days.push({ date: day.toISOString(), scheduled, skipped, locked });
+    }
+
+    res.json({
+      success: true,
+      data: { month: `${year}-${String(month).padStart(2, "0")}`, cutoffHour, days },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /:id/skip-date  {date}  — skip one delivery from the calendar ─
+const skipDateSchema = z.object({ date: z.string().min(1) });
+router.post("/:id/skip-date", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const existing = await ownedSub(userId, req.params.id as string);
+    if (existing.status === "CANCELLED") throw new ValidationError("Subscription is cancelled");
+    const parsed = skipDateSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
+
+    const date = istMidnight(new Date(parsed.data.date));
+    if (isNaN(date.getTime())) throw new ValidationError("Invalid date");
+    const cutoffHour = await getCutoffHour();
+    if (date.getTime() < firstEditableDate(cutoffHour).getTime()) {
+      throw new ValidationError(
+        `Cutoff passed for that date. Changes must be made before ${cutoffHour}:00 the day before.`,
+      );
+    }
+
+    await prisma.subscriptionException.upsert({
+      where: { subscriptionId_date: { subscriptionId: existing.id, date } },
+      create: { subscriptionId: existing.id, date, type: "SKIP" },
+      update: { type: "SKIP" },
+    });
+    res.json({ success: true, data: { date: date.toISOString(), skipped: true } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── DELETE /:id/skip-date/:date  — un-skip (restore) a delivery ─────
+router.delete("/:id/skip-date/:date", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const existing = await ownedSub(userId, req.params.id as string);
+    const date = istMidnight(new Date(req.params.date as string));
+    if (isNaN(date.getTime())) throw new ValidationError("Invalid date");
+    const cutoffHour = await getCutoffHour();
+    if (date.getTime() < firstEditableDate(cutoffHour).getTime()) {
+      throw new ValidationError(
+        `Cutoff passed for that date. Changes must be made before ${cutoffHour}:00 the day before.`,
+      );
+    }
+
+    await prisma.subscriptionException.deleteMany({
+      where: { subscriptionId: existing.id, date },
+    });
+    res.json({ success: true, data: { date: date.toISOString(), skipped: false } });
   } catch (e) {
     sendError(res, e);
   }

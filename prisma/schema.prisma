@@ -175,7 +175,8 @@ enum OrderPaymentMethod {
   COD
   ONLINE
   UPI
-  MONTHLY   // deferred-billing subscription order — settled via a monthly SubscriptionStatement
+  MONTHLY   // legacy deferred-billing subscription order (old khata model — no new writes)
+  WALLET    // prepaid-wallet subscription delivery: auto-debited + PAID at generation
 }
 
 enum OrderPaymentStatus {
@@ -972,7 +973,14 @@ model Subscription {
 
   addressId     String?
   address       Address?  @relation(fields: [addressId], references: [id])
-  billing       SubscriptionBilling @default(COD)
+  // Payment tender (v2, prepaid-first — no postpaid). WALLET = prepaid wallet auto-debit at generation;
+  // COD = pay-on-delivery daily cash; AUTOPAY = UPI mandate (plumbing built, inert until live Razorpay).
+  billing       SubscriptionBilling @default(WALLET)
+  // Unit price captured at subscribe time — for display + a "price changed" flag if the live price drifts.
+  unitPriceSnapshot Decimal? @db.Decimal(10, 2)
+  // Razorpay UPI-autopay mandate token (AUTOPAY tender). Null until the customer sets up autopay; inert
+  // until a live Razorpay merchant exists.
+  mandateId     String?
 
   status        SubscriptionStatus @default(ACTIVE)
   startDate     DateTime           // first delivery date (IST-midnight)
@@ -985,9 +993,25 @@ model Subscription {
   updatedAt     DateTime @updatedAt
 
   orders        Order[]  @relation("SubscriptionOrders")
+  exceptions    SubscriptionException[]
 
   @@index([customerId])
   @@index([status, nextDeliveryDate])   // the engine's hot query
+}
+
+// ─── SubscriptionException (calendar skip store) ─────────────────────
+// A per-date override the customer sets from the calendar. v1 = SKIP (no delivery that day). The engine
+// checks this before generating; skip-date requests past the cutoff are rejected at the API layer.
+model SubscriptionException {
+  id             String   @id @default(cuid())
+  subscriptionId String
+  subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  date           DateTime // IST-midnight-in-UTC
+  type           String   @default("SKIP") // SKIP now; EXTRA / QTY_CHANGE reserved for later
+  createdAt      DateTime @default(now())
+
+  @@unique([subscriptionId, date])
+  @@index([subscriptionId])
 }
 
 // ─── SubscriptionStatement (monthly consolidated khata bill) ─────────
@@ -1263,10 +1287,14 @@ model StoreConfig {
   walletTopupMin            Int     @default(50)
   walletTopupMax            Int     @default(10000)
   // Subscriptions (milk / newspaper / recurring). subscriptionsEnabled is the master kill switch;
-  // subscriptionBillingDay is the day-of-month the prior month's statements are closed/billed;
-  // defaultSubscriptionAgentId (optional) auto-assigns generated orders straight onto a delivery boy.
+  // defaultSubscriptionAgentId (optional) is the single "subscription runner" — every generated order
+  // auto-assigns to this delivery boy for one batched daily run;
+  // subscriptionCutoffHour is the IST hour (0..23) after which the next day's delivery is locked (a
+  // skip/cancel must happen before it, the day before);
+  // subscriptionBillingDay is DEPRECATED (old monthly-khata model — no new writes; kept for legacy rows).
   subscriptionsEnabled       Boolean @default(true)
   subscriptionBillingDay     Int     @default(1)
+  subscriptionCutoffHour     Int     @default(21)
   defaultSubscriptionAgentId String?
   // Bulk-quote advance payment: when a customer approves a quote with the "pay advance" option,
   // this % of the grand total is charged online now; the rest is collected on delivery.

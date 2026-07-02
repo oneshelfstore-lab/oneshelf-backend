@@ -1,8 +1,14 @@
 import prisma from "../lib/prisma.js";
 import { toAppFormat } from "../utils/looseUnitConverter.js";
 import { getNextOrderNumber } from "./orderNumbering.js";
-import { notifyNewOrder, notifySubscriptionSkipped, notifySubscriptionStatement } from "./fcmNotifier.js";
-import { generateStatementInvoice, markStatementInvoicePaid } from "./orderInvoice.js";
+import {
+  notifyNewOrder,
+  notifySubscriptionSkipped,
+  notifySubscriptionLowBalance,
+  notifySubscriptionStatement,
+} from "./fcmNotifier.js";
+import { generateOrderInvoice, generateStatementInvoice, markStatementInvoicePaid } from "./orderInvoice.js";
+import { chargeSubscriptionMandate } from "./razorpay.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Subscriptions engine (milk / newspaper / recurring deliveries).
@@ -38,6 +44,10 @@ function isLooseType(t: string): boolean {
 // Sentinel: an out-of-stock day. Thrown inside the generation transaction to roll it back, then
 // caught and turned into a "skip + notify" — never a real error (one bad SKU must not stall the sweep).
 class OosSkip extends Error {}
+
+// Sentinel: a prepaid-wallet delivery that couldn't be funded (balance too low). Thrown inside the txn
+// so the stock decrement + order rolls back — we never deliver unpaid. Caught → skip + "top up" notify.
+class WalletSkip extends Error {}
 
 function isUniqueViolation(e: unknown): boolean {
   return typeof e === "object" && e !== null && (e as { code?: string }).code === "P2002";
@@ -203,7 +213,12 @@ export function priceSubscriptionDelivery(variant: PricedVariant, quantity: numb
 
 // ─── Generation (one Order per due subscription per day) ──────────────────────
 
-type GenerateResult = "generated" | "skipped_oos" | "duplicate";
+type GenerateResult =
+  | "generated"
+  | "skipped_oos"
+  | "skipped_lowbalance"
+  | "skipped_date"
+  | "duplicate";
 
 async function generateOrderFor(
   sub: {
@@ -214,10 +229,18 @@ async function generateOrderFor(
     productName: string;
     imageUrl: string | null;
     addressId: string | null;
+    billing: string; // "WALLET" | "COD" | "AUTOPAY"
+    mandateId: string | null;
   },
   dayIST: Date,
   defaultAgentId: string | null,
 ): Promise<GenerateResult> {
+  // Calendar skip: the customer marked this date off (before the cutoff). No delivery, no charge.
+  const exception = await prisma.subscriptionException.findUnique({
+    where: { subscriptionId_date: { subscriptionId: sub.id, date: dayIST } },
+  });
+  if (exception && exception.type === "SKIP") return "skipped_date";
+
   const variant = await prisma.productVariant.findUnique({
     where: { id: sub.variantId },
     include: {
@@ -258,10 +281,34 @@ async function generateOrderFor(
 
   const sellerId = variant.product.sellerId ?? houseSeller?.id ?? null;
 
+  // ── Resolve the payment tender BEFORE the txn (prepaid-first — never postpaid). ──
+  const total = pricing.totalAmount;
+  let paymentMethod: "WALLET" | "COD" | "UPI";
+  let paymentStatus: "PAID" | "PENDING";
+  if (sub.billing === "COD") {
+    // Pay-on-delivery daily cash: agent collects at the stop; deliver flips COD→PAID.
+    paymentMethod = "COD";
+    paymentStatus = "PENDING";
+  } else if (sub.billing === "AUTOPAY") {
+    // UPI mandate charge (inert until a live Razorpay merchant + mandate exist → skip + notify).
+    const charged = sub.mandateId ? await chargeSubscriptionMandate(sub.mandateId, total) : null;
+    if (!charged) {
+      await notifySubscriptionLowBalance(sub.customerId, sub.productName).catch(() => {});
+      return "skipped_lowbalance";
+    }
+    paymentMethod = "UPI";
+    paymentStatus = "PAID";
+  } else {
+    // WALLET (default): auto-debited inside the txn (guarded) — insufficient → WalletSkip.
+    paymentMethod = "WALLET";
+    paymentStatus = "PAID";
+  }
+  const walletFunded = paymentMethod === "WALLET";
+
   let createdOrder: { id: string; orderNumber: string; totalAmount: unknown; customerId: string } | null = null;
 
   try {
-    await prisma.$transaction(async (tx) => {
+    createdOrder = await prisma.$transaction(async (tx) => {
       // Atomic guarded stock decrement (copy of routes/orders.ts:144-156).
       const dec = await tx.productVariant.updateMany({
         where: { id: variant.id, isActive: true, stock: { gte: needed } },
@@ -275,8 +322,8 @@ async function generateOrderFor(
           customerId: sub.customerId,
           status: "PACKED", // lands straight in the delivery route (D7)
           fulfillmentType: "DELIVERY",
-          paymentMethod: "MONTHLY", // deferred — settled by the monthly statement
-          paymentStatus: "PENDING",
+          paymentMethod, // WALLET (prepaid) / COD (daily cash) / UPI (autopay)
+          paymentStatus, // PAID for prepaid tenders, PENDING for COD-on-delivery
           addressId: address?.id,
           shippingName: customer?.name,
           shippingPhone: customer?.phone,
@@ -289,7 +336,7 @@ async function generateOrderFor(
           totalTax: pricing.totalTax,
           totalAmount: pricing.totalAmount,
           savedAmount: pricing.savedAmount,
-          walletApplied: 0,
+          walletApplied: walletFunded ? total : 0,
           deliveryOtpRequired: false,
           deliveryBoyId: defaultAgentId,
           subscriptionId: sub.id,
@@ -321,6 +368,31 @@ async function generateOrderFor(
         },
         select: { id: true, orderNumber: true, totalAmount: true, customerId: true },
       });
+
+      // Prepaid-wallet: guarded debit + ledger row, atomic with the order. Insufficient balance →
+      // WalletSkip rolls back the stock decrement + order (we never deliver unpaid). @@unique([orderId,
+      // type]) makes the debit idempotent (the order is created once per subscription-day).
+      if (walletFunded) {
+        const wdec = await tx.user.updateMany({
+          where: { id: sub.customerId, walletBalance: { gte: total } },
+          data: { walletBalance: { decrement: total } },
+        });
+        if (wdec.count === 0) throw new WalletSkip();
+        const fresh = await tx.user.findUnique({
+          where: { id: sub.customerId },
+          select: { walletBalance: true },
+        });
+        await tx.walletTransaction.create({
+          data: {
+            userId: sub.customerId,
+            amount: -total,
+            type: "ORDER_DEBIT",
+            balanceAfter: fresh!.walletBalance,
+            orderId: created.id,
+            note: `Subscription: ${variant.product.name}`,
+          },
+        });
+      }
 
       // One SubOrder for the (single) seller — mirrors routes/orders.ts:294-354 simplified.
       // House seller → commission 0, TCS 0, no payout accrual. Keeps the delivery feed + statement
@@ -362,12 +434,16 @@ async function generateOrderFor(
         }
       }
 
-      createdOrder = created;
+      return created;
     });
   } catch (e) {
     if (e instanceof OosSkip) {
       await notifySubscriptionSkipped(sub.customerId, sub.productName).catch(() => {});
       return "skipped_oos";
+    }
+    if (e instanceof WalletSkip) {
+      await notifySubscriptionLowBalance(sub.customerId, sub.productName).catch(() => {});
+      return "skipped_lowbalance";
     }
     // Already generated for this (subscription, day) — the @@unique guard. No-op.
     if (isUniqueViolation(e)) return "duplicate";
@@ -375,6 +451,8 @@ async function generateOrderFor(
   }
 
   if (createdOrder) {
+    // Each delivery is its own paid order → its own GST invoice (replaces the consolidated statement).
+    generateOrderInvoice(createdOrder.id).catch(() => {});
     notifyNewOrder(createdOrder).catch(() => {});
   }
   return "generated";
@@ -409,7 +487,7 @@ export async function generateDueSubscriptionOrders(): Promise<{ generated: numb
       if (isValidDeliveryDay(sub, today)) {
         const result = await generateOrderFor(sub, today, config?.defaultSubscriptionAgentId ?? null);
         if (result === "generated") generated++;
-        else if (result === "skipped_oos") skipped++;
+        else if (result === "skipped_oos" || result === "skipped_lowbalance") skipped++;
         await prisma.subscription.update({
           where: { id: sub.id },
           data: { lastGeneratedDate: today, nextDeliveryDate: computeNextDeliveryDate(sub, today) },

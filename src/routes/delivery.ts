@@ -215,6 +215,101 @@ router.get("/history", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
+// ─── GET /api/app/delivery/orders/subscription-run — today's batched subscription run ──
+// Declared BEFORE "/:id". All of THIS agent's subscription-generated orders for today, in one route
+// ordered by pincode/area, each with items + cash-to-collect. This is the "one delivery boy delivers
+// all subscriptions together" view. Prepaid (WALLET/UPI) stops show "Prepaid"; COD stops show cash.
+router.get("/subscription-run", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const startUtc = istTodayStartUtc();
+
+    const orders = await prisma.order.findMany({
+      where: {
+        deliveryBoyId: userId,
+        subscriptionId: { not: null },
+        status: { in: ["PACKED", "OUT_FOR_DELIVERY"] },
+        // today's run: generated today (subscriptionDate) — the engine stamps IST-midnight.
+        subscriptionDate: { gte: startUtc },
+      },
+      orderBy: [{ shippingPincode: "asc" }, { createdAt: "asc" }],
+      select: {
+        id: true, orderNumber: true, status: true,
+        paymentMethod: true, paymentStatus: true, totalAmount: true, amountPaid: true,
+        shippingName: true, shippingPhone: true, shippingAddress: true, shippingPincode: true,
+        subscriptionId: true, createdAt: true,
+        items: {
+          select: { productName: true, quantity: true, lineTotal: true, isLoose: true, stepSize: true, stepUnit: true },
+        },
+      },
+    });
+
+    // Cash to collect = COD orders only (prepaid wallet/UPI already PAID at generation).
+    const cashToCollect = orders
+      .filter((o) => o.paymentMethod === "COD")
+      .reduce((sum, o) => sum + Math.max(0, Number(o.totalAmount) - Number(o.amountPaid)), 0);
+    const pending = orders.filter((o) => o.status !== "DELIVERED").length;
+
+    res.json({
+      success: true,
+      data: {
+        date: startUtc.toISOString(),
+        stops: orders.length,
+        pendingStops: pending,
+        cashToCollect,
+        orders,
+      },
+      serverTimestamp: new Date().toISOString(),
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/delivery/orders/subscription-run/deliver-all ─────
+// Marks every still-undelivered subscription order in today's run DELIVERED (subscription orders carry
+// no handover OTP). COD orders flip to PAID. Idempotent + best-effort per order. Returns how many landed.
+router.post("/subscription-run/deliver-all", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const startUtc = istTodayStartUtc();
+
+    const orders = await prisma.order.findMany({
+      where: {
+        deliveryBoyId: userId,
+        subscriptionId: { not: null },
+        status: { in: ["PACKED", "OUT_FOR_DELIVERY"] },
+        subscriptionDate: { gte: startUtc },
+      },
+      select: { id: true, orderNumber: true, status: true, paymentMethod: true, customerId: true },
+    });
+
+    let delivered = 0;
+    for (const o of orders) {
+      try {
+        const r = await prisma.order.updateMany({
+          where: { id: o.id, status: { in: ["PACKED", "OUT_FOR_DELIVERY"] } },
+          data: {
+            status: "DELIVERED",
+            deliveredAt: new Date(),
+            paymentStatus: o.paymentMethod === "COD" ? "PAID" : undefined,
+          },
+        });
+        if (r.count > 0) {
+          delivered++;
+          notifyOrderStatusChange({ ...o, status: "DELIVERED" }).catch(() => {});
+        }
+      } catch (e) {
+        console.error("subscription deliver-all: order failed", o.id, e);
+      }
+    }
+
+    res.json({ success: true, data: { delivered, total: orders.length } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // ─── GET /api/app/delivery/orders/:id — order detail ────────────────
 
 router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {

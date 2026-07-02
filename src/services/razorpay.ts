@@ -71,6 +71,21 @@ export function isRazorpayConfigured(): boolean {
   return !!RAZORPAY_KEY_ID && !!RAZORPAY_KEY_SECRET;
 }
 
+/**
+ * Charge a UPI-autopay mandate for a subscription delivery. PLUMBING ONLY — returns null (no charge)
+ * until a live Razorpay merchant + a real recurring/mandate integration exist. The subscription engine
+ * treats a null return as "couldn't collect" → skips the day + notifies (never delivers unpaid). Wire
+ * the real `orders.create({ ...token/recurring })` call here once autopay is live.
+ */
+export async function chargeSubscriptionMandate(
+  _mandateId: string,
+  _amount: number,
+): Promise<{ paymentId: string } | null> {
+  if (!isRazorpayConfigured()) return null;
+  // TODO(autopay): real recurring charge against the saved mandate token.
+  return null;
+}
+
 export interface RazorpayPayment {
   id: string;
   status: string; // created | authorized | captured | refunded | failed

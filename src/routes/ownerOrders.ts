@@ -11,6 +11,7 @@ import { notifyOrderStatusChange, notifyDeliveryAssignment } from "../services/f
 import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orderInvoice.js";
 import { markSamplePacked } from "../services/freeSample.js";
 import { creditReferrerOnFirstDelivered, refundWalletOnCancel } from "../services/referralRewards.js";
+import { checkTierUpOnDelivery } from "../services/loyalty.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -194,6 +195,7 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
     // delivery; refund any store credit if the order is cancelled.
     if (newStatus === "DELIVERED") {
       creditReferrerOnFirstDelivered(order.id).catch((e) => console.error("referral credit failed:", e));
+      checkTierUpOnDelivery(order.id).catch((e) => console.error("tier-up check failed:", e));
     }
     if (newStatus === "CANCELLED") {
       refundWalletOnCancel(order.id).catch((e) => console.error("wallet refund failed:", e));

@@ -1,5 +1,6 @@
 import prisma from "../lib/prisma.js";
 import { memoCache } from "../lib/httpCache.js";
+import { notifyTierUp } from "./fcmNotifier.js";
 import {
   DEFAULT_LOYALTY_CONFIG,
   loyaltyConfigSchema,
@@ -90,7 +91,14 @@ export interface LoyaltyInfo {
   amountToNext: number;
   progress: number; // 0..1 within the current tier band
   allTiers: { key: string; name: string; minSpend: number }[];
+  // Honest, computed "you're about to slip a tier" line (or null). The rolling window means old
+  // orders age out — this looks 30 days ahead and warns ONLY when enough of the current spend is
+  // about to roll off that the customer would drop below their current tier's floor. No push
+  // notification for this (loss-aversion pushes read as spammy) — surfaced on-screen only.
+  slipWarning: string | null;
 }
+
+const SLIP_WARNING_HORIZON_DAYS = 30;
 
 /** Full loyalty payload for the profile tier card. `enabled=false` ⇒ the app hides the card. */
 export async function computeUserLoyalty(userId: string): Promise<LoyaltyInfo> {
@@ -105,6 +113,38 @@ export async function computeUserLoyalty(userId: string): Promise<LoyaltyInfo> {
     ? Math.min(1, Math.max(0, (spend - bandLow) / (bandHigh - bandLow)))
     : 1;
 
+  // Slip warning: only meaningful above the base (free) tier, and only a real risk — a bounded extra
+  // aggregate over the slice of the window that will age out in the next 30 days, run only here (the
+  // profile read), never on the /cart/quote hot path.
+  let slipWarning: string | null = null;
+  const isBaseTier = cfg.tiers[0]?.key === tier.key;
+  if (cfg.enabled && !isBaseTier) {
+    const now = new Date();
+    const windowStart = new Date(now);
+    windowStart.setDate(windowStart.getDate() - cfg.windowDays);
+    const windowStartIn30Days = new Date(now);
+    windowStartIn30Days.setDate(windowStartIn30Days.getDate() - cfg.windowDays + SLIP_WARNING_HORIZON_DAYS);
+
+    const atRiskAgg = await prisma.order.aggregate({
+      _sum: { totalAmount: true },
+      where: {
+        customerId: userId,
+        status: { not: "CANCELLED" },
+        paymentMethod: { not: "MONTHLY" },
+        createdAt: { gte: windowStart, lt: windowStartIn30Days },
+      },
+    });
+    const atRiskSpend = Number(atRiskAgg._sum.totalAmount ?? 0);
+    const projectedSpend = Math.max(0, spend - atRiskSpend);
+
+    if (projectedSpend < tier.minSpend) {
+      const amountNeeded = Math.round(tier.minSpend - projectedSpend);
+      if (amountNeeded > 0) {
+        slipWarning = `₹${amountNeeded} in orders in the next ${SLIP_WARNING_HORIZON_DAYS} days keeps your ${tier.name} benefits.`;
+      }
+    }
+  }
+
   return {
     enabled: cfg.enabled,
     tierKey: tier.key,
@@ -117,5 +157,51 @@ export async function computeUserLoyalty(userId: string): Promise<LoyaltyInfo> {
     amountToNext: next ? Math.max(0, next.minSpend - spend) : 0,
     progress,
     allTiers: cfg.tiers.map((t) => ({ key: t.key, name: t.name, minSpend: t.minSpend })),
+    slipWarning,
   };
+}
+
+/**
+ * Tier-up push, checked at every DELIVERED transition (the only guaranteed-permanent moment — a
+ * DELIVERED order can't later be cancelled in this codebase, unlike PLACED/CONFIRMED/etc.). Idempotent
+ * via a guarded `lastNotifiedTier` flip on User, so two orders delivering concurrently can't double-fire
+ * and re-observing the same tier is a no-op. Best-effort: never throws into the caller.
+ */
+export async function checkTierUpOnDelivery(orderId: string): Promise<void> {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: { customerId: true, paymentMethod: true },
+  });
+  // Khata (subscription) orders don't count toward tier spend — nothing to re-check.
+  if (!order || order.paymentMethod === "MONTHLY") return;
+
+  const cfg = await resolveLoyaltyConfig();
+  if (!cfg.enabled || cfg.tiers.length === 0) return;
+
+  const spend = await getUserSpend365(order.customerId);
+  const tier = tierForSpend(spend, cfg.tiers);
+
+  const user = await prisma.user.findUnique({
+    where: { id: order.customerId },
+    select: { lastNotifiedTier: true },
+  });
+  if (!user) return;
+  if (user.lastNotifiedTier === tier.key) return; // no change since we last looked
+
+  // First-ever observation for this user: record the baseline silently. Otherwise an already-Gold
+  // customer would get a false "you leveled up!" push the first time any of their orders is delivered
+  // after this feature ships.
+  const previousTier = user.lastNotifiedTier;
+  const flipped = await prisma.user.updateMany({
+    where: { id: order.customerId, lastNotifiedTier: previousTier },
+    data: { lastNotifiedTier: tier.key },
+  });
+  if (flipped.count === 0) return; // lost the race to a concurrent delivery — the other call handles it
+  if (previousTier === null) return; // baseline recorded, no push
+
+  const previousRank = cfg.tiers.findIndex((t) => t.key === previousTier);
+  const newRank = cfg.tiers.findIndex((t) => t.key === tier.key);
+  if (newRank <= previousRank) return; // a drop (or unknown tier) — never push for going down
+
+  await notifyTierUp(order.customerId, tier.name).catch(() => {});
 }

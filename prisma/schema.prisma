@@ -342,6 +342,12 @@ model User {
   // so a future re-signup with the same number can be recognised (referral/coupon-farming throttle).
   phoneHash        String?
 
+  // Membership (loyalty) tier-up push dedup — the last tier key we've observed/notified this user at.
+  // NULL means "never observed" (first delivery after this feature ships records a silent baseline
+  // instead of notifying, so an already-Gold customer doesn't get a false "you leveled up!" push).
+  // Guarded-updateMany flip prevents a double push when two orders deliver concurrently.
+  lastNotifiedTier String?
+
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 

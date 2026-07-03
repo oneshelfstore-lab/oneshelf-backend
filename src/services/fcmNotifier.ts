@@ -253,6 +253,17 @@ export async function notifyBroadcast(topic: string, title: string, body: string
   await sendToTopic(topic, { type: "broadcast", title, body });
 }
 
+export async function notifyTierUp(userId: string, tierName: string) {
+  const tokens = await getUserTokens(userId);
+  if (tokens.length === 0) return;
+  await sendToTokens(tokens, {
+    type: "tier_up",
+    tierName,
+    title: `You're a ${tierName} member now!`,
+    body: `Your membership perks just leveled up — check your new benefits from your next order.`,
+  });
+}
+
 export async function notifyReferralReward(userId: string, amount: number) {
   const tokens = await getUserTokens(userId);
   if (tokens.length === 0) return;

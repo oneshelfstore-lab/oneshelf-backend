@@ -380,13 +380,22 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     let razorpayOrderId: string | null = null;
     if ((paymentMethod === "ONLINE" || paymentMethod === "UPI") && totals.totalAmount > 0) {
       if (isRazorpayConfigured()) {
-        const amountInPaise = Math.round(totals.totalAmount * 100);
-        const rpOrder = await createRazorpayOrder(amountInPaise, order.orderNumber);
-        razorpayOrderId = rpOrder.id;
-        await prisma.order.update({
-          where: { id: order.id },
-          data: { razorpayOrderId: rpOrder.id },
-        });
+        try {
+          const amountInPaise = Math.round(totals.totalAmount * 100);
+          const rpOrder = await createRazorpayOrder(amountInPaise, order.orderNumber);
+          razorpayOrderId = rpOrder.id;
+          await prisma.order.update({
+            where: { id: order.id },
+            data: { razorpayOrderId: rpOrder.id },
+          });
+        } catch (rpErr) {
+          // Gateway rejected the request (bad/rotated keys, Razorpay outage). Degrade to the same
+          // shape as "not configured": return no razorpayOrderId — the app then shows its
+          // "online payment unavailable, choose COD" message and the PENDING order is
+          // auto-cancelled by the expiry sweeper. A naked throw here would surface as a
+          // useless generic 500 to the customer.
+          console.error("Razorpay order creation failed (check RAZORPAY_KEY_ID/SECRET):", rpErr);
+        }
       }
     }
 

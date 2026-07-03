@@ -875,7 +875,19 @@ router.post("/quote-requests/:id/approve", async (req: FirebaseAuthRequest, res:
 
     if (total > 0 && isRazorpayConfigured()) {
       const amountPaise = Math.round(chargeAmount * 100);
-      const rp = await createRazorpayOrder(amountPaise, `quote_${quote.id}`);
+      let rp;
+      try {
+        rp = await createRazorpayOrder(amountPaise, `quote_${quote.id}`);
+      } catch (rpErr) {
+        // Don't silently convert an intended online/advance payment to pay-on-delivery, and
+        // don't leak a generic 500 — tell the customer exactly what to do instead.
+        console.error("Razorpay quote-order creation failed (check RAZORPAY_KEY_ID/SECRET):", rpErr);
+        throw new AppError(
+          503,
+          "PAYMENT_GATEWAY_ERROR",
+          "Online payment is temporarily unavailable. Please try again later or choose pay on delivery.",
+        );
+      }
       // Record the chosen option so /pay + webhook + reconcile credit the right amount.
       await prisma.quoteRequest.update({
         where: { id: quote.id },

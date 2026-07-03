@@ -8,6 +8,7 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { formatVariantForApp, fromAppFormat, toAppFormat, assertVariantFloors } from "../utils/looseUnitConverter.js";
+import { memoCache } from "../lib/httpCache.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -214,6 +215,9 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       },
     });
 
+    // A new product can immediately show up as a "New arrival" / shift category revenue — the
+    // owner's Analytics tab shouldn't have to wait out the 5-min TTL to see their own edit.
+    memoCache.bust("ownerCatalogHealth");
     res.status(201).json({ success: true, data: formatProductForApp(product) });
   } catch (e) {
     sendError(res, e);
@@ -315,6 +319,10 @@ router.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
       },
     });
 
+    // The main case this closes: the owner edits a cost price and expects "Best margins" to
+    // reflect it right away, not after the 5-min TTL — also covers price/stock/category edits
+    // that shift any of the other Catalog Health rankings.
+    memoCache.bust("ownerCatalogHealth");
     res.json({ success: true, data: formatProductForApp(updated) });
   } catch (e) {
     sendError(res, e);
@@ -330,6 +338,7 @@ router.delete("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     if (!existing) throw new NotFoundError("Product", productId);
 
     await prisma.catalogProduct.update({ where: { id: productId }, data: { isActive: false } });
+    memoCache.bust("ownerCatalogHealth");
     res.json({ success: true, message: "Product deactivated" });
   } catch (e) {
     sendError(res, e);
@@ -346,6 +355,7 @@ router.patch("/:id/toggle", async (req: FirebaseAuthRequest, res: Response) => {
     if (!existing) throw new NotFoundError("Product", productId);
 
     await prisma.catalogProduct.update({ where: { id: productId }, data: { isActive } });
+    memoCache.bust("ownerCatalogHealth");
     res.json({ success: true, message: `Product ${isActive ? "activated" : "deactivated"}` });
   } catch (e) {
     sendError(res, e);
@@ -375,6 +385,8 @@ router.patch("/:id/stock", async (req: FirebaseAuthRequest, res: Response) => {
     );
 
     await prisma.productVariant.update({ where: { id: variantId }, data: { stock: converted.stock } });
+    // A stock edit can flip a product in/out of Dead stock or Restock priority.
+    memoCache.bust("ownerCatalogHealth");
     res.json({ success: true, message: "Stock updated" });
   } catch (e) {
     sendError(res, e);

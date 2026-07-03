@@ -894,6 +894,21 @@ router.get("/operations", async (req: FirebaseAuthRequest, res: Response) => {
 
 const SEARCH_INSIGHTS_TTL_MS = 5 * 60 * 1000;
 
+// Generous cap on distinct exact-phrase terms folded into the word-frequency roll-up below —
+// bounds query cost without truncating the roll-up at realistic single-store search volumes
+// (a few hundred/thousand distinct terms per quarter, not tens of thousands).
+const SEARCH_TERM_FOLD_LIMIT = 1000;
+
+// Filler words that would otherwise pollute the top-10-by-word ranking without carrying any
+// "what should I stock" signal.
+const SEARCH_STOPWORDS = new Set(["of", "the", "and", "a", "an", "for", "in", "on", "with", "to"]);
+
+/** Alphanumeric words (2+ chars, stopwords dropped) found in a normalized search term. */
+function tokenizeSearchTerm(term: string): Set<string> {
+  const words = term.match(/[a-z0-9]+/g) ?? [];
+  return new Set(words.filter((w) => w.length >= 2 && !SEARCH_STOPWORDS.has(w)));
+}
+
 async function buildSearchInsights(range: string) {
   const since = rangeSince(range);
   const where = { createdAt: { gte: since } };
@@ -906,32 +921,49 @@ async function buildSearchInsights(range: string) {
       _count: { term: true },
       where,
       orderBy: { _count: { term: "desc" } },
-      take: 10,
+      take: SEARCH_TERM_FOLD_LIMIT,
     }),
     prisma.searchQuery.groupBy({
       by: ["term"],
       _count: { term: true },
       where: { ...where, resultCount: 0 },
       orderBy: { _count: { term: "desc" } },
-      take: 10,
+      take: SEARCH_TERM_FOLD_LIMIT,
     }),
   ]);
 
-  const toRows = (rows: typeof topRaw, suffix: string): RankedRow[] =>
-    rows.map((r) => ({
-      id: r.term,
-      label: r.term,
-      value: r._count.term,
-      displayValue: `${r._count.term}${suffix}`,
-    }));
+  // Word-frequency roll-up instead of exact-phrase: "milk", "amul milk", and "milk packet" used
+  // to rank as 3 separate, individually-small rows even though they're the same underlying
+  // demand signal. Each logged term's count is folded into EVERY word it contains (not split
+  // fractionally across them — a search for "amul milk" is real evidence for both "amul" and
+  // "milk"), then ranked by summed word count. Every distinct term up to SEARCH_TERM_FOLD_LIMIT
+  // is folded in, not just the top 10 exact phrases, so a word spread across many low-count
+  // phrasings still ranks correctly.
+  const toWordRows = (rows: typeof topRaw, suffix: string): RankedRow[] => {
+    const byWord = new Map<string, number>();
+    for (const r of rows) {
+      for (const word of tokenizeSearchTerm(r.term)) {
+        byWord.set(word, (byWord.get(word) ?? 0) + r._count.term);
+      }
+    }
+    return [...byWord.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([word, count]) => ({
+        id: word,
+        label: word,
+        value: count,
+        displayValue: `${count}${suffix}`,
+      }));
+  };
 
   return {
     range,
     since: since.toISOString(),
     totalSearches,
     zeroResultRatePct: totalSearches > 0 ? (zeroResultCount / totalSearches) * 100 : 0,
-    topSearches: toRows(topRaw, " searches"),
-    zeroResultSearches: toRows(zeroRaw, "× · 0 results"),
+    topSearches: toWordRows(topRaw, " searches"),
+    zeroResultSearches: toWordRows(zeroRaw, "× · 0 results"),
   };
 }
 

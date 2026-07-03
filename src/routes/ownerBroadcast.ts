@@ -25,6 +25,10 @@ const broadcastSchema = z.object({
   title: z.string().min(1).max(120),
   body: z.string().min(1).max(500),
   target: z.enum(["ALL", "OFFERS"]).default("ALL"),
+  // Optional banner photo (Firebase Storage URL, already uploaded client-side) and/or a
+  // countdown end time (epoch millis) — both purely additive, a plain text broadcast omits them.
+  imageUrl: z.string().url().max(600).optional(),
+  endsAt: z.number().int().positive().optional(),
 });
 
 router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
@@ -33,7 +37,13 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     if (!parsed.success) throw new ValidationError("Invalid broadcast", parsed.error.errors);
 
     const topic = TOPIC_BY_TARGET[parsed.data.target] ?? "all_users";
-    await notifyBroadcast(topic, parsed.data.title.trim(), parsed.data.body.trim());
+    await notifyBroadcast(
+      topic,
+      parsed.data.title.trim(),
+      parsed.data.body.trim(),
+      parsed.data.imageUrl,
+      parsed.data.endsAt,
+    );
 
     res.json({ success: true, message: "Broadcast sent" });
   } catch (e) {

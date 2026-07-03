@@ -248,9 +248,23 @@ export async function notifyQuoteReady(
  * Owner broadcast → an FCM topic. Data-only (title/body in the data map) so the
  * app's MyFirebaseMessagingService builds the notification consistently in
  * foreground AND background — same convention as every payload above.
+ *
+ * imageUrl/endsAt are optional — the owner composer lets them attach a banner photo and/or
+ * a countdown ("ends in") to a broadcast. Reuses the exact imageUrl/etaAt keys notifyNewOrder
+ * already sends, since the client (MyFirebaseMessagingService + the notification-centre card)
+ * renders those generically for ANY notification type, not just new_order.
  */
-export async function notifyBroadcast(topic: string, title: string, body: string) {
-  await sendToTopic(topic, { type: "broadcast", title, body });
+export async function notifyBroadcast(
+  topic: string,
+  title: string,
+  body: string,
+  imageUrl?: string,
+  endsAt?: number,
+) {
+  const data: Record<string, string> = { type: "broadcast", title, body };
+  if (imageUrl) data.imageUrl = imageUrl;
+  if (endsAt) data.etaAt = String(endsAt);
+  await sendToTopic(topic, data);
 }
 
 export async function notifyTierUp(userId: string, tierName: string) {

@@ -129,10 +129,56 @@ interface RankedRow {
   value: number;
   displayValue: string;
   sublabel?: string;
+  /** Optional 7-day daily-units-sold history, oldest→newest. Only populated where attached below. */
+  sparkline?: number[];
 }
 
 function rupees(n: number): string {
   return `₹${Math.round(n).toLocaleString("en-IN")}`;
+}
+
+const SPARKLINE_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 7-day daily units-sold history per product, IST-day-bucketed, for exactly the product ids asked
+ * for (Best Sellers + Dead Stock rows only — computing this for every product would be wasteful;
+ * scoping to what's actually about to be rendered keeps it cheap). Returns oldest→newest arrays,
+ * missing days filled with 0 (a real 0-sale day, not absence of data).
+ */
+async function buildProductSparklines(
+  relevantProductIds: Set<string>,
+  variantToProductId: Map<string, string>,
+): Promise<Map<string, number[]>> {
+  const byProduct = new Map<string, number[]>();
+  if (relevantProductIds.size === 0) return byProduct;
+  for (const id of relevantProductIds) byProduct.set(id, new Array(SPARKLINE_DAYS).fill(0));
+
+  const since = new Date(Date.now() - SPARKLINE_DAYS * DAY_MS);
+  // Not filtered to specific variants in SQL (would need a dynamic IN-list) — 7 days of a single
+  // store's order items is a small scan, and the JS-side filter below only keeps rows for the
+  // products we actually asked about.
+  const rows = await prisma.$queryRaw<Array<{ variantId: string | null; day: Date; units: number | null }>>`
+    SELECT oi."variantId" as "variantId",
+           date_trunc('day', o."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') as day,
+           SUM(oi.quantity)::float as units
+    FROM "OrderItem" oi
+    JOIN "Order" o ON o.id = oi."orderId"
+    WHERE oi."variantId" IS NOT NULL AND o.status != 'CANCELLED' AND o."createdAt" >= ${since}
+    GROUP BY oi."variantId", day`;
+
+  const todayShiftedDayStart = Math.floor((Date.now() + IST_OFFSET_MS) / DAY_MS) * DAY_MS;
+  for (const r of rows) {
+    if (!r.variantId) continue;
+    const productId = variantToProductId.get(r.variantId);
+    if (!productId || !byProduct.has(productId)) continue;
+    const dayShiftedMs = new Date(r.day).getTime();
+    const daysAgo = Math.round((todayShiftedDayStart - dayShiftedMs) / DAY_MS);
+    const indexFromOldest = SPARKLINE_DAYS - 1 - daysAgo;
+    if (indexFromOldest < 0 || indexFromOldest >= SPARKLINE_DAYS) continue;
+    byProduct.get(productId)![indexFromOldest] += Number(r.units ?? 0);
+  }
+  return byProduct;
 }
 
 async function buildCatalogHealth(range: string) {
@@ -347,6 +393,15 @@ async function buildCatalogHealth(range: string) {
       };
     });
 
+  // 7-day sparkline — only for the rows that will actually render one (Best Sellers + Dead Stock),
+  // not the whole catalog. For Dead Stock this is the more useful read than the ranking value
+  // alone: a declining-to-zero trend ("this recently died") reads very differently from a flat
+  // zero the whole time ("this never sold"), and the sparkline is what shows the difference.
+  const sparklineTargets = new Set([...bestSellers.map((r) => r.id), ...deadStock.map((r) => r.id)]);
+  const sparklines = await buildProductSparklines(sparklineTargets, variantToProductId);
+  for (const row of bestSellers) row.sparkline = sparklines.get(row.id);
+  for (const row of deadStock) row.sparkline = sparklines.get(row.id);
+
   return { range, since: since.toISOString(), bestSellers, deadStock, restockPriority, categoryBreakdown, basketPairs, newArrivals };
 }
 
@@ -380,7 +435,19 @@ interface AovBucketRow {
 }
 
 function formatBucketLabel(d: Date): string {
-  return d.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+  // Explicit timeZone: "UTC" — the values passed in already have the IST shift baked into their
+  // wall-clock representation (see the callers), so formatting must read UTC calendar getters
+  // regardless of what timezone the Node process itself happens to run in. Don't rely on Render
+  // defaulting to UTC implicitly; say it outright.
+  return d.toLocaleDateString("en-IN", { day: "numeric", month: "short", timeZone: "UTC" });
+}
+
+// formatBucketLabel expects a value with the IST shift already "baked in" — that's what the raw-SQL
+// AT TIME ZONE queries hand back after Node re-parses them as naive-UTC. A genuine raw `createdAt`
+// instant (e.g. straight off the User table) needs that same shift applied first, or the label can
+// read a calendar day off from the real IST date near a midnight boundary.
+function formatIstDateLabel(d: Date): string {
+  return formatBucketLabel(new Date(d.getTime() + IST_OFFSET_MS));
 }
 
 async function buildAovAndDiscountImpact(range: string) {
@@ -482,17 +549,191 @@ async function buildCustomerSegments() {
   };
 }
 
+// Cohort retention — signup-week cohorts × weeks-since-signup, % who placed ≥1 order that week.
+// Range-independent (lifetime), cached under one fixed key like segments. Computed in JS (not raw
+// SQL) — bounded dataset at kirana scale, same reasoning as the Phase 1 basket-affinity pairing.
+// Only cohorts whose full tracked window has ALREADY elapsed are included — a cohort from 2 weeks
+// ago simply doesn't appear yet rather than showing fabricated 0%s for weeks that haven't happened.
+// That's why this can come back sparse or empty on a young store: honest, not a bug.
+//
+// ⚠️ Correctness note for future agents: the first draft of this function tried to reconstruct a
+// calendar label from an epoch-anchored week INDEX (`new Date(cw * WEEK_MS)`), and used that same
+// index arithmetic to compute week-offsets. Both were wrong and caught only by hand-tracing test
+// cases in a standalone Node script before shipping — epoch-anchored 7-day buckets (Jan 1 1970 was
+// a Thursday) don't align with any calendar week, so "cw*WEEK_MS" is NOT the date a human would
+// associate with that bucket. Fixed by using `istWeekIndex` ONLY to group signups into a cohort
+// (any consistent bucketing works for that), and switching week-offset + the label to plain
+// elapsed-time-from-each-user's-own-signup arithmetic, which needs no timezone handling at all — a
+// duration in milliseconds is the same duration regardless of timezone.
+const COHORT_RETENTION_KEY = "ownerCohortRetention";
+const COHORT_WEEKS = 8;
+const OFFSET_WEEKS = 8;
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+function istWeekIndex(d: Date): number {
+  return Math.floor((d.getTime() + IST_OFFSET_MS) / WEEK_MS);
+}
+
+async function buildCohortRetention() {
+  const lookbackWeeks = COHORT_WEEKS + OFFSET_WEEKS;
+  const since = new Date(Date.now() - lookbackWeeks * WEEK_MS);
+
+  const users = await prisma.user.findMany({
+    where: { role: "CUSTOMER", createdAt: { gte: since } },
+    select: { id: true, createdAt: true },
+  });
+  if (users.length === 0) return { cohortLabels: [], offsetLabels: [], grid: [], cohortSizes: [] };
+
+  // Group signups into ~weekly cohorts (grouping only — any consistent bucket works, it doesn't
+  // need to align to a calendar week boundary the way a *label* would).
+  const signupById = new Map(users.map((u) => [u.id, u.createdAt]));
+  const usersByCohort = new Map<number, string[]>();
+  const earliestSignupInCohort = new Map<number, Date>();
+  for (const u of users) {
+    const cw = istWeekIndex(u.createdAt);
+    const arr = usersByCohort.get(cw) ?? [];
+    arr.push(u.id);
+    usersByCohort.set(cw, arr);
+    const earliest = earliestSignupInCohort.get(cw);
+    if (!earliest || u.createdAt < earliest) earliestSignupInCohort.set(cw, u.createdAt);
+  }
+
+  const orders = await prisma.order.findMany({
+    where: { customerId: { in: users.map((u) => u.id) }, status: { not: "CANCELLED" } },
+    select: { customerId: true, createdAt: true },
+  });
+  const orderedOffsetsByUser = new Map<string, Set<number>>();
+  for (const o of orders) {
+    const signedUpAt = signupById.get(o.customerId);
+    if (!signedUpAt) continue;
+    // Elapsed time from THIS user's own signup — timezone-independent by construction.
+    const offset = Math.floor((o.createdAt.getTime() - signedUpAt.getTime()) / WEEK_MS);
+    if (offset < 0 || offset >= OFFSET_WEEKS) continue;
+    const set = orderedOffsetsByUser.get(o.customerId) ?? new Set<number>();
+    set.add(offset);
+    orderedOffsetsByUser.set(o.customerId, set);
+  }
+
+  const nowMs = Date.now();
+  const completeCohortWeeks = [...usersByCohort.keys()]
+    .filter((cw) => {
+      // Use the cohort's LATEST signup (not the bucket boundary) so every member's own
+      // OFFSET_WEEKS window is genuinely complete, not just the earliest signer's.
+      const cohortUserIds = usersByCohort.get(cw)!;
+      const latestSignupMs = Math.max(...cohortUserIds.map((id) => signupById.get(id)!.getTime()));
+      return latestSignupMs + OFFSET_WEEKS * WEEK_MS <= nowMs;
+    })
+    .sort((a, b) => a - b)
+    .slice(-COHORT_WEEKS);
+
+  const cohortLabels: string[] = [];
+  const cohortSizes: number[] = [];
+  const grid: number[][] = [];
+  for (const cw of completeCohortWeeks) {
+    const cohortUserIds = usersByCohort.get(cw)!;
+    const size = cohortUserIds.length;
+    cohortSizes.push(size);
+    cohortLabels.push(formatIstDateLabel(earliestSignupInCohort.get(cw)!));
+    const row: number[] = [];
+    for (let offset = 0; offset < OFFSET_WEEKS; offset++) {
+      const retained = cohortUserIds.filter((id) => orderedOffsetsByUser.get(id)?.has(offset)).length;
+      row.push(size > 0 ? Math.round((retained / size) * 100) : 0);
+    }
+    grid.push(row);
+  }
+
+  return {
+    cohortLabels,
+    offsetLabels: Array.from({ length: OFFSET_WEEKS }, (_, i) => `Wk ${i}`),
+    grid,
+    cohortSizes,
+  };
+}
+
+// Cart abandonment — a LIVE snapshot, not a windowed rate. CartItem only holds CURRENT cart state
+// (no event log of past abandon/recover/checkout), so a true "abandonment rate over the last N
+// days" isn't honestly computable here — this mirrors services/abandonedCart.ts's own idle +
+// no-recent-order logic (same IDLE_HOURS, same OOS-line exclusion) and reports "right now."
+const CART_ABANDONMENT_KEY = "ownerCartAbandonment";
+const CART_IDLE_HOURS = 4;
+
+async function buildCartAbandonment() {
+  const idleCutoff = new Date(Date.now() - CART_IDLE_HOURS * 60 * 60 * 1000);
+
+  const items = await prisma.cartItem.findMany({
+    where: { savedForLater: false },
+    select: {
+      userId: true,
+      quantity: true,
+      updatedAt: true,
+      variant: { select: { sellingPrice: true, stock: true } },
+    },
+  });
+
+  interface CartAgg { value: number; lastTouch: Date }
+  const byUser = new Map<string, CartAgg>();
+  for (const ci of items) {
+    if (Number(ci.variant.stock) <= 0) continue;
+    const value = Number(ci.quantity) * Number(ci.variant.sellingPrice);
+    const cur = byUser.get(ci.userId) ?? { value: 0, lastTouch: ci.updatedAt };
+    cur.value += value;
+    if (ci.updatedAt > cur.lastTouch) cur.lastTouch = ci.updatedAt;
+    byUser.set(ci.userId, cur);
+  }
+
+  const totalActiveCarts = byUser.size;
+  const idleUserIds = [...byUser.entries()]
+    .filter(([, v]) => v.lastTouch < idleCutoff)
+    .map(([id]) => id);
+
+  const recentOrders = idleUserIds.length > 0
+    ? await prisma.order.groupBy({
+        by: ["customerId"],
+        _max: { createdAt: true },
+        where: { customerId: { in: idleUserIds } },
+      })
+    : [];
+  const lastOrderByUser = new Map(recentOrders.map((o) => [o.customerId, o._max.createdAt]));
+
+  let abandonedCount = 0;
+  let abandonedValue = 0;
+  for (const userId of idleUserIds) {
+    const cart = byUser.get(userId)!;
+    const lastOrder = lastOrderByUser.get(userId);
+    if (lastOrder && lastOrder > cart.lastTouch) continue; // ordered since going idle — not abandoned
+    abandonedCount++;
+    abandonedValue += cart.value;
+  }
+
+  return {
+    totalActiveCarts,
+    abandonedCount,
+    abandonedValue,
+    abandonedRatePct: totalActiveCarts > 0 ? (abandonedCount / totalActiveCarts) * 100 : 0,
+  };
+}
+
 router.get("/customers", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const requested = String(req.query.range ?? "month");
     const range = VALID_RANGES.includes(requested) ? requested : "month";
-    const [{ aovTrend, discountImpact }, { segments, repeatPurchaseRatePct }] = await Promise.all([
+    const [
+      { aovTrend, discountImpact },
+      { segments, repeatPurchaseRatePct },
+      cohortRetention,
+      cartAbandonment,
+    ] = await Promise.all([
       memoCache.get(`ownerAovDiscount:${range}`, CUSTOMER_GROWTH_TTL_MS, () => buildAovAndDiscountImpact(range)),
       memoCache.get(CUSTOMER_SEGMENTS_KEY, CUSTOMER_GROWTH_TTL_MS, buildCustomerSegments),
+      memoCache.get(COHORT_RETENTION_KEY, CUSTOMER_GROWTH_TTL_MS, buildCohortRetention),
+      memoCache.get(CART_ABANDONMENT_KEY, CUSTOMER_GROWTH_TTL_MS, buildCartAbandonment),
     ]);
     res.json({
       success: true,
-      data: { range, since: rangeSince(range).toISOString(), aovTrend, discountImpact, segments, repeatPurchaseRatePct },
+      data: {
+        range, since: rangeSince(range).toISOString(), aovTrend, discountImpact, segments,
+        repeatPurchaseRatePct, cohortRetention, cartAbandonment,
+      },
     });
   } catch (e) {
     sendError(res, e);

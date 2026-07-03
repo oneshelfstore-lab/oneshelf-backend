@@ -1803,3 +1803,18 @@ model ProductIntake {
 
   @@index([status, createdAt])
 }
+
+// Analytics revamp Phase 4 — one row per debounced product search (term + how many results it
+// found). The app already debounces the search box 300ms before calling GET /api/app/products, so
+// this is naturally low-volume (one row per pause-in-typing, not per keystroke), not a firehose.
+// No FK to User — the reports built on this are anonymous aggregates (top searches, zero-result
+// searches), never a per-customer search history, so there's nothing to scrub on account deletion.
+model SearchQuery {
+  id          String   @id @default(cuid())
+  term        String   // normalized: trimmed + lowercased, so "Amul"/" amul " roll up together
+  resultCount Int
+  createdAt   DateTime @default(now())
+
+  @@index([term])
+  @@index([createdAt])
+}

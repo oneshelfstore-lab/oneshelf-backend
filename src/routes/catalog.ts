@@ -117,6 +117,15 @@ publicCatalogRouter.get("/", cacheControl(CATALOG_LIST_TTL), async (req: Request
       data: products.map(formatProductForApp),
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     });
+
+    // Best-effort search logging (Analytics revamp Phase 4) — fire-and-forget, AFTER the response
+    // is already sent, so a logging hiccup can never slow down or break a search. The client
+    // already debounces the search box 300ms before calling this endpoint, so this is one row per
+    // pause-in-typing, not per keystroke. Only real text searches, not plain category browsing.
+    const term = q?.trim().toLowerCase();
+    if (term) {
+      prisma.searchQuery.create({ data: { term, resultCount: total } }).catch(() => {});
+    }
   } catch (e) {
     sendError(res, e);
   }

@@ -69,10 +69,80 @@ const PORT = parseInt(process.env.PORT || "4000", 10);
 // express-rate-limit see the real client IP (not the proxy's).
 app.set("trust proxy", 1);
 
-// ─── Security headers + gzip ────────────────────────────────────────
+// Explicit alongside helmet()'s hidePoweredBy (which already strips this) — Express sets
+// "X-Powered-By: Express" by default, revealing the framework to anyone probing headers.
+app.disable("x-powered-by");
 
-app.use(helmet());
+// ─── Security headers + gzip ────────────────────────────────────────
+//
+// This server only ever emits JSON (or a PDF byte stream for invoices/reports) — it never
+// renders HTML, and it loads no scripts/styles/fonts/images of its own. So the CSP below is
+// deliberately close to deny-everything: there is no legitimate script/style/resource origin
+// to allow, trusted or otherwise. Every directive is listed explicitly (useDefaults: false)
+// so nothing is silently inherited from helmet's own defaults.
+//
+// CSP_REPORT_ONLY=true switches this to `Content-Security-Policy-Report-Only`, which only
+// logs violations (via the report-uri below) instead of blocking anything — useful for a
+// dry run against real traffic before enforcing. Defaults to enforcing (false) because this
+// policy has no reason to ever legitimately fire here; flip the env var if a rollout wants
+// to watch for violations first.
+const CSP_REPORT_ONLY = process.env.CSP_REPORT_ONLY === "true";
+
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      useDefaults: false,
+      reportOnly: CSP_REPORT_ONLY,
+      directives: {
+        // Deny-all baseline — every other directive below narrows a specific category, so
+        // nothing falls through to an implicit default.
+        defaultSrc: ["'none'"],
+        // No inline or externally-sourced scripts of any kind (this server serves none).
+        scriptSrc: ["'none'"],
+        scriptSrcAttr: ["'none'"],
+        scriptSrcElem: ["'none'"],
+        // No stylesheets — no 'unsafe-inline', no wildcard https:.
+        styleSrc: ["'none'"],
+        styleSrcAttr: ["'none'"],
+        styleSrcElem: ["'none'"],
+        imgSrc: ["'none'"],
+        fontSrc: ["'none'"],
+        // A browser page that fetches this API is a different origin's concern (its own CSP
+        // governs connect-src there); this only covers documents this server itself renders,
+        // of which there are none — 'self' is a harmless, correctly-scoped floor.
+        connectSrc: ["'self'"],
+        objectSrc: ["'none'"],
+        mediaSrc: ["'none'"],
+        frameSrc: ["'none'"],
+        workerSrc: ["'none'"],
+        manifestSrc: ["'none'"],
+        // Never allow this origin to be embedded in a frame anywhere.
+        frameAncestors: ["'none'"],
+        baseUri: ["'none'"],
+        formAction: ["'none'"],
+        upgradeInsecureRequests: [],
+        "report-uri": ["/api/csp-report"],
+      },
+    },
+    // Also a pure-API concern, but keep the browser defaults for the rest (HSTS,
+    // X-Content-Type-Options, Referrer-Policy, COOP/CORP, X-Frame-Options, etc.).
+  })
+);
 app.use(compression()); // gzip JSON responses (~70% smaller over mobile networks)
+
+// Sensitive browser features this API never needs — disable them all so an embedder can't
+// request camera/mic/geolocation/payment access "on behalf of" this origin.
+app.use((_req, res, next) => {
+  res.setHeader(
+    "Permissions-Policy",
+    [
+      "accelerometer=()", "camera=()", "geolocation=()", "gyroscope=()",
+      "magnetometer=()", "microphone=()", "payment=()", "usb=()",
+      "interest-cohort=()", "browsing-topics=()",
+    ].join(", ")
+  );
+  next();
+});
 
 // ─── CORS ───────────────────────────────────────────────────────────
 // Allowed origins come from env (comma-separated) so production dashboard
@@ -180,6 +250,15 @@ app.use("/api", generalLimiter);
 
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", version: "2.0.0", timestamp: new Date().toISOString() });
+});
+
+// CSP violation reports land here in report-only mode (or if a future relaxation of the
+// policy ever misfires). Body is `application/csp-report` — a tiny dedicated json parser
+// (not the shared 10mb express.json() above) keeps this cheap and isolated. Registered
+// after generalLimiter (like every other /api route) so it can't be used to flood logs.
+app.post("/api/csp-report", express.json({ type: ["application/csp-report", "application/json"] }), (req, res) => {
+  console.log(JSON.stringify({ level: "warn", type: "csp-violation", report: req.body }));
+  res.status(204).end();
 });
 
 // ─── App routes (public or Firebase-auth) ──────────────────────────

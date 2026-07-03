@@ -101,9 +101,23 @@ const RANGE_DAYS: Record<string, number> = { week: 7, month: 30, quarter: 90 };
 const CATALOG_HEALTH_TTL_MS = 5 * 60 * 1000;
 const VALID_RANGES = ["today", "week", "month", "quarter"];
 
+// IST = UTC+5:30. Every timestamp in this schema is stored as naive UTC wall-clock (see the
+// peak-hours query below), and this process runs in UTC on Render — so a plain
+// `new Date(now.getFullYear(), now.getMonth(), now.getDate())` builds UTC midnight, not IST
+// midnight, and "Today" would start up to 5.5h late/early. Fix: shift `now` forward by the IST
+// offset to read off today's IST calendar date via the UTC getters (process-timezone-independent),
+// then subtract the offset back off to get the real UTC instant of IST midnight.
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+function istMidnightUtc(now: Date): Date {
+  const shifted = new Date(now.getTime() + IST_OFFSET_MS);
+  const dayStartShifted = Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate());
+  return new Date(dayStartShifted - IST_OFFSET_MS);
+}
+
 function rangeSince(range: string): Date {
   const now = new Date();
-  if (range === "today") return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (range === "today") return istMidnightUtc(now);
   const days = RANGE_DAYS[range] ?? RANGE_DAYS.month;
   return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 }
@@ -377,8 +391,10 @@ async function buildAovAndDiscountImpact(range: string) {
     // Prisma's groupBy can't bucket by calendar day/week — this is the one query in the whole
     // Analytics revamp that needs raw SQL. bucketUnit is chosen from a 2-value whitelist above,
     // never taken directly from req.query, and is still passed as a bound param (not string-built).
+    // IST-shifted before bucketing (see the peak-hours query + rangeSince for why every naive-UTC
+    // "createdAt" needs this) — otherwise a "day" bucket groups by UTC calendar day, not IST.
     prisma.$queryRaw<AovBucketRow[]>`
-      SELECT date_trunc(${bucketUnit}, "createdAt") as bucket,
+      SELECT date_trunc(${bucketUnit}, "createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') as bucket,
              AVG("totalAmount")::float as aov,
              COUNT(*)::int as orders
       FROM "Order"
@@ -714,8 +730,9 @@ async function buildOverviewTrend(range: string) {
   const [revenueRows, paymentModeAgg] = await Promise.all([
     // Same bucketing approach as the AOV trend in /customers — see that query's comment for why
     // this is the one raw-SQL shape the whole revamp needs (Prisma's groupBy can't bucket dates).
+    // IST-shifted before bucketing, same as AOV trend and peak-hours (naive-UTC "createdAt").
     prisma.$queryRaw<Array<{ bucket: Date; revenue: number | null }>>`
-      SELECT date_trunc(${bucketUnit}, "createdAt") as bucket,
+      SELECT date_trunc(${bucketUnit}, "createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') as bucket,
              SUM("totalAmount")::float as revenue
       FROM "Order"
       WHERE status = 'DELIVERED' AND "createdAt" >= ${since}

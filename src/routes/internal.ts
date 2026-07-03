@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import { sendError } from "../lib/errors.js";
 import { generateDueSubscriptionOrders, closeMonthlyStatements } from "../services/subscriptionEngine.js";
@@ -15,11 +16,22 @@ function authorize(req: Request, res: Response): boolean {
     res.status(503).json({ success: false, error: { code: "NOT_CONFIGURED", message: "Internal cron is not configured" } });
     return false;
   }
-  if (req.headers["x-internal-secret"] !== secret) {
+  const header = req.headers["x-internal-secret"];
+  const provided = Array.isArray(header) ? header[0] : header;
+  if (!provided || !constantTimeEquals(provided, secret)) {
     res.status(403).json({ success: false, error: { code: "FORBIDDEN", message: "Invalid internal secret" } });
     return false;
   }
   return true;
+}
+
+function constantTimeEquals(a: string, b: string): boolean {
+  const aBuf = Buffer.from(a);
+  const bBuf = Buffer.from(b);
+  // Lengths differ ⇒ definitely not equal, but comparing against a same-length buffer keeps this
+  // branch itself constant-time relative to input length (timingSafeEqual throws on length mismatch).
+  if (aBuf.length !== bBuf.length) return false;
+  return crypto.timingSafeEqual(aBuf, bBuf);
 }
 
 // POST /api/app/internal/subscriptions/run

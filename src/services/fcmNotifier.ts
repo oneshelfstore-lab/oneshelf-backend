@@ -55,14 +55,38 @@ function statusLabel(status: string): string {
 }
 
 export async function notifyNewOrder(order: { id: string; orderNumber: string; totalAmount: any; customerId: string }) {
-  await sendToTopic("owner_orders", {
+  // Phase 3.5 enrichment: attach a product thumbnail + ready-by ETA so the owner notification-centre
+  // card can show a real image + live countdown. Best-effort — if the lookup fails or the fields are
+  // absent, the card just falls back to the category icon / no timer (all keys are optional).
+  let imageUrl: string | undefined;
+  let etaAt: string | undefined;
+  try {
+    const detail = await prisma.order.findUnique({
+      where: { id: order.id },
+      select: {
+        estimatedReadyAt: true,
+        items: { where: { imageUrl: { not: null } }, take: 1, select: { imageUrl: true } },
+      },
+    });
+    imageUrl = detail?.items?.[0]?.imageUrl ?? undefined;
+    if (detail?.estimatedReadyAt) etaAt = String(detail.estimatedReadyAt.getTime());
+  } catch {
+    /* enrichment is best-effort; never block the notification on it */
+  }
+
+  const data: Record<string, string> = {
     type: "new_order",
     orderId: order.id,
     orderNumber: order.orderNumber,
     totalAmount: String(order.totalAmount),
     title: `New Order! #${order.orderNumber}`,
     body: `New order received — Rs.${Math.round(Number(order.totalAmount))}. Tap to pack.`,
-  });
+  };
+  // FCM data values must be strings; only include keys we actually have.
+  if (imageUrl) data.imageUrl = imageUrl;
+  if (etaAt) data.etaAt = etaAt;
+
+  await sendToTopic("owner_orders", data);
 }
 
 export async function notifyOrderStatusChange(order: { id: string; orderNumber: string; status: string; customerId: string }) {

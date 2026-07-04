@@ -75,7 +75,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     // Calculate totals for active items
     const totals = activeItems.length > 0
       ? await calculateCartTotals(activeItems as any)
-      : { subtotal: 0, discount: 0, couponCode: null, deliveryCharge: 0, taxableValue: 0, totalCgst: 0, totalSgst: 0, totalTax: 0, totalAmount: 0 };
+      : { subtotal: 0, discount: 0, couponCode: null, deliveryCharge: 0, taxableValue: 0, totalCgst: 0, totalSgst: 0, totalTax: 0, totalAmount: 0, distanceKm: null, outOfRange: false };
 
     res.json({
       success: true,
@@ -108,19 +108,22 @@ const quoteSchema = z.object({
   fulfillmentType: z.enum(["DELIVERY", "PICKUP"]).optional().nullable(),
   // Store credit the customer wants to apply (clamped server-side to balance + grand total).
   walletCredit: z.number().min(0).optional().nullable(),
+  // Destination address for distance-based delivery pricing. Optional — if omitted (e.g. before the
+  // customer has picked an address) the quote falls back to the flat delivery charge.
+  addressId: z.string().min(1).optional().nullable(),
 });
 
 router.post("/quote", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const parsed = quoteSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
-    const { items, couponCode, fulfillmentType, walletCredit } = parsed.data;
+    const { items, couponCode, fulfillmentType, walletCredit, addressId } = parsed.data;
     const userId = req.appUser!.id;
 
     const emptyTotals = {
       items: [], subtotal: 0, discount: 0, couponCode: null, deliveryCharge: 0,
       taxableValue: 0, totalCgst: 0, totalSgst: 0, totalTax: 0, totalAmount: 0,
-      walletApplied: 0, walletAvailable: 0,
+      walletApplied: 0, walletAvailable: 0, distanceKm: null, outOfRange: false,
     };
 
     if (items.length === 0) {
@@ -142,8 +145,18 @@ router.post("/quote", async (req: FirebaseAuthRequest, res: Response) => {
       .filter((i) => byId.has(i.variantId))
       .map((i) => ({ id: i.variantId, variantId: i.variantId, quantity: i.quantity, variant: byId.get(i.variantId)! }));
 
+    // Resolve the destination address (user-scoped — never trust a raw lat/lng from the client for
+    // pricing) so the quote's delivery charge matches what placeOrder will actually charge.
+    let addressLat: number | null = null;
+    let addressLng: number | null = null;
+    if (addressId) {
+      const address = await prisma.address.findFirst({ where: { id: addressId, userId }, select: { lat: true, lng: true } });
+      addressLat = address?.lat != null ? Number(address.lat) : null;
+      addressLng = address?.lng != null ? Number(address.lng) : null;
+    }
+
     const totals = cartItems.length > 0
-      ? await calculateCartTotals(cartItems as any, couponCode, userId, fulfillmentType, walletCredit)
+      ? await calculateCartTotals(cartItems as any, couponCode, userId, fulfillmentType, walletCredit, addressLat, addressLng)
       : emptyTotals;
 
     res.json({ success: true, data: totals });

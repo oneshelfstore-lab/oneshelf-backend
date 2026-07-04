@@ -8,6 +8,8 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { cacheControl, memoCache } from "../lib/httpCache.js";
+import { bustDeliveryPricingConfig } from "../services/deliveryPricing.js";
+import { deliverySlabsInputSchema } from "../data/deliveryPricing.js";
 
 const router = Router();
 
@@ -32,6 +34,14 @@ const updateSchema = z.object({
   operatingHoursStart: z.string().max(10).optional().nullable(),
   operatingHoursEnd: z.string().max(10).optional().nullable(),
   deliveryRadius: z.number().min(0).optional().nullable(),
+  // Store's own pickup location (owner sets once — GPS or manual pin). Both null = distance-based
+  // delivery pricing stays inactive (flat deliveryCharge fallback).
+  storeLat: z.number().min(-90).max(90).optional().nullable(),
+  storeLng: z.number().min(-180).max(180).optional().nullable(),
+  // Distance-based delivery pricing slabs (validated same as the loyalty config — hard rails even
+  // through the API). Omit/null to keep the current value; send [] is invalid (min 1 slab) — send
+  // null explicitly to fall back to DEFAULT_DELIVERY_SLABS.
+  deliverySlabs: deliverySlabsInputSchema.optional().nullable(),
   // Referral wallet (Phase 2) — owner-tunable reward economics.
   referralEnabled: z.boolean().optional(),
   referralRewardAmount: z.number().int().min(0).max(100000).optional(),
@@ -73,16 +83,23 @@ router.put(
       }
 
       let config = await prisma.storeConfig.findFirst();
+      // `as any`: deliverySlabs is a Json column; Prisma's generated update/create input types don't
+      // accept a plain `null` literal for Json fields (they want the Prisma.JsonNull sentinel), which
+      // the zod-validated array-or-null shape here doesn't match structurally. Same escape hatch this
+      // codebase already uses for `loyaltyConfig` (see ownerMembership.ts).
       if (!config) {
-        config = await prisma.storeConfig.create({ data: parsed.data });
+        config = await prisma.storeConfig.create({ data: parsed.data as any });
       } else {
         config = await prisma.storeConfig.update({
           where: { id: config.id },
-          data: parsed.data,
+          data: parsed.data as any,
         });
       }
 
       memoCache.bust("config");
+      // Bust the delivery-pricing cache too — it reads storeLat/storeLng/deliverySlabs/deliveryRadius
+      // off this same row, and an owner location/slab edit should apply to the very next quote.
+      bustDeliveryPricingConfig();
       res.json({ success: true, data: config });
     } catch (e) {
       sendError(res, e);

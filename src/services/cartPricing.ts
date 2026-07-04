@@ -2,6 +2,7 @@ import prisma from "../lib/prisma.js";
 import { toAppFormat } from "../utils/looseUnitConverter.js";
 import { getUserSpend365, resolveLoyaltyConfig } from "./loyalty.js";
 import { tierForSpend, nextTier } from "../data/loyaltyTiers.js";
+import { computeDistanceDelivery } from "./deliveryPricing.js";
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -49,6 +50,12 @@ export interface CartTotals {
   tierDeliveryWaived: number;
   // Buy-1-Get-1: value of the free units across BOGO lines (Σ floor(qty/2) × effectiveUnitPrice).
   bogoDiscount: number;
+  // Distance-based delivery pricing. distanceKm is null when it couldn't be computed (store or
+  // address has no saved coordinates — deliveryCharge falls back to the flat StoreConfig.deliveryCharge
+  // in that case). outOfRange is true only when the address is beyond StoreConfig.deliveryRadius —
+  // callers placing a real order must reject in that case; a /cart/quote preview just surfaces it.
+  distanceKm: number | null;
+  outOfRange: boolean;
   // Store credit (Phase 2) — a payment tender applied AFTER GST. walletApplied reduces totalAmount
   // (the amount due, never the taxable base); walletAvailable is the user's current balance (for
   // the checkout toggle). Both 0 for anonymous quotes (no userId).
@@ -97,6 +104,10 @@ export async function calculateCartTotals(
   userId?: string | null,
   fulfillmentType?: string | null,
   walletCredit?: number | null,
+  // Destination coordinates for distance-based delivery pricing. Omitted/null ⇒ the flat
+  // StoreConfig.deliveryCharge fallback (same as before this feature existed).
+  addressLat?: number | null,
+  addressLng?: number | null,
 ): Promise<CartTotals> {
   const lines: CartLineItem[] = [];
   // Buy-1-Get-1: accumulate the value of free units across BOGO-flagged products.
@@ -210,20 +221,28 @@ export async function calculateCartTotals(
   // Delivery charge
   const storeConfig = await prisma.storeConfig.findFirst();
   const freeDeliveryAbove = storeConfig ? Number(storeConfig.freeDeliveryAbove) : 500;
-  const standardDelivery = storeConfig ? Number(storeConfig.deliveryCharge) : 30;
   const isFreeDelivery = appliedCoupon &&
     (await prisma.coupon.findUnique({ where: { code: appliedCoupon } }))?.couponType === "FREE_DELIVERY";
 
-  let deliveryCharge = 0;
   const isPickup = fulfillmentType === "PICKUP";
+  // Distance-based charge (falls back to the flat StoreConfig.deliveryCharge when the store or the
+  // address has no saved coordinates). Skipped entirely for pickup — nothing to deliver.
+  const distanceResult = isPickup
+    ? { charge: 0, distanceKm: null, outOfRange: false }
+    : await computeDistanceDelivery(addressLat, addressLng);
+  const standardDelivery = distanceResult.charge;
+
+  let deliveryCharge = 0;
   // Free-delivery threshold is measured on what the customer actually pays for goods — the free
   // Buy-1-Get-1 units don't count (otherwise 2×₹300 BOGO would "spend" ₹600 and unlock free delivery
   // while the customer only pays ₹300). Coupon/loyalty discounts still count toward the threshold.
   const deliveryEligibleSubtotal = round2(subtotal - bogoDiscount);
-  // Pickup never incurs a delivery charge. Otherwise charge the store's standard fee unless the
-  // order qualifies for free delivery (threshold, FREE_DELIVERY coupon, or a member tier perk).
+  // Pickup never incurs a delivery charge. Otherwise charge the (possibly distance-based) fee unless
+  // the order qualifies for free delivery (threshold, FREE_DELIVERY coupon, or a member tier perk).
+  // A free-delivery waiver still fully waives a distance-priced order — the perk means "no delivery
+  // fee," not "no delivery fee up to the flat rate."
   if (!isPickup && deliveryEligibleSubtotal < freeDeliveryAbove && !isFreeDelivery && !tierFreeDelivery) {
-    deliveryCharge = standardDelivery; // single source of truth: store config
+    deliveryCharge = standardDelivery;
   }
 
   // Attribute the delivery waiver to the tier ONLY when the tier was the reason it's free — the order
@@ -291,5 +310,7 @@ export async function calculateCartTotals(
     bogoDiscount,
     walletApplied,
     walletAvailable,
+    distanceKm: distanceResult.distanceKm,
+    outOfRange: distanceResult.outOfRange,
   };
 }

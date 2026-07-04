@@ -105,8 +105,18 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     }
 
     // Calculate totals (reuses the cart pricing service). Pass fulfillmentType so
-    // pickup orders are not charged delivery (matches the /cart/quote preview exactly).
-    const totals = await calculateCartTotals(cartItems as any, couponCode, userId, fulfillmentType, walletCredit);
+    // pickup orders are not charged delivery (matches the /cart/quote preview exactly), and the
+    // address coordinates so delivery pricing is distance-based (falls back to the flat rate when
+    // either the store or this address has no saved lat/lng).
+    const addressLat = address?.lat != null ? Number(address.lat) : null;
+    const addressLng = address?.lng != null ? Number(address.lng) : null;
+    const totals = await calculateCartTotals(cartItems as any, couponCode, userId, fulfillmentType, walletCredit, addressLat, addressLng);
+
+    // A real placement (unlike a /cart/quote preview) must reject an address beyond the store's
+    // configured delivery radius — never silently charge more and ship it anyway.
+    if (fulfillmentType === "DELIVERY" && totals.outOfRange) {
+      throw new ValidationError("This address is outside our delivery area.");
+    }
 
     // Determine payment status. Every order starts PENDING; online orders flip to
     // PAID only after Razorpay verification in /:id/pay (which also arms the OTP).

@@ -1270,7 +1270,19 @@ model StoreConfig {
   isOrderingAllowed     Boolean  @default(true)
   operatingHoursStart   String?
   operatingHoursEnd     String?
+  // Max delivery distance in km from the store (null = unenforced). Also the ceiling used by
+  // distance-based delivery pricing below (an address beyond this is rejected at checkout).
   deliveryRadius        Decimal? @db.Decimal(5, 2)
+  // Store's own pickup location, set once by the owner (GPS or manual pin). Distance-based delivery
+  // pricing is INACTIVE until both this AND an order's address have coordinates — falls back to the
+  // flat `deliveryCharge` otherwise, so this is safe to leave unset.
+  storeLat              Decimal? @db.Decimal(10, 7)
+  storeLng              Decimal? @db.Decimal(10, 7)
+  // Distance-based delivery pricing (slabs), owner-tunable JSON, validated on write AND read:
+  //   [{ uptoKm: 2, charge: 20 }, { uptoKm: 5, charge: 30 }, { uptoKm: 8, charge: 50 }]
+  // A distance beyond the last slab is charged at that slab's rate (a ceiling), NOT blocked — only
+  // `deliveryRadius` blocks. NULL ⇒ fall back to the code-defined DEFAULT_DELIVERY_SLABS.
+  deliverySlabs         Json?
   // Average fulfillment time used to compute the honest order ETA (shown as a range).
   avgDeliveryMinutes    Int      @default(40)
   avgPickupMinutes      Int      @default(20)

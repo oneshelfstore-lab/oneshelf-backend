@@ -202,7 +202,10 @@ ownerMembershipRouter.post("/simulate", async (req: FirebaseAuthRequest, res: Re
       if (t.key !== baseKey) memberIds.add(r.customerId);
     }
 
-    // Replay the last 90 days' orders against those candidate tiers.
+    // Replay the last 90 days' orders against those candidate tiers. Uses the flat deliveryCharge as
+    // an approximation of "the delivery fee this order would have paid" — if distance-based delivery
+    // pricing (deliveryPricing.ts) is active, the real per-order fee varies by address; this simulator
+    // doesn't replay per-address distance, so its cost estimate is directional, not exact.
     const storeCfg = await prisma.storeConfig.findFirst({ select: { freeDeliveryAbove: true, deliveryCharge: true } });
     const freeDeliveryAbove = Number(storeCfg?.freeDeliveryAbove ?? 500);
     const standardDelivery = Number(storeCfg?.deliveryCharge ?? 30);

@@ -6,6 +6,7 @@ import {
   notifySubscriptionSkipped,
   notifySubscriptionLowBalance,
   notifySubscriptionStatement,
+  notifySubscriptionEndingSoon,
 } from "./fcmNotifier.js";
 import { generateOrderInvoice, generateStatementInvoice, markStatementInvoicePaid } from "./orderInvoice.js";
 import { chargeSubscriptionMandate } from "./razorpay.js";
@@ -141,6 +142,74 @@ export function upcomingDates(
     if (isValidDeliveryDay(sub, dayCursor)) out.push(dayCursor);
   }
   return out;
+}
+
+export interface SubscriptionPlanRow {
+  variantId: string;
+  productName: string;
+  unit: string;
+  isLoose: boolean;
+  totalQty: number;
+  customerCount: number;
+}
+
+/**
+ * Per-variant planning totals for a target delivery day — "Tomorrow: 40× Milk 500ml, 12× Newspaper" —
+ * how many of each to stock/pack. Optionally scoped to one seller's own products (via
+ * variant.product.sellerId) so a seller sees only their own subscribers, not the whole store's. Shared
+ * by the owner's and seller's `/upcoming` routes (was duplicated inline in ownerSubscriptions.ts).
+ *
+ * `sellerIsHouse` matters because `CatalogProduct.sellerId` is nullable and — per the schema's own
+ * comment — "a null seller is treated as the house seller everywhere": products created via the owner's
+ * classic editor (ownerCatalog.ts) never set sellerId, but products created via the co-manager's
+ * seller-scoped editor (sellerCatalog.ts) do. Both are equally "house" products. Without this, the house
+ * co-manager would only see subscriptions on the SECOND group and silently under-count the first.
+ */
+export async function computeUpcomingPlan(
+  target: Date,
+  sellerId?: string,
+  sellerIsHouse?: boolean,
+): Promise<SubscriptionPlanRow[]> {
+  const now = new Date();
+  const productFilter = sellerId
+    ? sellerIsHouse
+      ? { OR: [{ sellerId }, { sellerId: null }] }
+      : { sellerId }
+    : undefined;
+  const subs = await prisma.subscription.findMany({
+    where: {
+      status: "ACTIVE",
+      startDate: { lte: target },
+      OR: [{ pausedUntil: null }, { pausedUntil: { lte: now } }],
+      AND: [{ OR: [{ endDate: null }, { endDate: { gte: target } }] }],
+      ...(productFilter ? { variant: { product: productFilter } } : {}),
+    },
+  });
+
+  const byVariant = new Map<string, SubscriptionPlanRow>();
+  for (const sub of subs) {
+    const cadence: CadenceLike = {
+      frequency: sub.frequency as CadenceLike["frequency"],
+      intervalDays: sub.intervalDays,
+      daysOfWeek: sub.daysOfWeek,
+      dayOfMonth: sub.dayOfMonth,
+      startDate: sub.startDate,
+      endDate: sub.endDate,
+    };
+    if (!isValidDeliveryDay(cadence, target)) continue;
+    const row = byVariant.get(sub.variantId) ?? {
+      variantId: sub.variantId,
+      productName: sub.productName,
+      unit: sub.stepUnit ?? "",
+      isLoose: sub.isLoose,
+      totalQty: 0,
+      customerCount: 0,
+    };
+    row.totalQty = +(row.totalQty + Number(sub.quantity)).toFixed(3);
+    row.customerCount += 1;
+    byVariant.set(sub.variantId, row);
+  }
+  return [...byVariant.values()].sort((a, b) => b.totalQty - a.totalQty);
 }
 
 // ─── Pricing (the 🩹 delivery-charge fix) ─────────────────────────────────────
@@ -510,6 +579,32 @@ export async function generateDueSubscriptionOrders(): Promise<{ generated: numb
     console.log(JSON.stringify({ level: "info", msg: "subscription orders generated", generated, skipped }));
   }
   return { generated, skipped };
+}
+
+function dayLabel(d: Date): string {
+  return new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Kolkata" }).format(d);
+}
+
+/**
+ * "Ending soon" reminder for fixed-duration subscriptions (endDate set — "Until I cancel" subs never
+ * match). Fires for ACTIVE subscriptions whose endDate is EXACTLY 3 days from today (IST). Deterministic
+ * date-equality means each subscription gets exactly one reminder as long as the daily cron runs on that
+ * day — no extra "notified" flag/schema needed. A missed cron run on that exact day just skips the
+ * reminder (best-effort, same tradeoff as the engine's other notify-only side effects).
+ */
+export async function notifyEndingSoonSubscriptions(): Promise<{ notified: number }> {
+  const today = istTodayStart();
+  const target = new Date(today.getTime() + 3 * MS_DAY);
+
+  const ending = await prisma.subscription.findMany({
+    where: { status: "ACTIVE", endDate: target },
+    select: { customerId: true, productName: true, endDate: true },
+  });
+
+  for (const sub of ending) {
+    await notifySubscriptionEndingSoon(sub.customerId, sub.productName, dayLabel(sub.endDate!)).catch(() => {});
+  }
+  return { notified: ending.length };
 }
 
 // ─── Monthly statement close (Phase 3) ────────────────────────────────────────

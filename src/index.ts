@@ -47,6 +47,7 @@ import appUserRoutes from "./routes/appUser.js";
 import subscriptionRoutes from "./routes/subscriptions.js";
 import ownerSubscriptionRoutes from "./routes/ownerSubscriptions.js";
 import ownerMembershipRoutes from "./routes/ownerMembership.js";
+import sellerSubscriptionRoutes from "./routes/sellerSubscriptions.js";
 import internalRoutes from "./routes/internal.js";
 import webhookRoutes from "./routes/webhooks.js";
 import productIntakeRoutes from "./routes/productIntake.js";
@@ -310,6 +311,7 @@ app.use("/api/app/owner/product-intake", ownerProductIntakeRoutes);
 app.use("/api/app/seller/catalog", sellerCatalogRoutes);
 app.use("/api/app/seller/brands", sellerBrandRouter);
 app.use("/api/app/seller/orders", sellerOrdersRoutes);
+app.use("/api/app/seller/subscriptions", sellerSubscriptionRoutes);
 app.use("/api/app/seller/me", sellerAccountRoutes);
 app.use("/api/app/seller/quote-requests", sellerQuoteRoutes);
 app.use("/api/app/delivery/orders", deliveryRoutes);
@@ -392,7 +394,7 @@ app.use(globalErrorHandler as any);
 
 // ─── Start ──────────────────────────────────────────────────────────
 
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Billing server running on http://0.0.0.0:${PORT}`);
   // Periodically release stock held by unpaid/abandoned online orders.
   startOrderExpirySweeper();
@@ -406,3 +408,9 @@ app.listen(PORT, '0.0.0.0', () => {
   // Permanently purge soft-deleted accounts whose grace window has elapsed (refund wallet + scrub PII).
   startAccountDeletionSweeper();
 });
+
+// Guard against slow-rate/low-and-slow DoS (e.g. Slowloris): cap how long a client can take to
+// finish sending headers, and how long a whole request can stay open. Node's own defaults (60s /
+// 300s) leave a connection tying up a worker far longer than any real client on this API needs.
+server.headersTimeout = 20_000;
+server.requestTimeout = 30_000;

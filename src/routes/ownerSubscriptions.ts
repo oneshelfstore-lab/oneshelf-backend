@@ -3,7 +3,7 @@ import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { sendError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole, type FirebaseAuthRequest } from "../middleware/firebaseAuth.js";
-import { istMidnight, isValidDeliveryDay, type CadenceLike } from "../services/subscriptionEngine.js";
+import { istMidnight, computeUpcomingPlan } from "../services/subscriptionEngine.js";
 import { markStatementInvoicePaid } from "../services/orderInvoice.js";
 import { notifySubscriptionStatement } from "../services/fcmNotifier.js";
 
@@ -12,24 +12,6 @@ router.use(firebaseAuthMiddleware as any);
 router.use(requireAppRole("OWNER") as any);
 
 const MS_DAY = 24 * 60 * 60 * 1000;
-
-function toCadence(row: {
-  frequency: string;
-  intervalDays: number | null;
-  daysOfWeek: number[];
-  dayOfMonth: number | null;
-  startDate: Date;
-  endDate: Date | null;
-}): CadenceLike {
-  return {
-    frequency: row.frequency as CadenceLike["frequency"],
-    intervalDays: row.intervalDays,
-    daysOfWeek: row.daysOfWeek,
-    dayOfMonth: row.dayOfMonth,
-    startDate: row.startDate,
-    endDate: row.endDate,
-  };
-}
 
 // ─── GET /  — all active subscriptions ───────────────────────────────
 router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
@@ -68,42 +50,8 @@ router.get("/upcoming", async (req: FirebaseAuthRequest, res: Response) => {
       target = istMidnight(parsed);
     }
 
-    const now = new Date();
-    const subs = await prisma.subscription.findMany({
-      where: {
-        status: "ACTIVE",
-        startDate: { lte: target },
-        OR: [{ pausedUntil: null }, { pausedUntil: { lte: now } }],
-        AND: [{ OR: [{ endDate: null }, { endDate: { gte: target } }] }],
-      },
-    });
-
-    const byVariant = new Map<
-      string,
-      { variantId: string; productName: string; unit: string; isLoose: boolean; totalQty: number; customerCount: number }
-    >();
-    for (const sub of subs) {
-      if (!isValidDeliveryDay(toCadence(sub), target)) continue;
-      const row = byVariant.get(sub.variantId) ?? {
-        variantId: sub.variantId,
-        productName: sub.productName,
-        unit: sub.stepUnit ?? "",
-        isLoose: sub.isLoose,
-        totalQty: 0,
-        customerCount: 0,
-      };
-      row.totalQty = +(row.totalQty + Number(sub.quantity)).toFixed(3);
-      row.customerCount += 1;
-      byVariant.set(sub.variantId, row);
-    }
-
-    res.json({
-      success: true,
-      data: {
-        date: target.toISOString(),
-        items: [...byVariant.values()].sort((a, b) => b.totalQty - a.totalQty),
-      },
-    });
+    const items = await computeUpcomingPlan(target);
+    res.json({ success: true, data: { date: target.toISOString(), items } });
   } catch (e) {
     sendError(res, e);
   }

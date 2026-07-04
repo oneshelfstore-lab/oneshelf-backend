@@ -111,7 +111,14 @@ export async function firebaseAuthMiddleware(
               firebaseUid: decoded.uid,
               // If the e-mail is taken by a row we can't link to, create without it.
               email: byEmail ? null : email,
-              name: decoded.name ?? decoded.phone_number ?? "App User",
+              // Leave blank (not "App User"/the phone number) when Firebase gave no real name —
+              // decoded.name is always null for phone auth. A blank name is what makes the app's
+              // `user.name.isBlank()` check route a brand-new phone-OTP signup into Profile Setup
+              // ONCE to collect a real name; falling back to the phone number here (as before) made
+              // the name look non-blank, so setup was silently skipped and the phone number itself
+              // got stored as the customer's "name" forever (ownerSellers.ts's `looksLikePhone`
+              // helper exists because of this exact same failure mode elsewhere).
+              name: decoded.name ?? "",
               phone: phone10,
               role: "CUSTOMER",
               phoneVerified: !!decoded.phone_number,

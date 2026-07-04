@@ -7,6 +7,7 @@ import {
   requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
+import { payoutSeller } from "../services/sellerPayout.js";
 
 // Owner-managed marketplace sellers. Mounted at /api/app/owner/sellers (Firebase auth + OWNER).
 // Onboard a seller BY PHONE (no UIDs): promote an existing user to SELLER + link, or pre-create a
@@ -359,33 +360,7 @@ router.post("/:id/payout", async (req: FirebaseAuthRequest, res: Response) => {
     const parsed = payoutSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid payout data", parsed.error.errors);
 
-    const seller = await prisma.seller.findUnique({ where: { id }, select: { id: true, isHouse: true } });
-    if (!seller) throw new NotFoundError("Seller", id);
-    if (seller.isHouse) throw new ValidationError("The house store has no commission ledger to pay out.");
-
-    const result = await prisma.$transaction(async (tx) => {
-      const unsettled = await tx.subOrder.findMany({
-        where: { sellerId: id, settled: false },
-        select: { id: true, subtotal: true, commissionAmount: true, tcsAmount: true, netPayable: true },
-      });
-      if (unsettled.length === 0) throw new ValidationError("Nothing to pay out — no unsettled orders.");
-
-      const gross = +unsettled.reduce((s, o) => s + Number(o.subtotal), 0).toFixed(2);
-      const commission = +unsettled.reduce((s, o) => s + Number(o.commissionAmount), 0).toFixed(2);
-      const tcs = +unsettled.reduce((s, o) => s + Number(o.tcsAmount), 0).toFixed(2);
-      const net = +unsettled.reduce((s, o) => s + Number(o.netPayable), 0).toFixed(2);
-
-      const payout = await tx.sellerPayout.create({
-        data: {
-          sellerId: id, grossAmount: gross, commission, tcs, netPaid: net,
-          mode: parsed.data.mode ?? null, reference: parsed.data.reference ?? null, note: parsed.data.note ?? null,
-        },
-      });
-      await tx.subOrder.updateMany({ where: { id: { in: unsettled.map((o) => o.id) } }, data: { settled: true, payoutId: payout.id } });
-      await tx.seller.update({ where: { id }, data: { outstandingBalance: { decrement: net } } });
-      return { payout, count: unsettled.length };
-    });
-
+    const result = await payoutSeller(id, parsed.data);
     res.json({ success: true, data: { payoutId: result.payout.id, settledCount: result.count, netPaid: Number(result.payout.netPaid) } });
   } catch (e) {
     sendError(res, e);

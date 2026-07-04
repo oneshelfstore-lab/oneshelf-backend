@@ -89,6 +89,45 @@ export async function notifyNewOrder(order: { id: string; orderNumber: string; t
   await sendToTopic("owner_orders", data);
 }
 
+// A new order includes items from this specific seller (their slice = SubOrder). Pings the seller's
+// own devices directly — separate from notifyNewOrder's "owner_orders" topic, since a seller has no
+// reason to be subscribed to that topic and previously found out only by opening the app.
+export async function notifySubOrderNew(
+  sellerOwnerUserId: string,
+  info: { orderNumber: string; itemCount: number; subtotal: number },
+) {
+  const tokens = await getUserTokens(sellerOwnerUserId);
+  if (tokens.length === 0) return;
+  await sendToTokens(tokens, {
+    type: "sub_order_new",
+    orderNumber: info.orderNumber,
+    title: `New order — #${info.orderNumber}`,
+    body: `${info.itemCount} item${info.itemCount === 1 ? "" : "s"} for you, Rs.${Math.round(info.subtotal)}. Tap to pack.`,
+  });
+}
+
+// A seller just marked THEIR slice PACKED. Distinct from notifyOrderStatusChange (which only fires
+// once EVERY seller on a multi-seller order is done) — this gives the owner live per-seller progress,
+// and pings the already-assigned delivery agent directly so they don't have to poll for it.
+export async function notifySubOrderPacked(
+  order: { id: string; orderNumber: string },
+  sellerName: string,
+  agentId?: string | null,
+) {
+  const data = {
+    type: "sub_order_packed",
+    orderId: order.id,
+    orderNumber: order.orderNumber,
+    title: `${sellerName} packed their items`,
+    body: `Order #${order.orderNumber}: ${sellerName}'s items are ready to collect.`,
+  };
+  await sendToTopic("owner_orders", data);
+  if (agentId) {
+    const tokens = await getUserTokens(agentId);
+    await sendToTokens(tokens, data);
+  }
+}
+
 export async function notifyOrderStatusChange(order: { id: string; orderNumber: string; status: string; customerId: string }) {
   const tokens = await getUserTokens(order.customerId);
   await sendToTokens(tokens, {

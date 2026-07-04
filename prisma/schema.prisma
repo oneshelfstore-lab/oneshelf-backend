@@ -362,6 +362,7 @@ model User {
   complaints         Complaint[]
   quoteRequests      QuoteRequest[]
   sellerAccount      Seller?          @relation("SellerOwner")
+  cashSettlements    CashSettlement[]
   walletTxns         WalletTransaction[]
   walletTopups       WalletTopup[]
   referralsMade      Referral[]       @relation("Referrer")
@@ -1322,6 +1323,11 @@ model StoreConfig {
   // discountPct ≤ 15, ascending minSpend) on every write AND read; an invalid stored value falls
   // back rather than crashing the pricing hot path. enabled=false is the master kill switch.
   loyaltyConfig              Json?
+  // Seller payout automation: when enabled, the daily internal cron auto-creates a SellerPayout
+  // (mode="AUTO") for every non-house seller whose unsettled netPayable is at least the min amount,
+  // instead of requiring the owner to tap "Pay out" per seller. Off by default (manual payout, as before).
+  autoSellerPayoutEnabled    Boolean  @default(false)
+  autoSellerPayoutMinAmount  Int      @default(500)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 }
@@ -1419,6 +1425,22 @@ model SellerPayout {
   subOrders   SubOrder[]
 
   @@index([sellerId])
+}
+
+// A delivery agent's self-reported cash handover to the store (COD collected during their shift).
+// Same trust level as the rest of COD in this app — no money physically moves through the backend,
+// this just timestamps "I handed over ₹X" so the running cash-summary total resets instead of growing
+// unbounded across days. Mirrors SellerPayout's manual-ledger pattern.
+model CashSettlement {
+  id            String   @id @default(cuid())
+  deliveryBoyId String
+  deliveryBoy   User     @relation(fields: [deliveryBoyId], references: [id])
+  amount        Decimal  @db.Decimal(12, 2)
+  orderCount    Int      @default(0)
+  note          String?
+  settledAt     DateTime @default(now())
+
+  @@index([deliveryBoyId])
 }
 
 // ─── Existing billing models (unchanged) ─────────────────────────────

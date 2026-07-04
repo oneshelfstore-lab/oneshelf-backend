@@ -15,7 +15,7 @@ import { rollScratchReward, getScratchForCelebration, revealScratchReward } from
 import { rollFreeSample, getFreeSampleReveal } from "../services/freeSample.js";
 import { getNextOrderNumber } from "../services/orderNumbering.js";
 import { createRazorpayOrder, verifyPaymentSignature, isRazorpayConfigured, refundPayment } from "../services/razorpay.js";
-import { notifyNewOrder, notifyOrderStatusChange } from "../services/fcmNotifier.js";
+import { notifyNewOrder, notifyOrderStatusChange, notifySubOrderNew } from "../services/fcmNotifier.js";
 import { generateOrderInvoice, syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { generateInvoicePdf } from "../services/pdfGenerator.js";
 import { refundWalletOnCancel } from "../services/referralRewards.js";
@@ -126,6 +126,10 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     // Resolve the house seller once — the fallback owner for any item whose product has no
     // explicit seller (pre-backfill products). Used to group items into per-seller sub-orders.
     const houseSeller = await prisma.seller.findFirst({ where: { isHouse: true }, select: { id: true } });
+
+    // Populated inside the transaction (one entry per non-house seller with items on this order),
+    // fired AFTER commit so a notify hiccup can never roll back the order.
+    const sellerNotifications: { ownerUserId: string; itemCount: number; subtotal: number }[] = [];
 
     // Transactional: decrement stock + create order + clear cart
     const order = await prisma.$transaction(async (tx) => {
@@ -318,7 +322,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       if (itemsBySeller.size > 0) {
         const sellers = await tx.seller.findMany({
           where: { id: { in: [...itemsBySeller.keys()] } },
-          select: { id: true, commissionPct: true, isHouse: true },
+          select: { id: true, commissionPct: true, isHouse: true, ownerUserId: true },
         });
         const sellerById = new Map(sellers.map((s) => [s.id, s]));
         for (const [sid, sellerItems] of itemsBySeller) {
@@ -358,6 +362,9 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
               where: { id: sid },
               data: { outstandingBalance: { increment: netPayable } },
             });
+            if (seller.ownerUserId) {
+              sellerNotifications.push({ ownerUserId: seller.ownerUserId, itemCount: sellerItems.length, subtotal });
+            }
           }
         }
       }
@@ -407,6 +414,10 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
 
     // FCM notification to owner (fire and forget)
     notifyNewOrder(order).catch(() => {});
+    // FCM notification to each non-house seller whose slice is in this order (fire and forget).
+    for (const sn of sellerNotifications) {
+      notifySubOrderNew(sn.ownerUserId, { orderNumber: order.orderNumber, itemCount: sn.itemCount, subtotal: sn.subtotal }).catch(() => {});
+    }
 
     res.status(201).json({
       success: true,

@@ -88,6 +88,31 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
+// Cash this agent has collected but not yet handed over/settled — since their LAST settlement (or
+// all-time if they've never settled). This is the "still owed to the store" figure, independent of
+// the calendar-day "today's stats" numbers below.
+async function computeUnsettledCash(userId: string) {
+  const lastSettlement = await prisma.cashSettlement.findFirst({
+    where: { deliveryBoyId: userId },
+    orderBy: { settledAt: "desc" },
+    select: { settledAt: true },
+  });
+  const orders = await prisma.order.findMany({
+    where: {
+      deliveryBoyId: userId,
+      paymentMethod: "COD",
+      status: "DELIVERED",
+      ...(lastSettlement ? { deliveredAt: { gt: lastSettlement.settledAt } } : {}),
+    },
+    select: { totalAmount: true, amountPaid: true },
+  });
+  const amount = orders.reduce(
+    (sum, o) => sum + Math.max(0, Number(o.totalAmount) - Number(o.amountPaid)),
+    0,
+  );
+  return { amount, orderCount: orders.length, lastSettledAt: lastSettlement?.settledAt ?? null };
+}
+
 // ─── GET /api/app/delivery/cash-summary — today's COD cash collected ─
 // Declared BEFORE "/:id" so Express doesn't match "cash-summary" as an order id.
 router.get("/cash-summary", async (req: FirebaseAuthRequest, res: Response) => {
@@ -116,9 +141,39 @@ router.get("/cash-summary", async (req: FirebaseAuthRequest, res: Response) => {
       (sum, o) => sum + Math.max(0, Number(o.totalAmount) - Number(o.amountPaid)),
       0,
     );
+    // unsettled = the real "still owe the store" figure (may span multiple days if never settled),
+    // distinct from totalCollected which is scoped to just today.
+    const unsettled = await computeUnsettledCash(userId);
     res.json({
       success: true,
-      data: { date: startUtc.toISOString(), orderCount: orders.length, totalCollected },
+      data: {
+        date: startUtc.toISOString(), orderCount: orders.length, totalCollected,
+        unsettledCash: unsettled.amount, unsettledOrderCount: unsettled.orderCount, lastSettledAt: unsettled.lastSettledAt,
+      },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/delivery/cash-settle — agent hands over collected COD cash ─
+// Records the handover (self-reported, same trust level as the rest of COD in this app — no money
+// physically moves through the backend) so the running unsettledCash total resets. Recomputes the
+// amount server-side (never trusts a client-sent figure) so it can't be under-reported.
+router.post("/cash-settle", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const note = typeof req.body?.note === "string" ? req.body.note.slice(0, 300) : null;
+
+    const unsettled = await computeUnsettledCash(userId);
+    if (unsettled.orderCount === 0) throw new ValidationError("Nothing to settle — no unsettled COD cash.");
+
+    const settlement = await prisma.cashSettlement.create({
+      data: { deliveryBoyId: userId, amount: unsettled.amount, orderCount: unsettled.orderCount, note },
+    });
+    res.json({
+      success: true,
+      data: { id: settlement.id, amount: Number(settlement.amount), orderCount: settlement.orderCount, settledAt: settlement.settledAt },
     });
   } catch (e) {
     sendError(res, e);

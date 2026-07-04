@@ -38,6 +38,9 @@ const updateSchema = z.object({
   referralWelcomeAmount: z.number().int().min(0).max(100000).optional(),
   referralMinOrder: z.number().int().min(0).max(100000).optional(),
   referralWelcomeExpiryDays: z.number().int().min(1).max(365).optional(),
+  // Seller payout automation — off by default (manual "Pay out" stays the default flow).
+  autoSellerPayoutEnabled: z.boolean().optional(),
+  autoSellerPayoutMinAmount: z.number().int().min(0).max(100000).optional(),
 });
 
 // GET /api/app/config — public, no auth

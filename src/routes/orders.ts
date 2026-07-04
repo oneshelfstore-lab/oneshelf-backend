@@ -366,15 +366,20 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
             where: { id: { in: sellerItems.map((it) => it.id) } },
             data: { subOrderId: subOrder.id },
           });
-          // The platform doesn't owe its own house store — only accrue for real sellers.
+          // The platform doesn't owe its own house store — only accrue payout for real sellers.
           if (!seller.isHouse) {
             await tx.seller.update({
               where: { id: sid },
               data: { outstandingBalance: { increment: netPayable } },
             });
-            if (seller.ownerUserId) {
-              sellerNotifications.push({ ownerUserId: seller.ownerUserId, itemCount: sellerItems.length, subtotal });
-            }
+          }
+          // Notify whoever logs in to pack this slice — house co-manager included. The house
+          // seller's ownerUserId points to the co-manager's own login (same mechanism as a
+          // third-party seller), and this is a direct per-device-token push, not the owner_orders
+          // topic — so the co-manager's device (which never subscribes to owner_orders, only the
+          // literal StoreConfig.ownerUid device does) actually needs this to hear about new orders.
+          if (seller.ownerUserId) {
+            sellerNotifications.push({ ownerUserId: seller.ownerUserId, itemCount: sellerItems.length, subtotal });
           }
         }
       }

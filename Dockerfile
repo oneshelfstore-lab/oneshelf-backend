@@ -12,10 +12,8 @@ ENV CHROME_PATH=/usr/bin/chromium
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --omit=dev
-
 COPY prisma ./prisma
-RUN npx prisma generate
+RUN npm ci --omit=dev
 
 COPY . .
 RUN npm run build 2>/dev/null || true

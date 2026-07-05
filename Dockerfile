@@ -16,7 +16,7 @@ COPY prisma ./prisma
 RUN npm ci --omit=dev
 
 COPY . .
-RUN npm run build 2>/dev/null || true
+RUN npm run build
 
 EXPOSE 4000
-CMD ["node", "--import", "tsx", "src/index.ts"]
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/index.js"]

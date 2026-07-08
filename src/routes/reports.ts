@@ -13,6 +13,7 @@ import {
   getTdsRegister,
   getDailySummary,
   salesRegisterToExcel,
+  type InvoiceScope,
 } from "../services/reports.js";
 
 const router = Router();
@@ -47,6 +48,16 @@ function parseDateRange(from: string, to: string) {
   return { from: f, to: t };
 }
 
+// Optional invoice scope from query params. Defaults to the store's own books (house), which is what
+// the owner/dashboard files. `?sellerId=<id>` → that external seller's supplies; `?scope=all` →
+// everything (reconciliation). See COMPLIANCE_PLAN.md P0-2.
+function parseScope(q: Request["query"]): InvoiceScope {
+  const sellerId = typeof q.sellerId === "string" ? q.sellerId.trim() : "";
+  if (sellerId) return { kind: "seller", sellerId };
+  if (q.scope === "all") return { kind: "all" };
+  return { kind: "house" };
+}
+
 // ─── 1. Sales Register ──────────────────────────────────────────────
 
 router.get("/sales-register", async (req: Request, res: Response) => {
@@ -55,7 +66,7 @@ router.get("/sales-register", async (req: Request, res: Response) => {
     const range = parseDateRange(from, to);
     const format = (req.query.format as string) || "json";
 
-    const data = await getSalesRegister(range.from, range.to);
+    const data = await getSalesRegister(range.from, range.to, parseScope(req.query));
 
     if (format === "excel") {
       const buf = await salesRegisterToExcel(data);
@@ -88,7 +99,7 @@ router.get("/purchase-register", async (req: Request, res: Response) => {
 router.get("/gstr1-summary", async (req: Request, res: Response) => {
   try {
     const { period } = periodSchema.parse(req.query);
-    const data = await getGstr1Summary(period);
+    const data = await getGstr1Summary(period, parseScope(req.query));
     res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);
@@ -100,7 +111,7 @@ router.get("/gstr1-summary", async (req: Request, res: Response) => {
 router.get("/gstr3b-summary", async (req: Request, res: Response) => {
   try {
     const { period } = periodSchema.parse(req.query);
-    const data = await getGstr3bSummary(period);
+    const data = await getGstr3bSummary(period, parseScope(req.query));
     res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);
@@ -112,7 +123,7 @@ router.get("/gstr3b-summary", async (req: Request, res: Response) => {
 router.get("/gstr1-json", async (req: Request, res: Response) => {
   try {
     const { period } = periodSchema.parse(req.query);
-    const data = await getGstr1Json(period);
+    const data = await getGstr1Json(period, parseScope(req.query));
 
     const download = req.query.download === "true";
     if (download) {
@@ -133,7 +144,7 @@ router.get("/hsn-summary", async (req: Request, res: Response) => {
   try {
     const { from, to } = dateRangeSchema.parse(req.query);
     const range = parseDateRange(from, to);
-    const data = await getHsnSummary(range.from, range.to);
+    const data = await getHsnSummary(range.from, range.to, parseScope(req.query));
     res.json({ success: true, data, count: data.length });
   } catch (e) {
     sendError(res, e);
@@ -179,7 +190,7 @@ router.get("/tds-register", async (req: Request, res: Response) => {
 router.get("/daily-summary", async (req: Request, res: Response) => {
   try {
     const { date } = dateSchema.parse(req.query);
-    const data = await getDailySummary(date);
+    const data = await getDailySummary(date, parseScope(req.query));
     res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);

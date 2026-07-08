@@ -51,6 +51,10 @@ const updateSchema = z.object({
   // Seller payout automation — off by default (manual "Pay out" stays the default flow).
   autoSellerPayoutEnabled: z.boolean().optional(),
   autoSellerPayoutMinAmount: z.number().int().min(0).max(100000).optional(),
+  // Delivery-partner onboarding Phase 2 (SELLER_DELIVERY_ONBOARDING_PLAN.md) — off by default
+  // (optional at this scale). When on, deliveryOnboarding.ts's submit handler requires a
+  // policeVerificationDocUrl before a rider can be submitted for owner review.
+  requirePoliceVerificationForDelivery: z.boolean().optional(),
 });
 
 // GET /api/app/config — public, no auth

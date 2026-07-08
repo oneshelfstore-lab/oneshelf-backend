@@ -1,6 +1,7 @@
 import prisma from "../lib/prisma.js";
 import { refundWalletOnCancel } from "./referralRewards.js";
 import { reconcileOrderPayment } from "./paymentReconciliation.js";
+import { restoreConsumption } from "./stockBatches.js";
 
 // Online/UPI orders decrement stock at placement (to hold it during payment). If the
 // customer never completes payment (abandons the Razorpay sheet, app crash), that stock
@@ -51,13 +52,7 @@ export async function expireStaleUnpaidOrders(): Promise<number> {
 
         for (const item of order.items) {
           if (!item.variantId) continue;
-          const restore = item.isLoose && item.stepSize
-            ? Number(item.quantity) * Number(item.stepSize)
-            : Number(item.quantity);
-          await tx.productVariant.update({
-            where: { id: item.variantId },
-            data: { stock: { increment: restore } },
-          });
+          await restoreConsumption(tx, { orderItemId: item.id });
         }
 
         await tx.order.update({

@@ -1,5 +1,6 @@
 import PDFDocument from "pdfkit";
 import prisma from "../lib/prisma.js";
+import { stateNameFromCode, stateCodeFromGstin } from "../lib/stateCodes.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -419,31 +420,39 @@ export async function generateInvoicePdf(invoiceId: string): Promise<Buffer> {
 
   if (!invoice) throw new Error(`Invoice not found: ${invoiceId}`);
 
-  // Fetch company info (the platform/house store — the default supplier).
-  const company = await prisma.company.findFirst();
-
   // Phase 6: a marketplace invoice snapshots the EXTERNAL seller as the supplier so the document
-  // is issued under their GSTIN. When those fields are set they OVERRIDE the store identity; an
-  // all-null snapshot (house seller / legacy invoice) falls back to the store Company, unchanged.
+  // is issued under their GSTIN. When those fields are set they OVERRIDE the store identity.
   const isSellerIssued = !!invoice.supplierName;
+
+  // For a house invoice, prefer its OWN Company snapshot (frozen at creation time — see
+  // Invoice.houseCompanySnapshot) over the LIVE Company row, so editing GSTIN/address/PAN in
+  // Settings later can never retroactively change an already-issued invoice's PDF. Only an invoice
+  // created before this field existed (houseCompanySnapshot null) falls back to live Company —
+  // exactly the pre-existing behaviour for those older rows.
+  const snapshot = invoice.houseCompanySnapshot as {
+    legalName?: string; tradeName?: string; gstin?: string; pan?: string;
+    address?: unknown; phone?: string; email?: string;
+  } | null;
+  const company = isSellerIssued || snapshot ? null : await prisma.company.findFirst();
+
   const companyName = isSellerIssued
     ? invoice.supplierName!
-    : (company?.tradeName ?? company?.legalName ?? "Oneshelf Store");
+    : (snapshot?.tradeName ?? snapshot?.legalName ?? company?.tradeName ?? company?.legalName ?? "Oneshelf Store");
   const companyAddress = isSellerIssued
     ? (invoice.supplierAddress ?? "Address not configured")
-    : company?.address
-      ? typeof company.address === "string"
-        ? company.address
-        : JSON.stringify(company.address)
+    : (snapshot?.address ?? company?.address)
+      ? typeof (snapshot?.address ?? company?.address) === "string"
+        ? ((snapshot?.address ?? company?.address) as string)
+        : JSON.stringify(snapshot?.address ?? company?.address)
       : "Address not configured";
   const companyGstin = isSellerIssued
     ? (invoice.supplierGstin ?? "Unregistered")
-    : (company?.gstin ?? "09XXXXXXXXXXX");
+    : (snapshot?.gstin ?? company?.gstin ?? "09XXXXXXXXXXX");
   const companyPan = isSellerIssued
     ? (invoice.supplierPan ?? "")
-    : (company?.pan ?? "XXXXXXXXXX");
-  const companyPhone = isSellerIssued ? (invoice.supplierPhone ?? "") : (company?.phone ?? "");
-  const companyEmail = isSellerIssued ? "" : (company?.email ?? "");
+    : (snapshot?.pan ?? company?.pan ?? "XXXXXXXXXX");
+  const companyPhone = isSellerIssued ? (invoice.supplierPhone ?? "") : (snapshot?.phone ?? company?.phone ?? "");
+  const companyEmail = isSellerIssued ? "" : (snapshot?.email ?? company?.email ?? "");
 
   // Build line items
   const lineItems = invoice.lineItems.map((li, idx) => ({
@@ -504,6 +513,12 @@ export async function generateInvoicePdf(invoiceId: string): Promise<Buffer> {
     DEBIT_NOTE: "Debit Note",
   };
 
+  // A registered customer's state comes from their GSTIN; an unregistered (B2C) customer is billed at
+  // the place of supply (intra-state today), so mirror the invoice's snapshotted place-of-supply code.
+  const customerStateCode = invoice.customerGstin
+    ? stateCodeFromGstin(invoice.customerGstin)
+    : invoice.placeOfSupplyCode;
+
   const data: InvoiceData = {
     companyName,
     companyAddress,
@@ -511,8 +526,8 @@ export async function generateInvoicePdf(invoiceId: string): Promise<Buffer> {
     companyPan,
     companyPhone,
     companyEmail,
-    companyState: "Uttar Pradesh",
-    companyStateCode: "09",
+    companyState: stateNameFromCode(invoice.supplierStateCode),
+    companyStateCode: invoice.supplierStateCode,
 
     invoiceTitle: titleMap[invoice.invoiceType] ?? "Tax Invoice",
     invoiceNumber: invoice.invoiceNumber,
@@ -521,10 +536,11 @@ export async function generateInvoicePdf(invoiceId: string): Promise<Buffer> {
     customerName: invoice.customerName,
     customerAddress,
     customerGstin: invoice.customerGstin ?? "",
-    customerState: "Uttar Pradesh",
-    customerStateCode: "09",
+    // Registered customer → their own state; unregistered (B2C) → the place of supply (intra-state).
+    customerState: stateNameFromCode(customerStateCode),
+    customerStateCode: customerStateCode,
 
-    placeOfSupply: "Uttar Pradesh (09)",
+    placeOfSupply: `${stateNameFromCode(invoice.placeOfSupplyCode)} (${invoice.placeOfSupplyCode})`,
     isReverseCharge: false,
 
     lineItems,

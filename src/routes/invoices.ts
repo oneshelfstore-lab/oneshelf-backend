@@ -6,10 +6,13 @@ import {
   calculateLineItemTax,
   calculateInvoiceTotals,
   convertAmountToWords,
+  CURRENT_TAX_RULE_VERSION,
   type LineItemTaxResult,
 } from "../services/taxEngine.js";
 import { getNextInvoiceNumber } from "../services/invoiceNumbering.js";
 import { generateInvoicePdf } from "../services/pdfGenerator.js";
+import { resolveStoreState, stateCodeFromGstin } from "../lib/stateCodes.js";
+import { consumeFifo, recordConsumption } from "../services/stockBatches.js";
 import type { AuthRequest } from "../middleware/auth.js";
 
 const router = Router();
@@ -111,6 +114,12 @@ router.post("/", async (req: Request, res: Response) => {
       throw new NotFoundError("Customer", customerId);
     }
 
+    // Store-issued invoice → supplier state = store's own (from Company GSTIN). Inter-state when the
+    // customer's GSTIN state differs; B2C (no GSTIN) is intra-state (P0-1/P0-3).
+    const storeStateCode = (await resolveStoreState()).code;
+    const customerStateCode = customer.gstin ? stateCodeFromGstin(customer.gstin) : storeStateCode;
+    const isInterState = customerStateCode !== storeStateCode;
+
     // 2. Validate products — support both variantId (unified catalog) and productId (legacy)
     interface ResolvedLineItem {
       input: (typeof input.lineItems)[number];
@@ -181,6 +190,7 @@ router.post("/", async (req: Request, res: Response) => {
         gstRate,
         cessRate,
         isTaxInclusive,
+        isInterState,
       });
 
       calculatedLines.push({
@@ -236,14 +246,15 @@ router.post("/", async (req: Request, res: Response) => {
           billingAddress: customer.billingAddress ?? undefined,
           shippingAddress: customer.shippingAddress ?? undefined,
 
-          supplierStateCode: "09",
-          placeOfSupplyCode: "09",
-          isInterState: false,
+          supplierStateCode: storeStateCode,
+          placeOfSupplyCode: customerStateCode,
+          isInterState: isInterState,
+          taxRuleVersion: CURRENT_TAX_RULE_VERSION,
 
           subtotal: totals.subtotal,
           totalCgst: totals.totalCgst,
           totalSgst: totals.totalSgst,
-          totalIgst: 0,
+          totalIgst: totals.totalIgst,
           totalCess: totals.totalCess,
           totalDiscount: totals.totalDiscount,
           roundOff: totals.roundOff,
@@ -276,8 +287,8 @@ router.post("/", async (req: Request, res: Response) => {
               cgstAmount: cl.tax.cgstAmount,
               sgstRate: cl.tax.sgstRate,
               sgstAmount: cl.tax.sgstAmount,
-              igstRate: 0,
-              igstAmount: 0,
+              igstRate: cl.tax.igstRate,
+              igstAmount: cl.tax.igstAmount,
               cessRate: cl.tax.cessRate,
               cessAmount: cl.tax.cessAmount,
               totalAmount: cl.tax.totalAmount,
@@ -303,13 +314,16 @@ router.post("/", async (req: Request, res: Response) => {
         });
       }
 
-      // 11. Decrement stock — unified ProductVariant or legacy Product
-      for (const cl of calculatedLines) {
+      // 11. Consume stock — unified ProductVariant draws FIFO batches (recorded against the real
+      // InvoiceLineItem id, matched by lineNumber since that's the one deterministic correlation
+      // key regardless of Prisma's nested-create return order); legacy Product keeps its flat
+      // currentStock decrement (that table predates and sits outside the batch system entirely).
+      for (let idx = 0; idx < calculatedLines.length; idx++) {
+        const cl = calculatedLines[idx];
         if (cl.variantId) {
-          await tx.productVariant.update({
-            where: { id: cl.variantId },
-            data: { stock: { decrement: cl.input.quantity } },
-          });
+          const consumeResult = await consumeFifo(tx, cl.variantId, cl.input.quantity);
+          const lineItem = inv.lineItems.find((li) => li.lineNumber === idx + 1);
+          if (lineItem) await recordConsumption(tx, { invoiceLineItemId: lineItem.id }, consumeResult.consumed);
         } else if (cl.legacyProductId && cl.trackInventory) {
           await tx.product.update({
             where: { id: cl.legacyProductId },
@@ -460,6 +474,15 @@ router.post("/:id/cancel", async (req: Request, res: Response) => {
       );
     }
 
+    // Once an invoice is in a FILED GSTR-1 it cannot be un-issued — GST requires a credit note (P0-4).
+    if (invoice.gstr1Filed) {
+      throw new AppError(
+        400,
+        "ALREADY_FILED",
+        "This invoice is already reported in a filed GSTR-1 and cannot be cancelled. Create a credit note instead.",
+      );
+    }
+
     if (invoice.status !== "DRAFT" && invoice.status !== "APPROVED" && invoice.status !== "SENT") {
       throw new AppError(
         400,
@@ -563,6 +586,7 @@ router.post("/credit-note", async (req: Request, res: Response) => {
         gstRate: Number(origLine.gstRate),
         cessRate: Number(origLine.cessRate),
         isTaxInclusive: false,
+        isInterState: originalInvoice.isInterState, // credit note mirrors the original's CGST/SGST vs IGST
       });
 
       cnLines.push({
@@ -595,14 +619,16 @@ router.post("/credit-note", async (req: Request, res: Response) => {
           billingAddress: originalInvoice.billingAddress ?? undefined,
           shippingAddress: originalInvoice.shippingAddress ?? undefined,
 
-          supplierStateCode: "09",
-          placeOfSupplyCode: "09",
-          isInterState: false,
+          // A credit note mirrors the state / place-of-supply of the invoice it reverses.
+          supplierStateCode: originalInvoice.supplierStateCode,
+          placeOfSupplyCode: originalInvoice.placeOfSupplyCode,
+          isInterState: originalInvoice.isInterState,
+          taxRuleVersion: CURRENT_TAX_RULE_VERSION,
 
           subtotal: totals.subtotal,
           totalCgst: totals.totalCgst,
           totalSgst: totals.totalSgst,
-          totalIgst: 0,
+          totalIgst: totals.totalIgst,
           totalCess: totals.totalCess,
           totalDiscount: totals.totalDiscount,
           roundOff: totals.roundOff,
@@ -636,8 +662,8 @@ router.post("/credit-note", async (req: Request, res: Response) => {
               cgstAmount: cl.tax.cgstAmount,
               sgstRate: cl.tax.sgstRate,
               sgstAmount: cl.tax.sgstAmount,
-              igstRate: 0,
-              igstAmount: 0,
+              igstRate: cl.tax.igstRate,
+              igstAmount: cl.tax.igstAmount,
               cessRate: cl.tax.cessRate,
               cessAmount: cl.tax.cessAmount,
               totalAmount: cl.tax.totalAmount,

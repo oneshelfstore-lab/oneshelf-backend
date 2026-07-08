@@ -9,6 +9,7 @@ import {
 } from "../middleware/firebaseAuth.js";
 import { formatVariantForApp, fromAppFormat, toAppFormat, assertVariantFloors } from "../utils/looseUnitConverter.js";
 import { memoCache } from "../lib/httpCache.js";
+import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -38,6 +39,8 @@ function formatProductForApp(product: any) {
     hsnCode: product.hsnCode,
     gstRate: product.gstRate != null ? Number(product.gstRate) : null,
     isPackaged: product.isPackaged,
+    isImported: product.isImported ?? false,
+    countryOfOrigin: product.countryOfOrigin ?? null,
     imageUrls: product.imageUrls,
     searchKeywords: product.searchKeywords,
     isActive: product.isActive,
@@ -132,6 +135,9 @@ const productCreateSchema = z.object({
   featuredIn99Store: z.boolean().default(false),
   isSubscribable: z.boolean().default(false),
   isBuyOneGetOne: z.boolean().default(false),
+  // Legal Metrology country-of-origin filter (Onboarding Phase 3).
+  isImported: z.boolean().default(false),
+  countryOfOrigin: z.string().max(80).optional().nullable(),
   imageUrls: z.array(z.string()).default([]),
   searchKeywords: z.array(z.string()).default([]),
   isActive: z.boolean().default(true),
@@ -180,6 +186,10 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       );
       if (floorErr) throw new ValidationError(floorErr);
     }
+    // Initial stock is seeded as each new variant's first StockBatch (below, after creation) rather
+    // than written directly onto the row — receiveBatch is the ONLY place ProductVariant.stock/
+    // costPrice should be written. The variant is created with stock=0 here; SKU is unique within
+    // this creation (enforced above), so it's a safe correlation key back to the created row.
     const convertedVariants = variants.map(v => {
       const converted = fromAppFormat(
         { mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: v.costPrice, saleFloor: v.saleFloor, stock: v.stock, bulkPrice: v.bulkPrice, packageSize: v.packageSize },
@@ -192,9 +202,10 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         packageUnit: v.packageUnit,
         mrp: converted.mrp,
         sellingPrice: converted.sellingPrice,
-        costPrice: converted.costPrice,
         saleFloor: converted.saleFloor,
-        stock: converted.stock,
+        stock: 0,
+        initialStock: converted.stock,
+        initialCost: converted.costPrice ?? 0,
         lowStockThreshold: v.lowStockThreshold,
         bulkMinQty: v.bulkMinQty,
         bulkPrice: converted.bulkPrice,
@@ -202,17 +213,38 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       };
     });
 
-    const product = await prisma.catalogProduct.create({
-      data: {
-        ...productData,
-        handle,
-        categoryId: cat.id,
-        variants: { create: convertedVariants },
-      },
-      include: {
-        variants: { orderBy: { packageSize: "asc" } },
-        category: { select: { slug: true, name: true } },
-      },
+    const product = await prisma.$transaction(async (tx) => {
+      const created = await tx.catalogProduct.create({
+        data: {
+          ...productData,
+          handle,
+          categoryId: cat.id,
+          variants: {
+            create: convertedVariants.map(({ initialStock, initialCost, ...rest }) => rest),
+          },
+        },
+        include: {
+          variants: { orderBy: { packageSize: "asc" } },
+          category: { select: { slug: true, name: true } },
+        },
+      });
+
+      const bySku = new Map(created.variants.map((v) => [v.sku, v]));
+      for (const cv of convertedVariants) {
+        if (cv.initialStock > 0) {
+          const row = bySku.get(cv.sku);
+          if (row) await receiveBatch(tx, row.id, cv.initialStock, cv.initialCost, "Initial stock");
+        }
+      }
+
+      // Re-read so the response reflects the seeded stock/costPrice rollups.
+      return tx.catalogProduct.findUnique({
+        where: { id: created.id },
+        include: {
+          variants: { orderBy: { packageSize: "asc" } },
+          category: { select: { slug: true, name: true } },
+        },
+      });
     });
 
     // A new product can immediately show up as a "New arrival" / shift category revenue — the
@@ -279,33 +311,38 @@ router.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
             isLoose
           );
           if (v.id) {
-            const { id: vid, ...rest } = v;
+            // Existing variant: stock/costPrice are batch rollups — route the edit through
+            // applyStockEdit (restock at a possibly-new cost / shrinkage correction / cost-only fix)
+            // instead of overwriting them directly, which used to silently blend a different-cost
+            // restock into the same row with no history.
+            const { id: vid, stock: _stock, costPrice: _costPrice, ...rest } = v as any;
             await tx.productVariant.update({
               where: { id: vid },
               data: {
                 ...rest,
                 mrp: converted.mrp,
                 sellingPrice: converted.sellingPrice,
-                costPrice: converted.costPrice,
                 saleFloor: converted.saleFloor,
-                stock: converted.stock,
                 bulkPrice: converted.bulkPrice,
               },
             });
+            await applyStockEdit(tx, vid, converted.stock, converted.costPrice, "Edited via product editor");
           } else {
-            const { id: _unused, ...rest } = v;
-            await tx.productVariant.create({
+            const { id: _unused, stock: _stock, costPrice: _costPrice, ...rest } = v as any;
+            const created = await tx.productVariant.create({
               data: {
                 ...rest,
                 mrp: converted.mrp,
                 sellingPrice: converted.sellingPrice,
-                costPrice: converted.costPrice,
                 saleFloor: converted.saleFloor,
-                stock: converted.stock,
+                stock: 0,
                 bulkPrice: converted.bulkPrice,
                 productId,
               },
             });
+            if (converted.stock > 0) {
+              await receiveBatch(tx, created.id, converted.stock, converted.costPrice ?? 0, "Initial stock");
+            }
           }
         }
       }
@@ -384,10 +421,63 @@ router.patch("/:id/stock", async (req: FirebaseAuthRequest, res: Response) => {
       isLoose
     );
 
-    await prisma.productVariant.update({ where: { id: variantId }, data: { stock: converted.stock } });
+    // Quick stepper — no new cost info, so a stock increase restocks at the variant's own current
+    // weighted-average cost (applyStockEdit's default when newCostPrice is omitted); a decrease is a
+    // shrinkage/miscount correction. A genuinely different cost belongs in the full editor or the
+    // dedicated Restock action, not this quick +/-.
+    await prisma.$transaction((tx) => applyStockEdit(tx, variantId, converted.stock));
     // A stock edit can flip a product in/out of Dead stock or Restock priority.
     memoCache.bust("ownerCatalogHealth");
     res.json({ success: true, message: "Stock updated" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /:id/stock/receive — restock a variant, at whatever cost it actually came in at ──
+//
+// This is the one deliberate place a genuinely different cost enters the system: creates a fresh
+// StockBatch at `unitCost` and adds `qty` onto the variant's stock, instead of overwriting
+// costPrice in place. Distinct from PATCH /:id/stock (the quick +/- stepper, which restocks at the
+// current weighted-average cost) — this dialog is where the owner types the real invoice price.
+
+const receiveStockSchema = z.object({
+  variantId: z.string().min(1),
+  qty: z.number().positive(),
+  unitCost: z.number().min(0),
+  note: z.string().max(200).optional(),
+});
+
+router.post("/:id/stock/receive", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const productId = req.params.id as string;
+    const { variantId, qty, unitCost, note } = receiveStockSchema.parse(req.body);
+
+    const variant = await prisma.productVariant.findFirst({
+      where: { id: variantId, productId },
+      include: { product: { select: { productType: true } } },
+    });
+    if (!variant) throw new NotFoundError("Variant", variantId);
+
+    const isLoose = isLooseType(variant.product.productType);
+    // qty/unitCost arrive in app format (per-increment for loose items) — convert to base-unit,
+    // same as every other write path in this file. mrp/sellingPrice/bulkPrice pass through
+    // unconverted here (unused by the stock/cost conversion) so reuse the variant's real values.
+    const converted = fromAppFormat(
+      {
+        mrp: Number(variant.mrp), sellingPrice: Number(variant.sellingPrice),
+        costPrice: unitCost, stock: qty,
+        bulkPrice: variant.bulkPrice ? Number(variant.bulkPrice) : undefined,
+        packageSize: Number(variant.packageSize),
+      },
+      isLoose,
+    );
+
+    await prisma.$transaction((tx) =>
+      receiveBatch(tx, variantId, converted.stock, converted.costPrice ?? 0, note),
+    );
+    memoCache.bust("ownerCatalogHealth");
+    res.json({ success: true, message: "Stock received" });
   } catch (e) {
     sendError(res, e);
   }

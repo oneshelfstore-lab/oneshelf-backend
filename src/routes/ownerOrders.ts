@@ -12,6 +12,7 @@ import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orde
 import { markSamplePacked } from "../services/freeSample.js";
 import { creditReferrerOnFirstDelivered, refundWalletOnCancel } from "../services/referralRewards.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
+import { restoreConsumption } from "../services/stockBatches.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -160,13 +161,7 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
       await prisma.$transaction(async (tx) => {
         for (const item of order.items) {
           if (!item.variantId) continue;
-          const restoreAmount = item.isLoose && item.stepSize
-            ? item.quantity * Number(item.stepSize)
-            : item.quantity;
-          await tx.productVariant.update({
-            where: { id: item.variantId },
-            data: { stock: { increment: restoreAmount } },
-          });
+          await restoreConsumption(tx, { orderItemId: item.id });
         }
         await tx.order.update({ where: { id: order.id }, data: updateData });
       });

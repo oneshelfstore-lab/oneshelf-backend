@@ -13,14 +13,30 @@ const router = Router();
 router.use(firebaseAuthMiddleware as any);
 router.use(requireAppRole("OWNER") as any);
 
-// GET /api/app/owner/complaints → all complaints + customer name/phone (newest first)
-router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
+// GET /api/app/owner/complaints?page=&limit= → complaints + customer name/phone (newest first),
+// paginated — the inbox grows for as long as the store is in business, so an unbounded findMany
+// here would re-fetch every complaint ever filed on every screen open. Same page/limit/pagination
+// envelope convention as GET /api/app/orders.
+router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const complaints = await prisma.complaint.findMany({
-      orderBy: { createdAt: "desc" },
-      include: { user: { select: { name: true, phone: true } } },
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit as string) || 20));
+
+    const [complaints, total] = await Promise.all([
+      prisma.complaint.findMany({
+        orderBy: { createdAt: "desc" },
+        skip: (page - 1) * limit,
+        take: limit,
+        include: { user: { select: { name: true, phone: true } } },
+      }),
+      prisma.complaint.count(),
+    ]);
+
+    res.json({
+      success: true,
+      data: complaints.map((c) => shapeComplaint(c)),
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     });
-    res.json({ success: true, data: complaints.map((c) => shapeComplaint(c)) });
   } catch (e) {
     sendError(res, e);
   }

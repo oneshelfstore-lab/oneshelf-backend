@@ -1,4 +1,6 @@
 import prisma from "../lib/prisma.js";
+import { consumeFifo } from "./stockBatches.js";
+import { AppError } from "../lib/errors.js";
 
 /**
  * Roll a free sample at order placement. Gated by ALL of:
@@ -49,12 +51,19 @@ export async function rollFreeSample(orderId: string): Promise<void> {
 
   const pick = candidates[Math.floor(Math.random() * candidates.length)]!;
 
-  // Atomic decrement (guard against a race with a real purchase of the last unit).
-  const dec = await prisma.productVariant.updateMany({
-    where: { id: pick.id, stock: { gte: 1 } },
-    data: { stock: { decrement: 1 } },
+  // Atomic FIFO draw of 1 base-unit (guard against a race with a real purchase of the last unit).
+  // No StockBatchConsumption row is recorded — a giveaway has no per-unit sale record (OrderItem) to
+  // attach one to, and this isn't a COGS-tracked sale, just a decrement of what's on the shelf.
+  let drew = true;
+  await prisma.$transaction(async (tx) => {
+    try {
+      await consumeFifo(tx, pick.id, 1);
+    } catch (e) {
+      if (e instanceof AppError && e.code === "INSUFFICIENT_STOCK") { drew = false; return; }
+      throw e;
+    }
   });
-  if (dec.count === 0) return;
+  if (!drew) return;
 
   await prisma.order.update({
     where: { id: orderId },

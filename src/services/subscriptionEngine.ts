@@ -10,6 +10,8 @@ import {
 } from "./fcmNotifier.js";
 import { generateOrderInvoice, generateStatementInvoice, markStatementInvoicePaid } from "./orderInvoice.js";
 import { chargeSubscriptionMandate } from "./razorpay.js";
+import { consumeFifo, recordConsumption, type ConsumeResult } from "./stockBatches.js";
+import { AppError } from "../lib/errors.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Subscriptions engine (milk / newspaper / recurring deliveries).
@@ -378,12 +380,17 @@ async function generateOrderFor(
 
   try {
     createdOrder = await prisma.$transaction(async (tx) => {
-      // Atomic guarded stock decrement (copy of routes/orders.ts:144-156).
-      const dec = await tx.productVariant.updateMany({
-        where: { id: variant.id, isActive: true, stock: { gte: needed } },
-        data: { stock: { decrement: needed } },
-      });
-      if (dec.count === 0) throw new OosSkip();
+      // FIFO-consume the needed base-units (mirrors routes/orders.ts's own consumeFifo call).
+      // consumeFifo throws AppError("INSUFFICIENT_STOCK") when it runs out of batches before
+      // satisfying `needed` — translate that into the existing OosSkip sentinel so the outer
+      // catch's "skip + notify, never a hard error" behavior is unchanged.
+      let consumeResult: ConsumeResult;
+      try {
+        consumeResult = await consumeFifo(tx, variant.id, needed);
+      } catch (e) {
+        if (e instanceof AppError && e.code === "INSUFFICIENT_STOCK") throw new OosSkip();
+        throw e;
+      }
 
       const created = await tx.order.create({
         data: {
@@ -431,12 +438,16 @@ async function generateOrderFor(
                 stepUnit: isLoose ? variant.packageUnit : null,
                 packageUnit: variant.packageUnit,
                 sellerId,
+                costPriceSnapshot: consumeResult.totalQty > 0 ? consumeResult.weightedUnitCost : null,
               },
             ],
           },
         },
-        select: { id: true, orderNumber: true, totalAmount: true, customerId: true },
+        select: { id: true, orderNumber: true, totalAmount: true, customerId: true, items: { select: { id: true } } },
       });
+
+      // Single item, single variant per subscription delivery — no ambiguity to resolve.
+      if (created.items[0]) await recordConsumption(tx, { orderItemId: created.items[0].id }, consumeResult.consumed);
 
       // Prepaid-wallet: guarded debit + ledger row, atomic with the order. Insufficient balance →
       // WalletSkip rolls back the stock decrement + order (we never deliver unpaid). @@unique([orderId,

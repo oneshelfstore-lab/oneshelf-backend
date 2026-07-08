@@ -5,6 +5,7 @@ import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib
 import { requireRole } from "../middleware/auth.js";
 import { formatVariantForApp } from "../utils/looseUnitConverter.js";
 import { cacheControl, memoCache } from "../lib/httpCache.js";
+import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
 
 // Product reads carry live stock (decremented on every order), so they are NOT server-memoized —
 // they get a SHORT client Cache-Control window only, and checkout re-validates stock authoritatively.
@@ -52,15 +53,29 @@ export function formatProductForApp(product: any) {
     isActive: product.isActive,
     // Marketplace (Phase 6): who sells this. Null for legacy products with no seller link; the
     // app shows "Sold by <name>" only for non-house sellers (the house store sells directly).
+    // grievanceOfficer* (Phase 2, SELLER_DELIVERY_ONBOARDING_PLAN.md): the Rule 6 (Consumer
+    // Protection E-Commerce Rules 2020) disclosure, made real on the listing itself.
     seller: product.seller
-      ? { id: product.seller.id, name: product.seller.name, isHouse: product.seller.isHouse }
+      ? {
+          id: product.seller.id,
+          name: product.seller.name,
+          isHouse: product.seller.isHouse,
+          grievanceOfficerName: product.seller.grievanceOfficerName ?? null,
+          grievanceOfficerPhone: product.seller.grievanceOfficerPhone ?? null,
+        }
       : null,
+    // Legal Metrology country-of-origin filter (eff. July 1 2026, Phase 3 — plan §1b). Dormant for a
+    // domestic-staples catalog; the flag exists so this isn't a scramble once/if an imported SKU is listed.
+    isImported: product.isImported ?? false,
+    countryOfOrigin: product.countryOfOrigin ?? null,
     variants: product.variants?.map((v: any) => formatVariantForApp(v, isLoose)) ?? [],
   };
 }
 
 // Reusable include for the seller chip on customer-facing product reads.
-const SELLER_SELECT = { select: { id: true, name: true, isHouse: true } } as const;
+const SELLER_SELECT = {
+  select: { id: true, name: true, isHouse: true, grievanceOfficerName: true, grievanceOfficerPhone: true },
+} as const;
 
 // ═══════════════════════════════════════════════════════════════════════
 // Public router (no auth, mounted at /api/app/products)
@@ -105,7 +120,7 @@ publicCatalogRouter.get("/", cacheControl(CATALOG_LIST_TTL), async (req: Request
           category: { select: { slug: true, name: true } },
           seller: SELLER_SELECT,
         },
-        orderBy: { name: "asc" },
+        orderBy: [{ name: "asc" }, { id: "asc" }],
         skip: (page - 1) * limit,
         take: limit,
       }),
@@ -577,7 +592,7 @@ adminCatalogRouter.get("/", async (req: Request, res: Response) => {
           variants: { orderBy: { packageSize: "asc" } },
           category: { select: { slug: true, name: true } },
         },
-        orderBy: { name: "asc" },
+        orderBy: [{ name: "asc" }, { id: "asc" }],
         skip: (page - 1) * limit,
         take: limit,
       }),
@@ -616,9 +631,26 @@ adminCatalogRouter.post("/", requireRole("OWNER") as any, async (req: Request, r
       if (v.bulkPrice && v.bulkMinQty > 0 && v.bulkPrice >= v.sellingPrice) throw new ValidationError(`Variant ${v.sku}: bulkPrice must be < sellingPrice`);
     }
 
-    const product = await prisma.catalogProduct.create({
-      data: { ...productData, variants: { create: variants } },
-      include: { variants: { orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
+    // Initial stock/cost are seeded as each variant's first StockBatch (below) rather than written
+    // directly — receiveBatch is the ONLY place ProductVariant.stock/costPrice should be written.
+    // This router isn't wired into the app today (see CLAUDE.md), but it shares the live schema, so
+    // it must not be able to silently corrupt the batch ledger if ever re-enabled.
+    const product = await prisma.$transaction(async (tx) => {
+      const created = await tx.catalogProduct.create({
+        data: { ...productData, variants: { create: variants.map((v) => ({ ...v, stock: 0, costPrice: null })) } },
+        include: { variants: { orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
+      });
+      const bySku = new Map(created.variants.map((v) => [v.sku, v]));
+      for (const v of variants) {
+        if (v.stock > 0) {
+          const row = bySku.get(v.sku);
+          if (row) await receiveBatch(tx, row.id, v.stock, v.costPrice ?? 0, "Initial stock");
+        }
+      }
+      return tx.catalogProduct.findUnique({
+        where: { id: created.id },
+        include: { variants: { orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
+      });
     });
 
     res.status(201).json({ success: true, data: product });
@@ -666,11 +698,15 @@ adminCatalogRouter.put("/:id", requireRole("OWNER") as any, async (req: Request,
         for (const v of variantUpdates) {
           if (v.sellingPrice > v.mrp) throw new ValidationError(`Variant ${v.sku}: sellingPrice cannot exceed MRP`);
           if (v.id) {
-            const { id: vid, ...data } = v;
+            // stock/costPrice are batch rollups — route through applyStockEdit instead of a direct
+            // overwrite (was silently blending a different-cost restock with no history).
+            const { id: vid, stock: _stock, costPrice: _costPrice, ...data } = v as any;
             await tx.productVariant.update({ where: { id: vid }, data });
+            await applyStockEdit(tx, vid, v.stock, v.costPrice, "Edited via product editor");
           } else {
-            const { id: _unused, ...data } = v;
-            await tx.productVariant.create({ data: { ...data, productId: req.params.id! } });
+            const { id: _unused, stock: _stock, costPrice: _costPrice, ...data } = v as any;
+            const created = await tx.productVariant.create({ data: { ...data, stock: 0, productId: req.params.id! } });
+            if (v.stock > 0) await receiveBatch(tx, created.id, v.stock, v.costPrice ?? 0, "Initial stock");
           }
         }
       }
@@ -844,16 +880,19 @@ adminCatalogRouter.post("/import-csv", requireRole("OWNER") as any, async (req: 
         productsCreated++;
 
         for (const r of groupRows) {
-          await tx.productVariant.create({
+          // Always a brand-new variant row (upsert above only touches the parent Product) — initial
+          // stock is seeded as its first StockBatch rather than written directly, same as every
+          // other creation path in this codebase now that the batch ledger exists.
+          const createdVariant = await tx.productVariant.create({
             data: {
               productId: product.id, sku: r.variant_sku, barcode: r.barcode,
               packageSize: r.package_size, packageUnit: r.package_unit,
-              mrp: r.mrp, sellingPrice: r.selling_price, costPrice: r.cost_price,
-              stock: r.stock,
+              mrp: r.mrp, sellingPrice: r.selling_price, stock: 0,
               lowStockThreshold: r.low_stock_threshold, bulkMinQty: r.bulk_min_qty,
               bulkPrice: r.bulk_price, gstRateOverride: r.gst_rate_override, isActive: r.variant_active,
             },
           });
+          if (r.stock > 0) await receiveBatch(tx, createdVariant.id, r.stock, r.cost_price ?? 0, "CSV import");
           variantsCreated++;
         }
       }

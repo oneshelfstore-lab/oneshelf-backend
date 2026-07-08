@@ -2,8 +2,19 @@ import prisma from "../lib/prisma.js";
 
 // ─── Constants ───────────────────────────────────────────────────────
 
-/** Uttar Pradesh state code — all our sales are intra-state */
+/**
+ * @deprecated Do NOT hardcode the store's state. The supplier / place-of-supply state code is derived
+ * from the Company GSTIN — see `lib/stateCodes.ts` (`resolveStoreState` / `stateCodeFromGstin`). Kept
+ * only as the legacy fallback default; no longer read anywhere (P0-1).
+ */
 export const STATE_CODE = "09";
+
+/**
+ * Identifies the GST rate ruleset used to compute an invoice; stamped onto `Invoice.taxRuleVersion` (P1c)
+ * for audit traceability. Bump this whenever the rate schedule / `HsnMaster` defaults change. Old invoices
+ * keep their original stamp — their computed amounts are already frozen per line item, so they never change.
+ */
+export const CURRENT_TAX_RULE_VERSION = "GST-2.0-2025-09-22";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -15,6 +26,8 @@ export interface LineItemTaxInput {
   gstRate: number;
   cessRate?: number;
   isTaxInclusive?: boolean;
+  /** Inter-state supply → the full rate goes to IGST instead of CGST+SGST. Default false (P0-3). */
+  isInterState?: boolean;
 }
 
 export interface LineItemTaxResult {
@@ -81,6 +94,7 @@ export function calculateLineItemTax(input: LineItemTaxInput): LineItemTaxResult
     gstRate,
     cessRate = 0,
     isTaxInclusive = true,
+    isInterState = false,
   } = input;
 
   // Gross amount before discount
@@ -103,21 +117,23 @@ export function calculateLineItemTax(input: LineItemTaxInput): LineItemTaxResult
     taxableValue = amountAfterDiscount;
   }
 
-  // Intra-state: split GST equally into CGST + SGST
-  const cgstRate = round2(gstRate / 2);
-  const sgstRate = round2(gstRate / 2);
-  const cgstAmount = round2(taxableValue * cgstRate / 100);
-  const sgstAmount = round2(taxableValue * sgstRate / 100);
-
-  // IGST is always 0 for us (intra-state only)
-  const igstRate = 0;
-  const igstAmount = 0;
+  // Inter-state → full rate as IGST; intra-state → split equally into CGST + SGST.
+  let cgstRate = 0, sgstRate = 0, cgstAmount = 0, sgstAmount = 0, igstRate = 0, igstAmount = 0;
+  if (isInterState) {
+    igstRate = gstRate;
+    igstAmount = round2(taxableValue * gstRate / 100);
+  } else {
+    cgstRate = round2(gstRate / 2);
+    sgstRate = round2(gstRate / 2);
+    cgstAmount = round2(taxableValue * cgstRate / 100);
+    sgstAmount = round2(taxableValue * sgstRate / 100);
+  }
 
   // Cess (for sin goods like aerated drinks)
   const cessAmount = cessRate > 0 ? round2(taxableValue * cessRate / 100) : 0;
 
   // Total = taxable + all taxes
-  const totalAmount = round2(taxableValue + cgstAmount + sgstAmount + cessAmount);
+  const totalAmount = round2(taxableValue + cgstAmount + sgstAmount + igstAmount + cessAmount);
 
   return {
     grossAmount,
@@ -142,6 +158,7 @@ export function calculateInvoiceTotals(lineItems: LineItemTaxResult[]): InvoiceT
   let subtotal = 0;
   let totalCgst = 0;
   let totalSgst = 0;
+  let totalIgst = 0;
   let totalCess = 0;
   let totalDiscount = 0;
 
@@ -149,11 +166,12 @@ export function calculateInvoiceTotals(lineItems: LineItemTaxResult[]): InvoiceT
     subtotal = round2(subtotal + item.taxableValue);
     totalCgst = round2(totalCgst + item.cgstAmount);
     totalSgst = round2(totalSgst + item.sgstAmount);
+    totalIgst = round2(totalIgst + item.igstAmount);
     totalCess = round2(totalCess + item.cessAmount);
     totalDiscount = round2(totalDiscount + item.discount);
   }
 
-  const preRound = round2(subtotal + totalCgst + totalSgst + totalCess);
+  const preRound = round2(subtotal + totalCgst + totalSgst + totalIgst + totalCess);
   const roundOff = calcRoundOff(preRound);
   const totalAmount = round2(preRound + roundOff);
 
@@ -161,7 +179,7 @@ export function calculateInvoiceTotals(lineItems: LineItemTaxResult[]): InvoiceT
     subtotal,
     totalCgst,
     totalSgst,
-    totalIgst: 0,
+    totalIgst,
     totalCess,
     totalDiscount,
     roundOff,

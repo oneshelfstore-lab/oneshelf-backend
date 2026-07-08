@@ -5,6 +5,24 @@ import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { memoCache } from "../lib/httpCache.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
+import { isValidGstin } from "../validators/index.js";
+import { PARTNER_AGREEMENT_VERSION } from "../data/onboardingAgreements.js";
+
+// A GSTIN is optional (a seller may be unregistered) but, when present, must be well-formed +
+// checksum-valid so invoices are never issued under a malformed GSTIN (COMPLIANCE_PLAN.md P2-3).
+const optionalGstin = z.string().max(15).optional().nullable().refine(
+  (v) => v == null || v === "" || isValidGstin(v).valid,
+  { message: "Invalid GSTIN — check the 15-character format and checksum" },
+);
+
+// FSSAI license/registration numbers are always exactly 14 digits (Phase 2,
+// SELLER_DELIVERY_ONBOARDING_PLAN.md — "FSSAI number/expiry format validation"). Format-only: NOT
+// hard-required at submit (see the submit handler below) and an already-expired date isn't blocked
+// either — that's the still-open "enforcement strictness" decision from the plan, not this pass.
+const optionalFssaiNumber = z.string().max(20).optional().nullable().refine(
+  (v) => !v || /^[0-9]{14}$/.test(v.trim()),
+  { message: "FSSAI number must be exactly 14 digits" },
+);
 
 // Seller-scoped profile + earnings. Mounted at /api/app/seller/me.
 //   GET  /            → shop profile
@@ -15,7 +33,7 @@ router.use(firebaseAuthMiddleware as any);
 router.use(requireAppRole("SELLER") as any);
 router.use(resolveSeller as any);
 
-function shapeProfile(s: any) {
+function shapeProfile(s: any, agreementCurrent: boolean) {
   return {
     id: s.id,
     slug: s.slug,
@@ -37,7 +55,35 @@ function shapeProfile(s: any) {
     // House manager (the store's own catalog) → the app shows the owner-level merchandising toggles
     // + a "goes live now" note in the product editor.
     isHouse: s.isHouse,
+    // ─── Onboarding KYC (Phase 1) ──
+    fssaiNumber: s.fssaiNumber,
+    fssaiExpiry: s.fssaiExpiry,
+    fssaiDocUrl: s.fssaiDocUrl,
+    gstinDocUrl: s.gstinDocUrl,
+    panDocUrl: s.panDocUrl,
+    bankProofUrl: s.bankProofUrl,
+    grievanceOfficerName: s.grievanceOfficerName,
+    grievanceOfficerPhone: s.grievanceOfficerPhone,
+    grievanceOfficerEmail: s.grievanceOfficerEmail,
+    onboardingStatus: s.onboardingStatus,
+    onboardingRejectionReason: s.onboardingRejectionReason,
+    // ─── Consent-version re-prompt (Phase 2) ──
+    // True once this seller's LATEST granted partner-agreement consent matches the current
+    // PARTNER_AGREEMENT_VERSION. False after a legal-text version bump — the app re-gates an
+    // already-APPROVED seller behind a lightweight re-accept screen until they tap "I agree" again.
+    // A seller who's never consented at all (pre-dates Phase 1 entirely) reads as true — nothing
+    // to re-prompt for someone who was never asked in the first place.
+    agreementCurrent,
   };
+}
+
+// True once the seller's latest granted PARTNER_AGREEMENT consent matches the CURRENT version.
+async function isAgreementCurrent(sellerId: string): Promise<boolean> {
+  const latest = await prisma.consentRecord.findFirst({
+    where: { subjectType: "SELLER", subjectId: sellerId, consentType: "PARTNER_AGREEMENT", granted: true },
+    orderBy: { grantedAt: "desc" },
+  });
+  return latest == null || latest.version === PARTNER_AGREEMENT_VERSION;
 }
 
 // ─── GET / — shop profile ─────────────────────────────────────────
@@ -45,13 +91,15 @@ router.get("/", async (req: SellerRequest, res: Response) => {
   try {
     const seller = await prisma.seller.findUnique({ where: { id: req.sellerId } });
     if (!seller) throw new NotFoundError("Seller", req.sellerId ?? "");
-    res.json({ success: true, data: shapeProfile(seller) });
+    const agreementCurrent = await isAgreementCurrent(seller.id);
+    res.json({ success: true, data: shapeProfile(seller, agreementCurrent) });
   } catch (e) {
     sendError(res, e);
   }
 });
 
-// ─── PUT / — update editable profile fields ───────────────────────
+// ─── PUT / — update editable profile fields (also the onboarding KYC draft — progressive save,
+// not one big submit; call POST /onboarding/submit when ready for owner review) ───────────────
 const updateSchema = z.object({
   name: z.string().min(1).max(120).optional(),
   logoUrl: z.string().max(500).optional().nullable(),
@@ -61,17 +109,149 @@ const updateSchema = z.object({
   lat: z.number().optional().nullable(),
   lng: z.number().optional().nullable(),
   phone: z.string().max(15).optional().nullable(),
-  gstin: z.string().max(15).optional().nullable(),
+  gstin: optionalGstin,
   pan: z.string().max(10).optional().nullable(),
   bankDetails: z.any().optional().nullable(),
+  // Onboarding KYC (Phase 1) — document fields are Firebase Storage URLs, uploaded client-side
+  // (same convention as every other photo field in this app; see util/ImageUploadUtil.kt).
+  fssaiNumber: optionalFssaiNumber,
+  fssaiExpiry: z.coerce.date().optional().nullable(),
+  fssaiDocUrl: z.string().max(500).optional().nullable(),
+  gstinDocUrl: z.string().max(500).optional().nullable(),
+  panDocUrl: z.string().max(500).optional().nullable(),
+  bankProofUrl: z.string().max(500).optional().nullable(),
+  grievanceOfficerName: z.string().max(120).optional().nullable(),
+  grievanceOfficerPhone: z.string().max(15).optional().nullable(),
+  grievanceOfficerEmail: z.string().email().max(160).optional().nullable(),
 });
 
 router.put("/", async (req: SellerRequest, res: Response) => {
   try {
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid profile data", parsed.error.errors);
-    const updated = await prisma.seller.update({ where: { id: req.sellerId }, data: parsed.data });
-    res.json({ success: true, data: shapeProfile(updated) });
+
+    const current = await prisma.seller.findUnique({ where: { id: req.sellerId }, select: { onboardingStatus: true } });
+    if (!current) throw new NotFoundError("Seller", req.sellerId ?? "");
+
+    const updated = await prisma.seller.update({
+      where: { id: req.sellerId },
+      data: {
+        ...parsed.data,
+        // Editing after submission means the owner would be reviewing stale data — un-submit so
+        // the seller has to re-submit once they're done changing things.
+        ...(current.onboardingStatus === "PENDING_REVIEW" ? { onboardingStatus: "IN_PROGRESS" as const } : {}),
+      },
+    });
+    res.json({ success: true, data: shapeProfile(updated, await isAgreementCurrent(updated.id)) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── Onboarding KYC — submit for owner review + per-purpose consent (Phase 1) ─────
+// SELLER_DELIVERY_ONBOARDING_PLAN.md. The draft itself is just the Seller row (edited via PUT /
+// above); these two endpoints are the "submit" action and the consent-capture action.
+
+const REQUIRED_ONBOARDING_FIELDS: Array<[keyof Awaited<ReturnType<typeof prisma.seller.findUniqueOrThrow>>, string]> = [
+  ["gstin", "GSTIN"],
+  ["pan", "PAN"],
+  ["shopAddress", "Shop address"],
+  ["grievanceOfficerName", "Grievance officer name"],
+  ["grievanceOfficerPhone", "Grievance officer phone"],
+];
+
+router.post("/onboarding/submit", async (req: SellerRequest, res: Response) => {
+  try {
+    const seller = await prisma.seller.findUnique({ where: { id: req.sellerId } });
+    if (!seller) throw new NotFoundError("Seller", req.sellerId ?? "");
+    if (seller.onboardingStatus === "APPROVED") {
+      return res.json({ success: true, data: shapeProfile(seller, await isAgreementCurrent(seller.id)) });
+    }
+
+    const missing = REQUIRED_ONBOARDING_FIELDS.filter(([field]) => {
+      const v = (seller as any)[field];
+      return v === null || v === undefined || v === "";
+    }).map(([, label]) => label);
+    // FSSAI is asked for but not hard-blocked at submit — Rule 6 requires the info exist and be
+    // disclosed, not a specific enforcement mechanism (plan §7, left as an open decision for a
+    // stricter Phase 2 gate if wanted). GSTIN/PAN/grievance officer ARE hard-required (Rule 6 is
+    // unconditional on those).
+    if (missing.length > 0) {
+      throw new ValidationError(`Please complete: ${missing.join(", ")}`, missing);
+    }
+
+    const [hasAgreementConsent, hasSensitiveConsent] = await Promise.all([
+      prisma.consentRecord.findFirst({
+        where: {
+          subjectType: "SELLER",
+          subjectId: seller.id,
+          consentType: "PARTNER_AGREEMENT",
+          version: PARTNER_AGREEMENT_VERSION,
+          granted: true,
+        },
+      }),
+      prisma.consentRecord.findFirst({
+        where: { subjectType: "SELLER", subjectId: seller.id, consentType: "SENSITIVE_DATA_PROCESSING", granted: true },
+      }),
+    ]);
+    if (!hasAgreementConsent || !hasSensitiveConsent) {
+      throw new ValidationError("Please accept the partner agreement and data-processing consent before submitting.");
+    }
+
+    const updated = await prisma.seller.update({
+      where: { id: seller.id },
+      data: { onboardingStatus: "PENDING_REVIEW", onboardingRejectionReason: null },
+    });
+    res.json({ success: true, data: shapeProfile(updated, true) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+const consentSchema = z.object({
+  consentType: z.enum(["PARTNER_AGREEMENT", "SENSITIVE_DATA_PROCESSING", "LOCATION_TRACKING", "POLICE_VERIFICATION"]),
+  version: z.string().min(1).max(60),
+  granted: z.boolean().default(true),
+});
+
+router.post("/onboarding/consent", async (req: SellerRequest, res: Response) => {
+  try {
+    const parsed = consentSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid consent data", parsed.error.errors);
+    if (!req.sellerId) throw new NotFoundError("Seller", "");
+
+    const record = await prisma.consentRecord.create({
+      data: {
+        subjectType: "SELLER",
+        subjectId: req.sellerId,
+        consentType: parsed.data.consentType,
+        version: parsed.data.version,
+        granted: parsed.data.granted,
+      },
+    });
+    // Onboarding-status also flips NOT_STARTED→IN_PROGRESS on first real interaction, so the owner
+    // queue can distinguish "hasn't looked at it" from "in progress."
+    await prisma.seller.updateMany({
+      where: { id: req.sellerId, onboardingStatus: "NOT_STARTED" },
+      data: { onboardingStatus: "IN_PROGRESS" },
+    });
+    res.status(201).json({ success: true, data: { id: record.id, consentType: record.consentType, grantedAt: record.grantedAt } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+router.get("/onboarding/consent", async (req: SellerRequest, res: Response) => {
+  try {
+    if (!req.sellerId) throw new NotFoundError("Seller", "");
+    const records = await prisma.consentRecord.findMany({
+      where: { subjectType: "SELLER", subjectId: req.sellerId },
+      orderBy: { grantedAt: "desc" },
+    });
+    res.json({
+      success: true,
+      data: records.map((r) => ({ id: r.id, consentType: r.consentType, version: r.version, granted: r.granted, grantedAt: r.grantedAt })),
+    });
   } catch (e) {
     sendError(res, e);
   }

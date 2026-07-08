@@ -3,6 +3,8 @@ import { getNextOrderNumber } from "./orderNumbering.js";
 import { generateOrderInvoice } from "./orderInvoice.js";
 import { notifyNewOrder } from "./fcmNotifier.js";
 import { generateOtp, orderRequiresOtp } from "../lib/otp.js";
+import { consumeFifo, recordConsumption, type BatchConsumption } from "./stockBatches.js";
+import { AppError } from "../lib/errors.js";
 
 // ─── Bulk Express: materialize an approved QuoteRequest into a real Order ───────────────────────
 // This is what connects bulk orders to the delivery pipeline. Before this, an approved/paid quote
@@ -116,28 +118,10 @@ export async function materializeQuoteOrder(quoteId: string): Promise<Materializ
   }
 
   const order = await prisma.$transaction(async (tx) => {
-    // Best-effort stock decrement for owner-mapped variant lines. The qty is free-text ("5kg", "2 pkt",
-    // "3"), so we decrement the leading number from it (default 1) — close enough for the owner's rough
-    // bulk inventory tracking. Insufficient stock never fails the order (the quote was already
-    // approved/paid); if stock is short we decrement what's available and warn the owner.
-    for (const it of quote.items) {
-      if (!it.variantId) continue;
-      const qtyMatch = (it.qty ?? "").match(/[\d.]+/);
-      let want = qtyMatch ? Math.ceil(parseFloat(qtyMatch[0])) : 1;
-      if (!Number.isFinite(want) || want < 1) want = 1;
-      // Decrement up to what's in stock (clamped), so a too-large bulk qty doesn't fail or oversell.
-      const variant = await tx.productVariant.findUnique({ where: { id: it.variantId }, select: { stock: true, isActive: true } });
-      const available = variant && variant.isActive ? Math.floor(Number(variant.stock)) : 0;
-      const take = Math.min(want, available);
-      if (take > 0) {
-        await tx.productVariant.updateMany({
-          where: { id: it.variantId, stock: { gte: take } },
-          data: { stock: { decrement: take } },
-        });
-      }
-      if (take < want) warnings.push(`Stock short for "${it.name}": needed ${want}, deducted ${take}.`);
-    }
-
+    // Order shell first (no nested items) — each line is created individually below, right after
+    // its own FIFO draw, so consumption can be recorded against a real OrderItem id without
+    // depending on Prisma's nested-create array matching back to quote.items (two QuoteItems could
+    // reference the same variantId, so index/variantId correlation after the fact isn't safe).
     const created = await tx.order.create({
       data: {
         orderNumber,
@@ -163,26 +147,66 @@ export async function materializeQuoteOrder(quoteId: string): Promise<Materializ
         savedAmount: 0,
         deliveryOtpRequired: needsOtp,
         notes: noteParts.join(" · ").slice(0, 500),
-        items: {
-          create: quote.items.map((it) => {
-            const v = it.variantId ? variantById.get(it.variantId) : undefined;
-            const lineTotal = Number(it.amount);
-            return {
-              variantId: v ? it.variantId : null,
-              productName: it.name,
-              variantSku: v?.sku ?? "BULK",
-              imageUrl: v?.product.imageUrls?.[0] ?? null,
-              hsnCode: v?.product.hsnCode ?? null,
-              unitPrice: lineTotal, // qty is free-text → treat the priced amount as a single line
-              quantity: 1,
-              lineTotal,
-              sellerId: houseSeller?.id ?? null,
-            };
-          }),
-        },
       },
-      include: { items: true },
     });
+
+    const createdItemIds: string[] = [];
+
+    // Best-effort FIFO stock consumption for owner-mapped variant lines. The qty is free-text
+    // ("5kg", "2 pkt", "3"), so we draw the leading number from it (default 1) — close enough for
+    // the owner's rough bulk inventory tracking. Insufficient stock never fails the order (the quote
+    // was already approved/paid); if stock is short we draw what's available and warn the owner.
+    for (const it of quote.items) {
+      const v = it.variantId ? variantById.get(it.variantId) : undefined;
+      const lineTotal = Number(it.amount);
+      let costSnapshot: number | null = null;
+      let pendingConsumption: BatchConsumption[] | null = null;
+
+      if (it.variantId) {
+        const qtyMatch = (it.qty ?? "").match(/[\d.]+/);
+        let want = qtyMatch ? Math.ceil(parseFloat(qtyMatch[0])) : 1;
+        if (!Number.isFinite(want) || want < 1) want = 1;
+        // Clamp to what's actually available (ProductVariant.stock is the live batch-rollup), so a
+        // too-large bulk qty doesn't fail or oversell.
+        const variant = await tx.productVariant.findUnique({ where: { id: it.variantId }, select: { stock: true, isActive: true } });
+        const available = variant && variant.isActive ? Math.floor(Number(variant.stock)) : 0;
+        const take = Math.min(want, available);
+        if (take > 0) {
+          try {
+            const consumeResult = await consumeFifo(tx, it.variantId, take);
+            costSnapshot = consumeResult.totalQty > 0 ? consumeResult.weightedUnitCost : null;
+            pendingConsumption = consumeResult.consumed;
+          } catch (e) {
+            if (e instanceof AppError && e.code === "INSUFFICIENT_STOCK") {
+              // Lost a race against a concurrent consumer between the read above and the FIFO walk —
+              // rare for a manually-approved bulk quote, and must never fail the whole order.
+              warnings.push(`Stock changed for "${it.name}" while converting — skipped inventory deduction.`);
+            } else {
+              throw e;
+            }
+          }
+        }
+        if (take < want) warnings.push(`Stock short for "${it.name}": needed ${want}, deducted ${take}.`);
+      }
+
+      const orderItem = await tx.orderItem.create({
+        data: {
+          orderId: created.id,
+          variantId: v ? it.variantId : null,
+          productName: it.name,
+          variantSku: v?.sku ?? "BULK",
+          imageUrl: v?.product.imageUrls?.[0] ?? null,
+          hsnCode: v?.product.hsnCode ?? null,
+          unitPrice: lineTotal, // qty is free-text → treat the priced amount as a single line
+          quantity: 1,
+          lineTotal,
+          sellerId: houseSeller?.id ?? null,
+          costPriceSnapshot: costSnapshot,
+        },
+      });
+      createdItemIds.push(orderItem.id);
+      if (pendingConsumption) await recordConsumption(tx, { orderItemId: orderItem.id }, pendingConsumption);
+    }
 
     if (needsOtp) {
       await tx.orderSecret.create({
@@ -205,7 +229,7 @@ export async function materializeQuoteOrder(quoteId: string): Promise<Materializ
         },
       });
       await tx.orderItem.updateMany({
-        where: { id: { in: created.items.map((i) => i.id) } },
+        where: { id: { in: createdItemIds } },
         data: { subOrderId: sub.id },
       });
     }

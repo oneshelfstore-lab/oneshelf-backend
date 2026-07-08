@@ -1,5 +1,34 @@
 import prisma from "../lib/prisma.js";
 import ExcelJS from "exceljs";
+import { resolveStoreState, stateLabel, stateCodeFromGstin } from "../lib/stateCodes.js";
+import { isValidGstin } from "../validators/index.js";
+
+// ─── Invoice scope (house vs external seller) — COMPLIANCE_PLAN.md P0-2 ───────────────────────────
+//
+// The house store (identity B) and each external seller (identity C) are DISTINCT GST suppliers. The
+// store's own GSTR-1/3B/HSN/sales must contain ONLY the store's supplies; an external seller's
+// invoices belong in THEIR return. These reports therefore default to house-only.
+//
+// Discriminator: a house/store-issued invoice has NO supplier snapshot → `supplierName IS NULL`
+// (supplierName is set only for external-seller invoices, and always set for them since Seller.name is
+// required). This is more reliable than `sellerId` (which holds the *house seller's* id on marketplace
+// house orders, not null) or `supplierGstin` (which is null for a GSTIN-less external seller).
+
+export type InvoiceScope =
+  | { kind: "house" }                      // the store's own supplies (identity B) — DEFAULT
+  | { kind: "seller"; sellerId: string }   // one external seller's supplies (identity C)
+  | { kind: "all" };                       // everything (internal reconciliation only)
+
+export const HOUSE_SCOPE: InvoiceScope = { kind: "house" };
+
+/** Prisma `where` fragment selecting the invoices in a given scope. */
+function scopeFilter(scope: InvoiceScope): Record<string, unknown> {
+  switch (scope.kind) {
+    case "house": return { supplierName: null };
+    case "seller": return { sellerId: scope.sellerId };
+    case "all": return {};
+  }
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
@@ -21,11 +50,12 @@ function periodToDateRange(period: string): { from: Date; to: Date } {
 
 const MAX_REPORT_ROWS = 5000;
 
-export async function getSalesRegister(from: Date, to: Date) {
+export async function getSalesRegister(from: Date, to: Date, scope: InvoiceScope = HOUSE_SCOPE) {
   const invoices = await prisma.invoice.findMany({
     where: {
       invoiceDate: { gte: from, lte: to },
       status: { not: "CANCELLED" },
+      ...scopeFilter(scope),
     },
     orderBy: { invoiceDate: "asc" },
     include: { lineItems: true },
@@ -78,19 +108,21 @@ export async function getPurchaseRegister(from: Date, to: Date) {
 
 // ─── 3. GSTR-1 Summary ──────────────────────────────────────────────
 
-export async function getGstr1Summary(period: string) {
+export async function getGstr1Summary(period: string, scope: InvoiceScope = HOUSE_SCOPE) {
   const { from, to } = periodToDateRange(period);
+  const store = await resolveStoreState(); // for intra-state B2CS place-of-supply
 
   const invoices = await prisma.invoice.findMany({
     where: {
       invoiceDate: { gte: from, lte: to },
       status: { not: "CANCELLED" },
+      ...scopeFilter(scope),
     },
     include: { lineItems: true },
     take: MAX_REPORT_ROWS,
   });
 
-  // B2B: invoices where customer has GSTIN
+  // B2B: invoices where customer has GSTIN. Place of supply = the invoice's own snapshotted code.
   const b2b = invoices
     .filter((inv) => inv.supplyType === "B2B" && inv.invoiceType !== "CREDIT_NOTE" && inv.invoiceType !== "DEBIT_NOTE")
     .map((inv) => ({
@@ -102,7 +134,8 @@ export async function getGstr1Summary(period: string) {
       taxableValue: num(inv.subtotal),
       cgst: num(inv.totalCgst),
       sgst: num(inv.totalSgst),
-      placeOfSupply: "09-Uttar Pradesh",
+      placeOfSupplyCode: inv.placeOfSupplyCode,
+      placeOfSupply: stateLabel(inv.placeOfSupplyCode),
       reverseCharge: "N",
     }));
 
@@ -126,7 +159,8 @@ export async function getGstr1Summary(period: string) {
     cgst: Math.round(vals.cgst * 100) / 100,
     sgst: Math.round(vals.sgst * 100) / 100,
     cess: Math.round(vals.cess * 100) / 100,
-    placeOfSupply: "09-Uttar Pradesh",
+    placeOfSupplyCode: store.code,
+    placeOfSupply: stateLabel(store.code),
     supplyType: "INTRA",
   }));
 
@@ -142,6 +176,7 @@ export async function getGstr1Summary(period: string) {
       taxableValue: num(inv.subtotal),
       cgst: num(inv.totalCgst),
       sgst: num(inv.totalSgst),
+      placeOfSupplyCode: inv.placeOfSupplyCode,
     }));
 
   // HSN summary
@@ -173,7 +208,7 @@ export async function getGstr1Summary(period: string) {
   // Document summary
   const taxInvoices = invoices.filter((inv) => inv.invoiceType === "TAX_INVOICE");
   const cancelledInPeriod = await prisma.invoice.findMany({
-    where: { invoiceDate: { gte: from, lte: to }, status: "CANCELLED" },
+    where: { invoiceDate: { gte: from, lte: to }, status: "CANCELLED", ...scopeFilter(scope) },
     select: { invoiceNumber: true },
   });
 
@@ -192,12 +227,12 @@ export async function getGstr1Summary(period: string) {
 
 // ─── 4. GSTR-3B Summary ─────────────────────────────────────────────
 
-export async function getGstr3bSummary(period: string) {
+export async function getGstr3bSummary(period: string, scope: InvoiceScope = HOUSE_SCOPE) {
   const { from, to } = periodToDateRange(period);
 
   // Outward supplies
   const invoices = await prisma.invoice.findMany({
-    where: { invoiceDate: { gte: from, lte: to }, status: { not: "CANCELLED" }, invoiceType: { in: ["TAX_INVOICE", "BILL_OF_SUPPLY"] } },
+    where: { invoiceDate: { gte: from, lte: to }, status: { not: "CANCELLED" }, invoiceType: { in: ["TAX_INVOICE", "BILL_OF_SUPPLY"] }, ...scopeFilter(scope) },
     include: { lineItems: true },
   });
 
@@ -214,20 +249,23 @@ export async function getGstr3bSummary(period: string) {
     }
   }
 
-  // ITC from purchase bills
-  const purchases = await prisma.purchaseBill.findMany({
-    where: { billDate: { gte: from, lte: to }, itcEligible: true, status: { not: "DRAFT" } },
-  });
+  // ITC from purchase bills — these are the STORE's inward supplies, so ITC only applies to the house
+  // (and "all") view. An external seller's own purchases aren't tracked in this system → their 3B ITC is 0.
   let itcCgst = 0, itcSgst = 0, itcIgst = 0;
-  for (const b of purchases) {
-    itcCgst += num(b.totalCgst);
-    itcSgst += num(b.totalSgst);
-    itcIgst += num(b.totalIgst);
+  if (scope.kind !== "seller") {
+    const purchases = await prisma.purchaseBill.findMany({
+      where: { billDate: { gte: from, lte: to }, itcEligible: true, status: { not: "DRAFT" } },
+    });
+    for (const b of purchases) {
+      itcCgst += num(b.totalCgst);
+      itcSgst += num(b.totalSgst);
+      itcIgst += num(b.totalIgst);
+    }
   }
 
   // Credit notes reduce liability
   const creditNotes = await prisma.invoice.findMany({
-    where: { invoiceDate: { gte: from, lte: to }, invoiceType: "CREDIT_NOTE", status: { not: "CANCELLED" } },
+    where: { invoiceDate: { gte: from, lte: to }, invoiceType: "CREDIT_NOTE", status: { not: "CANCELLED" }, ...scopeFilter(scope) },
   });
   let cnCgst = 0, cnSgst = 0;
   for (const cn of creditNotes) {
@@ -262,12 +300,19 @@ export async function getGstr3bSummary(period: string) {
 
 // ─── 5. GSTR-1 JSON (GSTN schema format) ────────────────────────────
 
-export async function getGstr1Json(period: string) {
-  const summary = await getGstr1Summary(period);
+export async function getGstr1Json(period: string, scope: InvoiceScope = HOUSE_SCOPE) {
+  const summary = await getGstr1Summary(period, scope);
   const company = await prisma.company.findFirst({ select: { gstin: true } });
+  // The return is filed under the SUPPLIER's GSTIN: the store's for a house return, the seller's own
+  // for a per-seller return (identity C).
+  const seller = scope.kind === "seller"
+    ? await prisma.seller.findUnique({ where: { id: scope.sellerId }, select: { gstin: true } })
+    : null;
+  const filerGstin = seller ? seller.gstin : company?.gstin;
+  const storeCode = stateCodeFromGstin(filerGstin);
 
   return {
-    gstin: company?.gstin || "09XXXXXXXXXXX",
+    gstin: filerGstin || `${storeCode}XXXXXXXXXXX`,
     fp: period,
     gt: 0, // will be filled by portal
     cur_gt: 0,
@@ -278,7 +323,7 @@ export async function getGstr1Json(period: string) {
         inum: inv.invoiceNumber,
         idt: inv.invoiceDate.split("-").reverse().join("-"), // DD-MM-YYYY
         val: inv.invoiceValue,
-        pos: "09",
+        pos: inv.placeOfSupplyCode,
         rchrg: inv.reverseCharge,
         itms: [{
           num: 1,
@@ -294,7 +339,7 @@ export async function getGstr1Json(period: string) {
     // B2CS
     b2cs: summary.b2cs.map((r) => ({
       sply_ty: r.supplyType,
-      pos: "09",
+      pos: r.placeOfSupplyCode,
       rt: r.rate,
       txval: r.taxableValue,
       camt: r.cgst,
@@ -311,7 +356,7 @@ export async function getGstr1Json(period: string) {
           nt_num: n.noteNumber,
           nt_dt: n.noteDate.split("-").reverse().join("-"),
           val: n.taxableValue + n.cgst + n.sgst,
-          pos: "09",
+          pos: n.placeOfSupplyCode,
           rchrg: "N",
           itms: [{
             num: 1,
@@ -352,12 +397,13 @@ export async function getGstr1Json(period: string) {
 
 // ─── 6. HSN Summary ─────────────────────────────────────────────────
 
-export async function getHsnSummary(from: Date, to: Date) {
+export async function getHsnSummary(from: Date, to: Date, scope: InvoiceScope = HOUSE_SCOPE) {
   const invoices = await prisma.invoice.findMany({
     where: {
       invoiceDate: { gte: from, lte: to },
       status: { not: "CANCELLED" },
       invoiceType: { in: ["TAX_INVOICE", "BILL_OF_SUPPLY"] },
+      ...scopeFilter(scope),
     },
     include: { lineItems: true },
   });
@@ -390,10 +436,13 @@ export async function getHsnSummary(from: Date, to: Date) {
 // ─── 7. Outstanding Receivables ──────────────────────────────────────
 
 export async function getOutstandingReceivables() {
+  // Receivables = money owed TO the store, so only the store's own (house) invoices count. An external
+  // seller's unpaid invoice is the seller's receivable, not the store's (COMPLIANCE_PLAN.md P0-2).
   const invoices = await prisma.invoice.findMany({
     where: {
       status: { notIn: ["CANCELLED", "PAID"] },
       amountDue: { gt: 0 },
+      ...scopeFilter(HOUSE_SCOPE),
     },
     orderBy: { invoiceDate: "asc" },
   });
@@ -503,14 +552,16 @@ export async function getTdsRegister(quarter: string, fy: string) {
 
 // ─── 10. Daily Summary ───────────────────────────────────────────────
 
-export async function getDailySummary(date: string) {
+export async function getDailySummary(date: string, scope: InvoiceScope = HOUSE_SCOPE) {
   const from = new Date(date);
   from.setHours(0, 0, 0, 0);
   const to = new Date(date);
   to.setHours(23, 59, 59, 999);
 
+  // Daily till = the store's own sales. Payments are only recorded for house invoices anyway, so
+  // byPaymentMode was already house-only; this aligns totalSales/byTaxRate with it.
   const invoices = await prisma.invoice.findMany({
-    where: { invoiceDate: { gte: from, lte: to }, status: { not: "CANCELLED" }, invoiceType: { in: ["TAX_INVOICE", "BILL_OF_SUPPLY"] } },
+    where: { invoiceDate: { gte: from, lte: to }, status: { not: "CANCELLED" }, invoiceType: { in: ["TAX_INVOICE", "BILL_OF_SUPPLY"] }, ...scopeFilter(scope) },
     include: { lineItems: true },
   });
 
@@ -551,6 +602,327 @@ export async function getDailySummary(date: string) {
     byPaymentMode: byMode,
     byTaxRate: Object.entries(byRate).map(([rate, v]) => ({ rate: parseFloat(rate), ...v })),
     byHsnGroup: byCat,
+  };
+}
+
+// ─── Income-tax reports (P1b) ────────────────────────────────────────
+
+/** Round to 2 dp (money). */
+function money(v: number): number {
+  return Math.round(v * 100) / 100;
+}
+
+// Products the STORE owns (house/legacy) vs external sellers' — for asset valuation.
+const HOUSE_PRODUCT_FILTER = { OR: [{ product: { sellerId: null } }, { product: { seller: { isHouse: true } } }] };
+
+/**
+ * P&L / income summary for the store's own books (identity B, house-only). Net revenue (taxable, ex-GST,
+ * less sales returns) − purchases − operating expenses − salaries. A directional accountant's summary,
+ * not audited financials.
+ */
+export async function getProfitAndLoss(from: Date, to: Date) {
+  const houseFilter = scopeFilter(HOUSE_SCOPE);
+
+  const invoices = await prisma.invoice.findMany({
+    where: { invoiceDate: { gte: from, lte: to }, status: { not: "CANCELLED" }, invoiceType: { in: ["TAX_INVOICE", "BILL_OF_SUPPLY"] }, ...houseFilter },
+    select: { subtotal: true },
+  });
+  const revenue = invoices.reduce((s, i) => s + num(i.subtotal), 0);
+
+  const creditNotes = await prisma.invoice.findMany({
+    where: { invoiceDate: { gte: from, lte: to }, invoiceType: "CREDIT_NOTE", status: { not: "CANCELLED" }, ...houseFilter },
+    select: { subtotal: true },
+  });
+  const salesReturns = creditNotes.reduce((s, i) => s + num(i.subtotal), 0);
+  const netRevenue = revenue - salesReturns;
+
+  const purchases = await prisma.purchaseBill.findMany({
+    where: { billDate: { gte: from, lte: to }, status: { not: "DRAFT" } },
+    select: { subtotal: true },
+  });
+  const purchaseTotal = purchases.reduce((s, b) => s + num(b.subtotal), 0);
+
+  const expenses = await prisma.expense.findMany({
+    where: { expenseDate: { gte: from, lte: to } },
+    select: { category: true, amount: true },
+  });
+  const expenseByCategory: Record<string, number> = {};
+  let expenseTotal = 0;
+  for (const e of expenses) {
+    const a = num(e.amount);
+    expenseByCategory[e.category] = money((expenseByCategory[e.category] || 0) + a);
+    expenseTotal += a;
+  }
+
+  const salaries = await prisma.salaryRecord.findMany({
+    where: { status: "PAID", paymentDate: { gte: from, lte: to } },
+    select: { netSalary: true },
+  });
+  const salaryTotal = salaries.reduce((s, r) => s + num(r.netSalary), 0);
+
+  const grossProfit = netRevenue - purchaseTotal;
+  const netProfit = grossProfit - expenseTotal - salaryTotal;
+
+  return {
+    from: from.toISOString().slice(0, 10),
+    to: to.toISOString().slice(0, 10),
+    revenue: money(revenue),
+    salesReturns: money(salesReturns),
+    netRevenue: money(netRevenue),
+    purchases: money(purchaseTotal),
+    grossProfit: money(grossProfit),
+    expenseTotal: money(expenseTotal),
+    expenseByCategory,
+    salaries: money(salaryTotal),
+    netProfit: money(netProfit),
+  };
+}
+
+/**
+ * Presumptive-turnover (Sec 44AD) report for an FY starting April `fyStartYear`, with the cash-vs-digital
+ * split (deemed profit is 6% on digital receipts, 8% on cash). Turnover = house invoice RECEIPTS (every
+ * INVOICE-related Payment is a house payment — external-seller invoices record none), so the split is exact.
+ */
+export async function getPresumptiveTurnover(fyStartYear: number) {
+  const from = new Date(fyStartYear, 3, 1); // Apr 1
+  const to = new Date(fyStartYear + 1, 2, 31, 23, 59, 59, 999); // Mar 31
+
+  const payments = await prisma.payment.findMany({
+    where: { relatedType: "INVOICE", status: "COMPLETED", paymentDate: { gte: from, lte: to } },
+    select: { amount: true, paymentMode: true },
+  });
+  let cash = 0, digital = 0;
+  for (const p of payments) {
+    const a = num(p.amount);
+    if (p.paymentMode === "CASH") cash += a;
+    else digital += a;
+  }
+  const total = cash + digital;
+
+  return {
+    financialYear: `${fyStartYear}-${String((fyStartYear + 1) % 100).padStart(2, "0")}`,
+    from: from.toISOString().slice(0, 10),
+    to: to.toISOString().slice(0, 10),
+    cashTurnover: money(cash),
+    digitalTurnover: money(digital),
+    totalTurnover: money(total),
+    deemedProfitRatePct: { digital: 6, cash: 8 },
+    deemedProfit: money(digital * 0.06 + cash * 0.08),
+    within44adCeiling: total <= 20000000, // ₹2 crore — informational; CA confirms eligibility
+  };
+}
+
+/**
+ * Closing-stock valuation for the store's OWN inventory (house/legacy products only — an external
+ * seller's stock isn't the store's asset). Values CURRENT on-hand stock at cost; there is no historical
+ * stock snapshot, so this is an as-of-now figure (label it at FY close when you run it).
+ */
+export async function getClosingStockValuation() {
+  const variants = await prisma.productVariant.findMany({
+    where: { isActive: true, ...HOUSE_PRODUCT_FILTER },
+    select: { stock: true, costPrice: true, sellingPrice: true },
+  });
+
+  let atCost = 0, atSelling = 0, variantsWithStock = 0, variantsMissingCost = 0;
+  for (const v of variants) {
+    const stock = num(v.stock);
+    if (stock <= 0) continue;
+    variantsWithStock++;
+    atSelling += stock * num(v.sellingPrice);
+    if (v.costPrice != null) atCost += stock * num(v.costPrice);
+    else variantsMissingCost++;
+  }
+
+  return {
+    asOf: new Date().toISOString().slice(0, 10),
+    valuationAtCost: money(atCost),
+    valuationAtSellingPrice: money(atSelling),
+    variantsWithStock,
+    variantsMissingCost,
+    hasFullCostData: variantsMissingCost === 0,
+    note: "Current on-hand stock (house products) valued at cost. Variants without a cost price are excluded from the cost figure.",
+  };
+}
+
+// ─── GST Health readiness dashboard (P1a-2) ──────────────────────────
+
+/**
+ * Pre-filing readiness checks for a month (period = MMYYYY), house-only. Each check is pass/warn with a
+ * count + message; `readyToFile` is the headline. Pure read/derive over existing data (COMPLIANCE_PLAN.md P1a-2).
+ */
+export async function getGstHealth(period: string) {
+  const { from, to } = periodToDateRange(period);
+  const houseFilter = scopeFilter(HOUSE_SCOPE);
+
+  const invoices = await prisma.invoice.findMany({
+    where: { invoiceDate: { gte: from, lte: to }, status: { not: "CANCELLED" }, ...houseFilter },
+    select: { id: true, customerGstin: true, lineItems: { select: { hsnCode: true } } },
+  });
+
+  let missingHsnLines = 0;
+  const missingHsnInvoices = new Set<string>();
+  let invalidGstin = 0;
+  for (const inv of invoices) {
+    for (const li of inv.lineItems) {
+      if (!li.hsnCode || li.hsnCode === "0000" || li.hsnCode.trim() === "") {
+        missingHsnLines++;
+        missingHsnInvoices.add(inv.id);
+      }
+    }
+    if (inv.customerGstin && !isValidGstin(inv.customerGstin).valid) invalidGstin++;
+  }
+
+  const ordersNoInvoice = await prisma.order.count({
+    where: { createdAt: { gte: from, lte: to }, status: "DELIVERED", invoiceId: null },
+  });
+  const purchaseCount = await prisma.purchaseBill.count({
+    where: { billDate: { gte: from, lte: to }, status: { not: "DRAFT" } },
+  });
+  const tcsAgg = await prisma.subOrder.aggregate({
+    where: { createdAt: { gte: from, lte: to }, tcsAmount: { gt: 0 }, order: { is: { status: { not: "CANCELLED" } } } },
+    _sum: { tcsAmount: true },
+  });
+  const tcsTotal = num(tcsAgg._sum.tcsAmount);
+  const salesCount = invoices.length;
+
+  const checks = [
+    {
+      key: "hsn", label: "HSN codes", ok: missingHsnLines === 0, count: missingHsnLines,
+      detail: missingHsnLines === 0 ? "Every line item has an HSN code"
+        : `${missingHsnLines} line item(s) across ${missingHsnInvoices.size} invoice(s) have no HSN — add HSN on those products`,
+    },
+    {
+      key: "gstin", label: "Customer GSTINs", ok: invalidGstin === 0, count: invalidGstin,
+      detail: invalidGstin === 0 ? "All customer GSTINs are valid" : `${invalidGstin} invoice(s) have an invalid customer GSTIN`,
+    },
+    {
+      key: "orderMismatch", label: "Orders invoiced", ok: ordersNoInvoice === 0, count: ordersNoInvoice,
+      detail: ordersNoInvoice === 0 ? "Every delivered order has an invoice" : `${ordersNoInvoice} delivered order(s) have no invoice`,
+    },
+    {
+      key: "purchaseBills", label: "Purchase bills / ITC", ok: !(salesCount > 0 && purchaseCount === 0), count: purchaseCount,
+      detail: purchaseCount > 0 ? `${purchaseCount} purchase bill(s) recorded` : "No purchase bills this period — you may be under-claiming input tax credit",
+    },
+    {
+      key: "tcs", label: "TCS collected (GSTR-8)", ok: true, count: 0, amount: money(tcsTotal),
+      detail: tcsTotal > 0 ? `Rs.${money(tcsTotal)} TCS collected from sellers — file GSTR-8` : "No seller TCS this period",
+    },
+  ];
+
+  return {
+    period,
+    salesInvoiceCount: salesCount,
+    readyToFile: missingHsnLines === 0 && invalidGstin === 0 && ordersNoInvoice === 0,
+    checks,
+  };
+}
+
+// ─── Marketplace maturity (P2) ───────────────────────────────────────
+
+const TCS_RATE_PCT = 1; // Sec-52 (0.5% CGST + 0.5% SGST) — must match routes/orders.ts + ownerGstr8.ts
+
+/**
+ * Per-seller TCS collected in a month (period MMYYYY) — the seller's own TCS statement (P2-2). The
+ * operator (Oneshelf) collected this on the seller's supplies; the seller claims it as credit.
+ */
+export async function getSellerTcs(sellerId: string, period: string) {
+  const { from, to } = periodToDateRange(period);
+  const agg = await prisma.subOrder.aggregate({
+    where: {
+      sellerId,
+      createdAt: { gte: from, lte: to },
+      tcsAmount: { gt: 0 },
+      order: { is: { status: { not: "CANCELLED" } } },
+    },
+    _sum: { subtotal: true, tcsAmount: true },
+    _count: true,
+  });
+  const seller = await prisma.seller.findUnique({
+    where: { id: sellerId },
+    select: { name: true, gstin: true, pan: true },
+  });
+  const tcs = num(agg._sum.tcsAmount);
+  const half = money(tcs / 2);
+  return {
+    period,
+    sellerName: seller?.name ?? "",
+    gstin: seller?.gstin ?? null,
+    pan: seller?.pan ?? null,
+    tcsRatePct: TCS_RATE_PCT,
+    orderCount: agg._count,
+    grossSupplies: money(num(agg._sum.subtotal)),
+    netLiableValue: money(tcs / (TCS_RATE_PCT / 100)),
+    tcsCgst: half,
+    tcsSgst: half,
+    tcsTotal: money(tcs),
+  };
+}
+
+/** A supplier-filed GSTR-2B row, normalized (the caller extracts these from the portal 2B). */
+export interface Gstr2bRow {
+  supplierGstin: string;
+  invoiceNumber: string;
+  taxableValue?: number;
+  taxAmount?: number;
+}
+
+/**
+ * GSTR-2B reconciliation (P2-4): match supplier-filed 2B rows against our PurchaseBills so the owner only
+ * claims ITC that suppliers have actually reported (blind-claiming all purchase ITC is an interest/penalty
+ * risk). Match key = supplierGstin + invoiceNumber (trim/upper); a taxable-value gap >₹1 is flagged.
+ */
+export async function getGstr2bReconciliation(from: Date, to: Date, twoBRows: Gstr2bRow[]) {
+  const bills = await prisma.purchaseBill.findMany({
+    where: { billDate: { gte: from, lte: to }, status: { not: "DRAFT" } },
+    include: { vendor: { select: { name: true } } },
+    take: MAX_REPORT_ROWS,
+  });
+
+  const key = (gstin: string | null | undefined, inum: string) =>
+    `${(gstin ?? "").trim().toUpperCase()}|${inum.trim().toUpperCase()}`;
+  const twoBByKey = new Map<string, Gstr2bRow>();
+  for (const r of twoBRows) twoBByKey.set(key(r.supplierGstin, r.invoiceNumber), r);
+
+  const matched: any[] = [];
+  const onlyInBooks: any[] = [];
+  const usedKeys = new Set<string>();
+  let matchedItc = 0, unmatchedBooksItc = 0;
+
+  for (const b of bills) {
+    const k = key(b.vendorGstin, b.billNumber);
+    const itc = num(b.totalCgst) + num(b.totalSgst) + num(b.totalIgst);
+    const twoB = twoBByKey.get(k);
+    if (twoB) {
+      usedKeys.add(k);
+      const bookTaxable = num(b.subtotal);
+      const valueMismatch = twoB.taxableValue != null && Math.abs(twoB.taxableValue - bookTaxable) > 1;
+      matched.push({ billNumber: b.billNumber, vendor: b.vendor.name, vendorGstin: b.vendorGstin, taxable: money(bookTaxable), itc: money(itc), valueMismatch });
+      matchedItc += itc;
+    } else {
+      onlyInBooks.push({ billNumber: b.billNumber, vendor: b.vendor.name, vendorGstin: b.vendorGstin, taxable: money(num(b.subtotal)), itc: money(itc) });
+      unmatchedBooksItc += itc;
+    }
+  }
+
+  const onlyIn2b = twoBRows
+    .filter((r) => !usedKeys.has(key(r.supplierGstin, r.invoiceNumber)))
+    .map((r) => ({ supplierGstin: r.supplierGstin, invoiceNumber: r.invoiceNumber, taxable: r.taxableValue != null ? money(r.taxableValue) : null }));
+
+  return {
+    from: from.toISOString().slice(0, 10),
+    to: to.toISOString().slice(0, 10),
+    summary: {
+      billCount: bills.length,
+      twoBRowCount: twoBRows.length,
+      matchedCount: matched.length,
+      onlyInBooksCount: onlyInBooks.length,
+      onlyIn2bCount: onlyIn2b.length,
+      matchedItc: money(matchedItc),               // ITC safe to claim (supplier filed)
+      unmatchedBooksItc: money(unmatchedBooksItc),  // ITC to HOLD (supplier hasn't filed yet)
+    },
+    matched,
+    onlyInBooks, // in our books, not in 2B → supplier hasn't filed; don't claim yet
+    onlyIn2b,    // in 2B, not in our books → record the purchase bill
   };
 }
 

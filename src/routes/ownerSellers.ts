@@ -8,6 +8,7 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { payoutSeller } from "../services/sellerPayout.js";
+import { isValidGstin } from "../validators/index.js";
 
 // Owner-managed marketplace sellers. Mounted at /api/app/owner/sellers (Firebase auth + OWNER).
 // Onboard a seller BY PHONE (no UIDs): promote an existing user to SELLER + link, or pre-create a
@@ -246,7 +247,12 @@ const createSchema = z.object({
   phone: z.string().min(8),
   commissionPct: z.number().min(0).max(100).optional(),
   city: z.string().optional(),
-  gstin: z.string().optional(),
+  // Optional (seller may be unregistered) but validated when present so invoices are never issued
+  // under a malformed GSTIN (COMPLIANCE_PLAN.md P2-3).
+  gstin: z.string().optional().refine(
+    (v) => !v || isValidGstin(v).valid,
+    { message: "Invalid GSTIN — check the 15-character format and checksum" },
+  ),
 });
 
 router.post("/", async (req: FirebaseAuthRequest, res: Response) => {

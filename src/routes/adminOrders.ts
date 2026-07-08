@@ -6,6 +6,7 @@ import { requireRole } from "../middleware/auth.js";
 import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orderInvoice.js";
 import { creditReferrerOnFirstDelivered, refundWalletOnCancel } from "../services/referralRewards.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
+import { restoreConsumption } from "../services/stockBatches.js";
 
 /**
  * Admin order management for the React dashboard (JWT auth).
@@ -110,8 +111,7 @@ router.put("/:id/status", requireRole("OWNER", "ACCOUNTANT", "BILLING_CLERK") as
       await prisma.$transaction(async (tx) => {
         for (const item of order.items) {
           if (!item.variantId) continue;
-          const restore = item.isLoose && item.stepSize ? item.quantity * Number(item.stepSize) : item.quantity;
-          await tx.productVariant.update({ where: { id: item.variantId }, data: { stock: { increment: restore } } });
+          await restoreConsumption(tx, { orderItemId: item.id });
         }
         await tx.order.update({ where: { id: order.id }, data: { status: newStatus } });
       });

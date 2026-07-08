@@ -28,11 +28,14 @@ export function isValidGstin(gstin: string): { valid: boolean; error?: string } 
   return { valid: true };
 }
 
+/**
+ * @deprecated Name retained for compatibility, but the state gate is GONE (P0-1). A GSTIN is valid
+ * regardless of its state — the store may be registered outside UP, and customers/vendors legitimately
+ * belong to other states. This now just checks format + checksum (identical to isValidGstin). New code
+ * should call isValidGstin directly.
+ */
 export function isUpGstin(gstin: string): { valid: boolean; error?: string } {
-  const base = isValidGstin(gstin);
-  if (!base.valid) return base;
-  if (!gstin.startsWith("09")) return { valid: false, error: "GSTIN must start with '09' (Uttar Pradesh)" };
-  return { valid: true };
+  return isValidGstin(gstin);
 }
 
 export function extractPanFromGstin(gstin: string): string {

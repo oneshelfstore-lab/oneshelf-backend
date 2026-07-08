@@ -175,8 +175,8 @@ enum OrderPaymentMethod {
   COD
   ONLINE
   UPI
-  MONTHLY   // legacy deferred-billing subscription order (old khata model — no new writes)
-  WALLET    // prepaid-wallet subscription delivery: auto-debited + PAID at generation
+  MONTHLY // legacy deferred-billing subscription order (old khata model — no new writes)
+  WALLET // prepaid-wallet subscription delivery: auto-debited + PAID at generation
 }
 
 enum OrderPaymentStatus {
@@ -227,6 +227,26 @@ enum SellerStatus {
   SUSPENDED
 }
 
+// ─── Enums (Seller & Delivery-Partner Onboarding, Phase 1) ──────────
+// SELLER_DELIVERY_ONBOARDING_PLAN.md. Distinct from SellerStatus/PartnerApplicationStatus:
+// onboardingStatus tracks the KYC-collection lifecycle specifically, independent of a seller's
+// operational status (PENDING/APPROVED/SUSPENDED) or the original lead's triage status.
+
+enum OnboardingStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+}
+
+enum ConsentType {
+  PARTNER_AGREEMENT
+  SENSITIVE_DATA_PROCESSING
+  LOCATION_TRACKING
+  POLICE_VERIFICATION
+}
+
 enum SubOrderStatus {
   PLACED
   ACCEPTED
@@ -238,11 +258,11 @@ enum SubOrderStatus {
 // ─── Enums (V4 — referral wallet / store credit) ───────────────────
 
 enum WalletTxnType {
-  REFERRAL_CREDIT   // referrer earns when their referee's first order is delivered
-  ORDER_DEBIT       // store credit spent at checkout
-  ORDER_REFUND      // credit returned when a wallet-paying order is cancelled
-  TOPUP             // customer loaded money into the wallet via Razorpay
-  ADJUSTMENT        // manual owner correction
+  REFERRAL_CREDIT // referrer earns when their referee's first order is delivered
+  ORDER_DEBIT // store credit spent at checkout
+  ORDER_REFUND // credit returned when a wallet-paying order is cancelled
+  TOPUP // customer loaded money into the wallet via Razorpay
+  ADJUSTMENT // manual owner correction
 }
 
 // Customer wallet top-up (money-in via Razorpay). Mirrors the order payment lifecycle: a PENDING
@@ -255,8 +275,8 @@ enum WalletTopupStatus {
 }
 
 enum ReferralStatus {
-  PENDING    // code applied + welcome coupon minted; referrer not yet paid
-  REWARDED   // referee's first order delivered → referrer credited
+  PENDING // code applied + welcome coupon minted; referrer not yet paid
+  REWARDED // referee's first order delivered → referrer credited
 }
 
 // ─── Subscriptions (milk / newspaper / recurring deliveries) ─────────
@@ -292,26 +312,26 @@ enum SubscriptionStatementStatus {
 enum AccountStatus {
   ACTIVE
   PENDING_DELETION // soft-deleted; within the grace window, restored on next login
-  DELETED          // grace expired → PII scrubbed, records retained
+  DELETED // grace expired → PII scrubbed, records retained
 }
 
 // ─── 0. User ────────────────────────────────────────────────────────
 
 model User {
-  id               String    @id @default(cuid())
-  email            String?   @unique
-  passwordHash     String?
-  name             String
-  role             UserRole  @default(CUSTOMER)
-  isActive         Boolean   @default(true)
-  mustChangePassword Boolean @default(false)
-  lastLoginAt      DateTime?
+  id                 String    @id @default(cuid())
+  email              String?   @unique
+  passwordHash       String?
+  name               String
+  role               UserRole  @default(CUSTOMER)
+  isActive           Boolean   @default(true)
+  mustChangePassword Boolean   @default(false)
+  lastLoginAt        DateTime?
 
   // Firebase-linked app users
-  firebaseUid      String?   @unique
-  phone            String?
-  photoUrl         String?
-  phoneVerified    Boolean   @default(false)
+  firebaseUid   String? @unique
+  phone         String?
+  photoUrl      String?
+  phoneVerified Boolean @default(false)
 
   // Delivery-agent availability — advisory toggle in the delivery dashboard. Shown to the owner
   // in the assignment picker (an "Offline" tag) but does NOT hard-block assignment. Defaults to
@@ -319,28 +339,28 @@ model User {
   isAvailableForDelivery Boolean @default(true)
 
   // Abandoned-cart push throttling
-  lastCartReminderAt  DateTime?
-  cartReminderCount   Int       @default(0)
+  lastCartReminderAt DateTime?
+  cartReminderCount  Int       @default(0)
 
   // Referral program (refer & earn)
-  referralCode     String?   @unique
-  referredById     String?
-  referredBy       User?     @relation("UserReferrals", fields: [referredById], references: [id])
-  referredUsers    User[]    @relation("UserReferrals")
+  referralCode  String? @unique
+  referredById  String?
+  referredBy    User?   @relation("UserReferrals", fields: [referredById], references: [id])
+  referredUsers User[]  @relation("UserReferrals")
 
   // Referral wallet / store credit (Phase 2). Denormalized spendable balance — the source of
   // truth for the guarded atomic decrement at checkout. Every mutation also writes a
   // WalletTransaction ledger row in the SAME db transaction (balance never drifts from the ledger).
-  walletBalance    Decimal   @default(0) @db.Decimal(10, 2)
+  walletBalance Decimal @default(0) @db.Decimal(10, 2)
 
   // Account-deletion lifecycle (soft-delete + grace period). PENDING_DELETION during the grace
   // window (restored on next login); DELETED after the sweeper scrubs PII. deletedAt = grace clock.
-  deletionStatus   AccountStatus @default(ACTIVE)
-  deletedAt        DateTime?
-  deletionReason   String?
+  deletionStatus AccountStatus @default(ACTIVE)
+  deletedAt      DateTime?
+  deletionReason String?
   // SHA-256 of the bare-10 phone, captured at PURGE before the number is nulled. Survives the scrub
   // so a future re-signup with the same number can be recognised (referral/coupon-farming throttle).
-  phoneHash        String?
+  phoneHash      String?
 
   // Membership (loyalty) tier-up push dedup — the last tier key we've observed/notified this user at.
   // NULL means "never observed" (first delivery after this feature ships records a silent baseline
@@ -348,25 +368,26 @@ model User {
   // Guarded-updateMany flip prevents a double push when two orders deliver concurrently.
   lastNotifiedTier String?
 
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  addresses          Address[]
-  cartItems          CartItem[]
-  orders             Order[]          @relation("CustomerOrders")
-  deliveryOrders     Order[]          @relation("DeliveryOrders")
-  fcmTokens          FcmToken[]
-  couponRedemptions  CouponRedemption[]
-  favorites          Favorite[]
-  orderRatings       OrderRating[]
-  complaints         Complaint[]
-  quoteRequests      QuoteRequest[]
-  sellerAccount      Seller?          @relation("SellerOwner")
-  cashSettlements    CashSettlement[]
-  walletTxns         WalletTransaction[]
-  walletTopups       WalletTopup[]
-  referralsMade      Referral[]       @relation("Referrer")
-  referralReceived   Referral?        @relation("Referee")
+  addresses              Address[]
+  cartItems              CartItem[]
+  orders                 Order[]                 @relation("CustomerOrders")
+  deliveryOrders         Order[]                 @relation("DeliveryOrders")
+  fcmTokens              FcmToken[]
+  couponRedemptions      CouponRedemption[]
+  favorites              Favorite[]
+  orderRatings           OrderRating[]
+  complaints             Complaint[]
+  quoteRequests          QuoteRequest[]
+  sellerAccount          Seller?                 @relation("SellerOwner")
+  deliveryProfile        DeliveryProfile?
+  cashSettlements        CashSettlement[]
+  walletTxns             WalletTransaction[]
+  walletTopups           WalletTopup[]
+  referralsMade          Referral[]              @relation("Referrer")
+  referralReceived       Referral?               @relation("Referee")
   subscriptions          Subscription[]
   subscriptionStatements SubscriptionStatement[]
 
@@ -399,30 +420,30 @@ model Company {
 // storefront (existing flat browse is unaffected).
 
 model SuperCategory {
-  id            String    @id @default(cuid())
-  slug          String    @unique
-  name          String
-  nameHi        String?
-  imageUrl      String?
-  displayOrder  Int       @default(0)
-  isActive      Boolean   @default(true)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id           String   @id @default(cuid())
+  slug         String   @unique
+  name         String
+  nameHi       String?
+  imageUrl     String?
+  displayOrder Int      @default(0)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
-  categories    Category[]
+  categories Category[]
 }
 
 // ─── 2. Category ─────────────────────────────────────────────────────
 
 model Category {
-  id            String    @id @default(cuid())
-  slug          String    @unique
-  name          String
-  imageUrl      String?
-  displayOrder  Int       @default(0)
-  isActive      Boolean   @default(true)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
+  id           String   @id @default(cuid())
+  slug         String   @unique
+  name         String
+  imageUrl     String?
+  displayOrder Int      @default(0)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   // Optional parent super-category. SetNull so deleting a super-category just unlinks its children
   // (never cascades to products).
@@ -435,48 +456,53 @@ model Category {
 // ─── 3. CatalogProduct (Oneshelf app product — identity only) ────────
 
 model CatalogProduct {
-  id              String      @id @default(cuid())
-  handle          String      @unique
-  name            String
-  nameHi          String?
-  brand           String?
-  categoryId      String
-  category        Category    @relation(fields: [categoryId], references: [id])
-  subcategory     String?
-  productType     ProductType
-  description     String?
-  hsnCode         String?     @db.VarChar(8)
-  gstRate         Decimal?    @db.Decimal(5, 2)
-  cessRate        Decimal     @default(0) @db.Decimal(5, 2)
-  isPackaged      Boolean     @default(true)
-  isTaxInclusive  Boolean     @default(true)
-  isExempt        Boolean     @default(false)
-  isBranded       Boolean     @default(false)
+  id                String      @id @default(cuid())
+  handle            String      @unique
+  name              String
+  nameHi            String?
+  brand             String?
+  categoryId        String
+  category          Category    @relation(fields: [categoryId], references: [id])
+  subcategory       String?
+  productType       ProductType
+  description       String?
+  hsnCode           String?     @db.VarChar(8)
+  gstRate           Decimal?    @db.Decimal(5, 2)
+  cessRate          Decimal     @default(0) @db.Decimal(5, 2)
+  isPackaged        Boolean     @default(true)
+  isTaxInclusive    Boolean     @default(true)
+  isExempt          Boolean     @default(false)
+  isBranded         Boolean     @default(false)
   // Owner opt-in: this product may be given as a free sample (Delight Phase 3B). Marking ≥1
   // product eligible is what turns the sample engine on.
-  isSampleEligible Boolean    @default(false)
+  isSampleEligible  Boolean     @default(false)
   // Owner opt-in: feature this product in the Home "99 Store" rail. Only surfaced when the product
   // is also actually priced ₹99 or less, so the "everything under ₹99" promise stays honest.
-  featuredIn99Store Boolean   @default(false)
+  featuredIn99Store Boolean     @default(false)
   // Owner opt-in: this product can be subscribed to (milk / newspaper / recurring). Gates the
   // "Subscribe" button on the PDP. Validated server-side on subscription create.
-  isSubscribable   Boolean    @default(false)
+  isSubscribable    Boolean     @default(false)
   // Owner opt-in: Buy-1-Get-1-Free. For every 2 units in the cart, 1 is free (floor(qty/2) free
   // units), folded into the cart discount/savings. ⚠️ GST/CA: treated as an order-level discount
   // (GST still computed per-line from full gross), consistent with how coupon discount behaves.
-  isBuyOneGetOne   Boolean    @default(false)
-  imageUrls       String[]    @default([])
-  searchKeywords  String[]    @default([])
-  isActive        Boolean     @default(true)
+  isBuyOneGetOne    Boolean     @default(false)
+  // Legal Metrology country-of-origin filter (eff. July 1 2026, Onboarding Phase 3 —
+  // SELLER_DELIVERY_ONBOARDING_PLAN.md §1b). Dormant unless a seller/owner explicitly flags a
+  // product imported; a domestic-staples catalog never triggers it.
+  isImported        Boolean     @default(false)
+  countryOfOrigin   String?
+  imageUrls         String[]    @default([])
+  searchKeywords    String[]    @default([])
+  isActive          Boolean     @default(true)
   // Marketplace: which seller owns this listing. Nullable + backfilled to the house seller, so
   // existing products keep working (a null seller is treated as the house seller everywhere).
-  sellerId        String?
-  seller          Seller?     @relation(fields: [sellerId], references: [id])
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  sellerId          String?
+  seller            Seller?     @relation(fields: [sellerId], references: [id])
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
 
-  variants        ProductVariant[]
-  favorites       Favorite[]
+  variants  ProductVariant[]
+  favorites Favorite[]
 
   @@index([categoryId])
   @@index([name])
@@ -487,12 +513,12 @@ model CatalogProduct {
 // ─── Favorite (user's wishlist — product-level) ──────────────────────
 
 model Favorite {
-  id         String         @id @default(cuid())
-  userId     String
-  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  productId  String
-  product    CatalogProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
-  createdAt  DateTime       @default(now())
+  id        String         @id @default(cuid())
+  userId    String
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId String
+  product   CatalogProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdAt DateTime       @default(now())
 
   @@unique([userId, productId])
   @@index([userId])
@@ -506,7 +532,7 @@ model OrderRating {
   order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
   userId    String
   user      User     @relation(fields: [userId], references: [id])
-  stars     Int      // 1..5
+  stars     Int // 1..5
   tags      String[] @default([]) // quick-tags e.g. "Fresh", "On time"
   comment   String?
   createdAt DateTime @default(now())
@@ -520,10 +546,10 @@ model Complaint {
   id         String          @id @default(cuid())
   userId     String
   user       User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  orderId    String?         // optional link to a specific order
+  orderId    String? // optional link to a specific order
   subject    String
   message    String
-  imageUrl   String?         // optional camera-captured evidence photo (Firebase Storage public URL)
+  imageUrl   String? // optional camera-captured evidence photo (Firebase Storage public URL)
   status     ComplaintStatus @default(OPEN)
   createdAt  DateTime        @default(now())
   resolvedAt DateTime?
@@ -535,37 +561,37 @@ model Complaint {
 // ─── QuoteRequest (bulk / event price ask) ──────────────────────────
 
 model QuoteRequest {
-  id           String      @id @default(cuid())
-  userId       String
-  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  type         String      // "Bulk" | "Monthly Ration" | "Event"
-  note         String
-  eventDate    String?     // free-text date the customer typed (kept verbatim)
-  imageUrls    String[]    @default([]) // Firebase Storage public URLs (uploaded client-side)
-  status       QuoteStatus @default(PENDING)
-  quotedAmount Decimal?    @db.Decimal(10, 2) // grand total (Σ items + deliveryFee) — kept for back-compat
-  deliveryFee  Decimal?    @db.Decimal(10, 2) // owner-set delivery fee (₹0 = free)
-  quoteMessage String?
+  id                String         @id @default(cuid())
+  userId            String
+  user              User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type              String // "Bulk" | "Monthly Ration" | "Event"
+  note              String
+  eventDate         String? // free-text date the customer typed (kept verbatim)
+  imageUrls         String[]       @default([]) // Firebase Storage public URLs (uploaded client-side)
+  status            QuoteStatus    @default(PENDING)
+  quotedAmount      Decimal?       @db.Decimal(10, 2) // grand total (Σ items + deliveryFee) — kept for back-compat
+  deliveryFee       Decimal?       @db.Decimal(10, 2) // owner-set delivery fee (₹0 = free)
+  quoteMessage      String?
   // Online-payment-on-approve (Razorpay). UNPAID until a captured payment is verified.
   // ADVANCE_PAID = the customer paid only the advance % online; the balance is collected on delivery.
-  paymentStatus     String  @default("UNPAID") // UNPAID | PAID | ADVANCE_PAID
+  paymentStatus     String         @default("UNPAID") // UNPAID | PAID | ADVANCE_PAID
   // How the customer chose to settle when approving: FULL (whole total) or ADVANCE (advance % now).
-  paymentOption     String?  // FULL | ADVANCE
+  paymentOption     String? // FULL | ADVANCE
   // Amount actually captured online (the full total for FULL, the advance for ADVANCE). 0 = pay-on-delivery.
-  amountPaid        Decimal? @db.Decimal(10, 2)
+  amountPaid        Decimal?       @db.Decimal(10, 2)
   razorpayOrderId   String?
   razorpayPaymentId String?
   // Bulk Express: the fulfillment Order materialized once this quote is ACCEPTED. Back-link to
   // Order.quoteRequestId (scalar, not a Prisma relation, to avoid a mandatory back-reference array).
   // Null until conversion; lets the app deep-link the customer to live order tracking.
-  orderId      String?
+  orderId           String?
   // Delivery address the customer chose when approving (bulk collects no address at submission).
   // Validated to belong to the customer; the conversion snapshots it onto the order, falling back to
   // the customer's default address when null.
-  addressId    String?
-  items        QuoteItem[]
-  messages     QuoteMessage[]
-  createdAt    DateTime    @default(now())
+  addressId         String?
+  items             QuoteItem[]
+  messages          QuoteMessage[]
+  createdAt         DateTime       @default(now())
 
   @@index([userId])
   @@index([status])
@@ -579,7 +605,7 @@ model QuoteMessage {
   id             String       @id @default(cuid())
   quoteRequestId String
   quoteRequest   QuoteRequest @relation(fields: [quoteRequestId], references: [id], onDelete: Cascade)
-  sender         String       // "CUSTOMER" | "OWNER" (store: owner or house co-manager)
+  sender         String // "CUSTOMER" | "OWNER" (store: owner or house co-manager)
   text           String?
   voiceUrl       String?
   imageUrls      String[]     @default([])
@@ -642,11 +668,17 @@ model ProductVariant {
   packageUnit       PackageUnit
   mrp               Decimal        @db.Decimal(10, 2)
   sellingPrice      Decimal        @db.Decimal(10, 2)
+  // Denormalized rollup, kept in sync by services/stockBatches.ts — the weighted-average cost across
+  // all StockBatch rows with qtyRemaining > 0 for this variant. Every existing reader (margin display,
+  // seller earnings, stock valuation) can keep reading this field unchanged; only the batch engine
+  // writes it. Do not write this field directly outside services/stockBatches.ts.
   costPrice         Decimal?       @db.Decimal(10, 2)
   // Seller-consented minimum sale price (>= costPrice). PRIVATE — never sent to customers (stripped by
   // formatVariantForApp, same as costPrice). Lets the owner run sales down to this floor without asking
   // the seller and without a below-cost loss. Stored per-base-unit like sellingPrice.
   saleFloor         Decimal?       @db.Decimal(10, 2)
+  // Denormalized rollup = SUM(StockBatch.qtyRemaining) for this variant, kept in sync by
+  // services/stockBatches.ts. Do not write this field directly outside that service.
   stock             Decimal        @db.Decimal(12, 3)
   lowStockThreshold Int            @default(5)
   bulkMinQty        Int            @default(0)
@@ -656,40 +688,86 @@ model ProductVariant {
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
 
-  cartItems         CartItem[]
-  orderItems        OrderItem[]
-  substituteItems   OrderItem[]    @relation("SubstituteVariant")
-  invoiceLines      InvoiceLineItem[]
-  subscriptions     Subscription[]
+  cartItems       CartItem[]
+  orderItems      OrderItem[]
+  substituteItems OrderItem[]       @relation("SubstituteVariant")
+  invoiceLines    InvoiceLineItem[]
+  subscriptions   Subscription[]
+  stockBatches    StockBatch[]
 
   @@index([productId])
   @@index([barcode])
 }
 
+// ─── StockBatch / StockBatchConsumption (FIFO cost lots) ─────────────
+//
+// Each restock at a (possibly different) cost creates its own StockBatch instead of overwriting
+// ProductVariant.costPrice in place. Sales consume the oldest batch first (FIFO) via
+// services/stockBatches.ts, so historical margin is always computable from what a unit ACTUALLY
+// cost, not from whatever the live costPrice happens to be today. ProductVariant.stock/costPrice
+// stay as denormalized rollups the engine maintains, so no other read site needs to change.
+
+model StockBatch {
+  id           String         @id @default(cuid())
+  variantId    String
+  variant      ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  // Cost per base-unit, same convention as ProductVariant.costPrice.
+  unitCost     Decimal        @db.Decimal(10, 2)
+  qtyReceived  Decimal        @db.Decimal(12, 3)
+  // Decremented as sales draw from this batch (oldest-first). The row is kept once this hits 0 —
+  // it's the audit trail of what was bought and at what cost, not just a live counter.
+  qtyRemaining Decimal        @db.Decimal(12, 3)
+  receivedAt   DateTime       @default(now())
+  note         String? // optional free text ("restock 6 Jul", supplier name)
+
+  consumptions StockBatchConsumption[]
+
+  @@index([variantId, receivedAt])
+}
+
+// One draw against a batch. Links to whichever sale record actually consumed it — an app order's
+// OrderItem, or a legacy POS InvoiceLineItem (no OrderItem exists for a walk-in POS sale). Plain
+// scalar FKs with no relation, exactly like QuoteItem.variantId elsewhere in this schema, since
+// neither OrderItem nor InvoiceLineItem needs a mandatory back-reference for a case that doesn't
+// always apply to them (free-sample giveaways draw from a batch with no consumption row at all).
+model StockBatchConsumption {
+  id                String     @id @default(cuid())
+  batchId           String
+  batch             StockBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  orderItemId       String?
+  invoiceLineItemId String?
+  qty               Decimal    @db.Decimal(12, 3)
+  createdAt         DateTime   @default(now())
+
+  @@index([batchId])
+  @@index([orderItemId])
+  @@index([invoiceLineItemId])
+}
+
 // ─── 5. Legacy Product (billing system — kept for existing invoices) ─
 
 model Product {
-  id              String   @id @default(cuid())
-  name            String
-  sku             String   @unique
-  barcode         String?
-  hsnCode         String   @db.VarChar(8)
-  category        String
-  gstRate         Decimal  @db.Decimal(5, 2)
-  cessRate        Decimal  @default(0) @db.Decimal(5, 2)
-  mrp             Decimal  @db.Decimal(10, 2)
-  sellingPrice    Decimal  @db.Decimal(10, 2)
-  costPrice       Decimal  @db.Decimal(10, 2)
-  isTaxInclusive  Boolean  @default(true)
-  isExempt        Boolean  @default(false)
-  isBranded       Boolean  @default(false)
-  unit            String
-  trackInventory  Boolean  @default(true)
-  currentStock    Int      @default(0)
-  minStockLevel   Int      @default(0)
-  isActive        Boolean  @default(true)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id             String   @id @default(cuid())
+  name           String
+  sku            String   @unique
+  barcode        String?
+  hsnCode        String   @db.VarChar(8)
+  category       String
+  gstRate        Decimal  @db.Decimal(5, 2)
+  cessRate       Decimal  @default(0) @db.Decimal(5, 2)
+  mrp            Decimal  @db.Decimal(10, 2)
+  sellingPrice   Decimal  @db.Decimal(10, 2)
+  costPrice      Decimal  @db.Decimal(10, 2)
+  isTaxInclusive Boolean  @default(true)
+  isExempt       Boolean  @default(false)
+  isBranded      Boolean  @default(false)
+  unit           String
+  trackInventory Boolean  @default(true)
+  currentStock   Int      @default(0)
+  minStockLevel  Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
   invoiceLines InvoiceLineItem[]
 
@@ -701,19 +779,19 @@ model Product {
 // ─── 6. Banner ───────────────────────────────────────────────────────
 
 model Banner {
-  id              String    @id @default(cuid())
-  imageUrl        String
-  mediaType       String    @default("IMAGE")  // IMAGE | GIF — GIF = animated GIF/WebP (rendered animated; upload bypasses the bitmap cropper)
-  targetCategory  String?
-  targetProduct   String?                       // product id — when set, tapping opens the PDP (wins over category)
-  targetUrl       String?
-  placement       String    @default("HOME")  // HOME | CATEGORY | SPOTLIGHT | BULK — which surface shows this banner
-  displayOrder    Int       @default(0)
-  isActive        Boolean   @default(true)
-  startDate       DateTime?
-  endDate         DateTime?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  id             String    @id @default(cuid())
+  imageUrl       String
+  mediaType      String    @default("IMAGE") // IMAGE | GIF — GIF = animated GIF/WebP (rendered animated; upload bypasses the bitmap cropper)
+  targetCategory String?
+  targetProduct  String? // product id — when set, tapping opens the PDP (wins over category)
+  targetUrl      String?
+  placement      String    @default("HOME") // HOME | CATEGORY | SPOTLIGHT | BULK — which surface shows this banner
+  displayOrder   Int       @default(0)
+  isActive       Boolean   @default(true)
+  startDate      DateTime?
+  endDate        DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
   @@index([isActive, displayOrder])
 }
@@ -724,45 +802,45 @@ model Banner {
 // banner — distinct from the single-image Banner carousel above, which it sits alongside on Home.
 // One row per collage; the cards are children (cascade-deleted). All additive — safe via db push.
 model DealCollage {
-  id                String   @id @default(cuid())
-  title             String   @default("")          // internal owner-facing name
-  placement         String   @default("HOME")      // HOME (room for CATEGORY etc. later)
-  isActive          Boolean  @default(true)
-  displayOrder      Int      @default(0)
+  id                String  @id @default(cuid())
+  title             String  @default("") // internal owner-facing name
+  placement         String  @default("HOME") // HOME (room for CATEGORY etc. later)
+  isActive          Boolean @default(true)
+  displayOrder      Int     @default(0)
   // Sponsor header
-  sponsorLabel      String   @default("PRESENTED BY")
-  sponsorName       String   @default("")
-  bgFrom            String   @default("#6b8cde")   // header gradient start (hex)
-  bgTo              String   @default("#a8b8f0")   // header gradient end (hex)
-  headerImageUrl    String?                        // optional right-side illustration / logo
+  sponsorLabel      String  @default("PRESENTED BY")
+  sponsorName       String  @default("")
+  bgFrom            String  @default("#6b8cde") // header gradient start (hex)
+  bgTo              String  @default("#a8b8f0") // header gradient end (hex)
+  headerImageUrl    String? // optional right-side illustration / logo
   // CTA footer
-  ctaText           String   @default("")
-  ctaSubtext        String   @default("")
-  ctaEmoji          String   @default("🛒")        // decorative emoji on the right of the CTA footer
-  ctaTargetCategory String?                        // category slug the footer links to (optional)
-  ctaTargetProduct  String?                        // product id the footer links to (wins over category)
+  ctaText           String  @default("")
+  ctaSubtext        String  @default("")
+  ctaEmoji          String  @default("🛒") // decorative emoji on the right of the CTA footer
+  ctaTargetCategory String? // category slug the footer links to (optional)
+  ctaTargetProduct  String? // product id the footer links to (wins over category)
 
-  cards             DealCollageCard[]
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  cards     DealCollageCard[]
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
 
   @@index([isActive, placement, displayOrder])
 }
 
 model DealCollageCard {
-  id              String      @id @default(cuid())
-  collageId       String
-  collage         DealCollage @relation(fields: [collageId], references: [id], onDelete: Cascade)
-  title           String      @default("")
-  price           String      @default("")         // free-text badge ("₹440" / "Starting @ ₹15")
-  originalPrice   String?                           // optional struck-through price
-  emoji           String      @default("🛍️")        // shown when no imageUrl
-  imageUrl        String?                           // product photo (overrides emoji)
-  bgColor         String      @default("#eef1ff")  // card background (hex)
-  featured        Boolean     @default(false)       // the one tall left card
-  targetCategory  String?                           // category slug this card links to
-  targetProduct   String?                           // product id this card links to (wins over category)
-  displayOrder    Int         @default(0)
+  id             String      @id @default(cuid())
+  collageId      String
+  collage        DealCollage @relation(fields: [collageId], references: [id], onDelete: Cascade)
+  title          String      @default("")
+  price          String      @default("") // free-text badge ("₹440" / "Starting @ ₹15")
+  originalPrice  String? // optional struck-through price
+  emoji          String      @default("🛍️") // shown when no imageUrl
+  imageUrl       String? // product photo (overrides emoji)
+  bgColor        String      @default("#eef1ff") // card background (hex)
+  featured       Boolean     @default(false) // the one tall left card
+  targetCategory String? // category slug this card links to
+  targetProduct  String? // product id this card links to (wins over category)
+  displayOrder   Int         @default(0)
 
   @@index([collageId, displayOrder])
 }
@@ -782,20 +860,20 @@ model Brand {
 // ─── 7. Address ──────────────────────────────────────────────────────
 
 model Address {
-  id            String   @id @default(cuid())
-  userId        String
-  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  label         String   @default("Home")
-  addressLine   String
-  landmark      String?
-  city          String?
-  state         String?
-  pincode       String
-  lat           Decimal? @db.Decimal(10, 7)
-  lng           Decimal? @db.Decimal(10, 7)
-  isDefault     Boolean  @default(false)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label       String   @default("Home")
+  addressLine String
+  landmark    String?
+  city        String?
+  state       String?
+  pincode     String
+  lat         Decimal? @db.Decimal(10, 7)
+  lng         Decimal? @db.Decimal(10, 7)
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   orders        Order[]
   subscriptions Subscription[]
@@ -806,18 +884,18 @@ model Address {
 // ─── 8. CartItem ─────────────────────────────────────────────────────
 
 model CartItem {
-  id              String         @id @default(cuid())
-  userId          String
-  user            User           @relation(fields: [userId], references: [id], onDelete: Cascade)
-  variantId       String
-  variant         ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
-  quantity        Decimal        @db.Decimal(14, 6)
-  savedForLater   Boolean        @default(false)
-  isLoose         Boolean        @default(false)
-  stepSize        Decimal?       @db.Decimal(10, 3)
-  stepUnit        String?
-  createdAt       DateTime       @default(now())
-  updatedAt       DateTime       @updatedAt
+  id            String         @id @default(cuid())
+  userId        String
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  variantId     String
+  variant       ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  quantity      Decimal        @db.Decimal(14, 6)
+  savedForLater Boolean        @default(false)
+  isLoose       Boolean        @default(false)
+  stepSize      Decimal?       @db.Decimal(10, 3)
+  stepUnit      String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
 
   @@unique([userId, variantId, savedForLater])
   @@index([userId])
@@ -826,23 +904,23 @@ model CartItem {
 // ─── 9. Coupon ───────────────────────────────────────────────────────
 
 model Coupon {
-  id            String     @id @default(cuid())
-  code          String     @unique
-  couponType    CouponType
-  value         Decimal    @db.Decimal(10, 2)
-  minOrder      Decimal    @default(0) @db.Decimal(10, 2)
-  maxDiscount   Decimal?   @db.Decimal(10, 2)
-  isActive      Boolean    @default(true)
-  validFrom     DateTime?
-  validUntil    DateTime?
-  usageLimit    Int?       // global cap across all users (null = unlimited)
-  perUserLimit  Int?       // per-customer cap (null = unlimited)
-  usageCount    Int        @default(0)
-  description   String?
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
+  id           String     @id @default(cuid())
+  code         String     @unique
+  couponType   CouponType
+  value        Decimal    @db.Decimal(10, 2)
+  minOrder     Decimal    @default(0) @db.Decimal(10, 2)
+  maxDiscount  Decimal?   @db.Decimal(10, 2)
+  isActive     Boolean    @default(true)
+  validFrom    DateTime?
+  validUntil   DateTime?
+  usageLimit   Int? // global cap across all users (null = unlimited)
+  perUserLimit Int? // per-customer cap (null = unlimited)
+  usageCount   Int        @default(0)
+  description  String?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
 
-  redemptions   CouponRedemption[]
+  redemptions CouponRedemption[]
 
   @@index([code])
   @@index([isActive])
@@ -871,12 +949,12 @@ model WalletTransaction {
   id           String        @id @default(cuid())
   userId       String
   user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  amount       Decimal       @db.Decimal(10, 2)   // signed: +credit / −debit
+  amount       Decimal       @db.Decimal(10, 2) // signed: +credit / −debit
   type         WalletTxnType
   balanceAfter Decimal       @db.Decimal(10, 2)
-  orderId      String?       // set for ORDER_DEBIT / ORDER_REFUND
-  referralId   String?       // set for REFERRAL_CREDIT
-  statementId  String?       // set for a subscription monthly-statement ORDER_DEBIT
+  orderId      String? // set for ORDER_DEBIT / ORDER_REFUND
+  referralId   String? // set for REFERRAL_CREDIT
+  statementId  String? // set for a subscription monthly-statement ORDER_DEBIT
   note         String?
   createdAt    DateTime      @default(now())
 
@@ -946,7 +1024,7 @@ model ScratchReward {
   type       ScratchRewardType   @default(NONE)
   value      Decimal?            @db.Decimal(10, 2) // flat-off ₹ amount when FLAT_OFF
   status     ScratchRewardStatus @default(UNSCRATCHED)
-  couponCode String?             // minted on reveal for a win
+  couponCode String? // minted on reveal for a win
   expiresAt  DateTime?
   createdAt  DateTime            @default(now())
 
@@ -959,63 +1037,63 @@ model ScratchReward {
 // dates use IST-midnight semantics. Pricing is FREE delivery (baked into the unit price) — see
 // services/subscriptionEngine.ts.
 model Subscription {
-  id            String  @id @default(cuid())
-  customerId    String
-  customer      User    @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  variantId     String
-  variant       ProductVariant @relation(fields: [variantId], references: [id])
+  id         String         @id @default(cuid())
+  customerId String
+  customer   User           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  variantId  String
+  variant    ProductVariant @relation(fields: [variantId], references: [id])
 
   // Snapshot for display continuity if the product later changes.
-  productName   String
-  imageUrl      String?
-  quantity      Decimal  @db.Decimal(14, 6)
-  isLoose       Boolean  @default(false)
-  stepSize      Decimal? @db.Decimal(10, 3)
-  stepUnit      String?
+  productName String
+  imageUrl    String?
+  quantity    Decimal  @db.Decimal(14, 6)
+  isLoose     Boolean  @default(false)
+  stepSize    Decimal? @db.Decimal(10, 3)
+  stepUnit    String?
 
-  frequency     SubscriptionFrequency
-  intervalDays  Int?      // CUSTOM: every N days
-  daysOfWeek    Int[]     @default([])  // WEEKLY: 0=Sun..6=Sat (IST weekday)
-  dayOfMonth    Int?      // MONTHLY: 1..28 (capped — no month-end ambiguity)
+  frequency    SubscriptionFrequency
+  intervalDays Int? // CUSTOM: every N days
+  daysOfWeek   Int[]                 @default([]) // WEEKLY: 0=Sun..6=Sat (IST weekday)
+  dayOfMonth   Int? // MONTHLY: 1..28 (capped — no month-end ambiguity)
 
-  addressId     String?
-  address       Address?  @relation(fields: [addressId], references: [id])
+  addressId         String?
+  address           Address?            @relation(fields: [addressId], references: [id])
   // Payment tender (v2, prepaid-first — no postpaid). WALLET = prepaid wallet auto-debit at generation;
   // COD = pay-on-delivery daily cash; AUTOPAY = UPI mandate (plumbing built, inert until live Razorpay).
-  billing       SubscriptionBilling @default(WALLET)
+  billing           SubscriptionBilling @default(WALLET)
   // Unit price captured at subscribe time — for display + a "price changed" flag if the live price drifts.
-  unitPriceSnapshot Decimal? @db.Decimal(10, 2)
+  unitPriceSnapshot Decimal?            @db.Decimal(10, 2)
   // Razorpay UPI-autopay mandate token (AUTOPAY tender). Null until the customer sets up autopay; inert
   // until a live Razorpay merchant exists.
-  mandateId     String?
+  mandateId         String?
 
-  status        SubscriptionStatus @default(ACTIVE)
-  startDate     DateTime           // first delivery date (IST-midnight)
-  endDate       DateTime?          // optional auto-stop
-  pausedUntil   DateTime?          // auto-resume after this date
-  nextDeliveryDate  DateTime?      // engine cursor (IST-midnight-in-UTC)
+  status            SubscriptionStatus @default(ACTIVE)
+  startDate         DateTime // first delivery date (IST-midnight)
+  endDate           DateTime? // optional auto-stop
+  pausedUntil       DateTime? // auto-resume after this date
+  nextDeliveryDate  DateTime? // engine cursor (IST-midnight-in-UTC)
   lastGeneratedDate DateTime?
 
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  orders        Order[]  @relation("SubscriptionOrders")
-  exceptions    SubscriptionException[]
+  orders     Order[]                 @relation("SubscriptionOrders")
+  exceptions SubscriptionException[]
 
   @@index([customerId])
-  @@index([status, nextDeliveryDate])   // the engine's hot query
+  @@index([status, nextDeliveryDate]) // the engine's hot query
 }
 
 // ─── SubscriptionException (calendar skip store) ─────────────────────
 // A per-date override the customer sets from the calendar. v1 = SKIP (no delivery that day). The engine
 // checks this before generating; skip-date requests past the cutoff are rejected at the API layer.
 model SubscriptionException {
-  id             String   @id @default(cuid())
+  id             String       @id @default(cuid())
   subscriptionId String
   subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
   date           DateTime // IST-midnight-in-UTC
-  type           String   @default("SKIP") // SKIP now; EXTRA / QTY_CHANGE reserved for later
-  createdAt      DateTime @default(now())
+  type           String       @default("SKIP") // SKIP now; EXTRA / QTY_CHANGE reserved for later
+  createdAt      DateTime     @default(now())
 
   @@unique([subscriptionId, date])
   @@index([subscriptionId])
@@ -1024,21 +1102,21 @@ model SubscriptionException {
 // ─── SubscriptionStatement (monthly consolidated khata bill) ─────────
 // One bill per customer per month aggregating that month's DELIVERED subscription (MONTHLY) orders.
 model SubscriptionStatement {
-  id            String  @id @default(cuid())
+  id            String                      @id @default(cuid())
   customerId    String
-  customer      User    @relation(fields: [customerId], references: [id])
+  customer      User                        @relation(fields: [customerId], references: [id])
   periodYear    Int
-  periodMonth   Int     // 1..12 (IST)
-  totalAmount   Decimal @db.Decimal(12, 2) @default(0)
-  deliveryCount Int     @default(0)
+  periodMonth   Int // 1..12 (IST)
+  totalAmount   Decimal                     @default(0) @db.Decimal(12, 2)
+  deliveryCount Int                         @default(0)
   status        SubscriptionStatementStatus @default(OPEN)
   billing       SubscriptionBilling
   invoiceId     String?
   paidAt        DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  createdAt     DateTime                    @default(now())
+  updatedAt     DateTime                    @updatedAt
 
-  orders        Order[]  @relation("StatementOrders")
+  orders Order[] @relation("StatementOrders")
 
   // One statement per customer per month PER TENDER — a customer who mixes COD + wallet subscriptions
   // gets one bill per tender (each settles differently). Same-tender customers get exactly one bill.
@@ -1049,107 +1127,109 @@ model SubscriptionStatement {
 // ─── 10. Order ───────────────────────────────────────────────────────
 
 model Order {
-  id                    String             @id @default(cuid())
-  orderNumber           String             @unique
-  customerId            String
-  customer              User               @relation("CustomerOrders", fields: [customerId], references: [id])
+  id          String @id @default(cuid())
+  orderNumber String @unique
+  customerId  String
+  customer    User   @relation("CustomerOrders", fields: [customerId], references: [id])
 
-  status                OrderStatus        @default(PLACED)
-  fulfillmentType       FulfillmentType    @default(DELIVERY)
-  paymentMethod         OrderPaymentMethod @default(COD)
-  paymentStatus         OrderPaymentStatus @default(PENDING)
+  status          OrderStatus        @default(PLACED)
+  fulfillmentType FulfillmentType    @default(DELIVERY)
+  paymentMethod   OrderPaymentMethod @default(COD)
+  paymentStatus   OrderPaymentStatus @default(PENDING)
 
   // Snapshotted address
-  addressId             String?
-  address               Address?           @relation(fields: [addressId], references: [id])
-  shippingName          String?
-  shippingPhone         String?
-  shippingAddress       String?
-  shippingPincode       String?
+  addressId       String?
+  address         Address? @relation(fields: [addressId], references: [id])
+  shippingName    String?
+  shippingPhone   String?
+  shippingAddress String?
+  shippingPincode String?
 
   // Pricing
-  subtotal              Decimal            @db.Decimal(12, 2)
-  discount              Decimal            @default(0) @db.Decimal(10, 2)
-  deliveryCharge        Decimal            @default(0) @db.Decimal(10, 2)
-  taxableValue          Decimal            @default(0) @db.Decimal(12, 2)
-  totalTax              Decimal            @default(0) @db.Decimal(10, 2)
-  totalAmount           Decimal            @db.Decimal(12, 2)
+  subtotal           Decimal @db.Decimal(12, 2)
+  discount           Decimal @default(0) @db.Decimal(10, 2)
+  deliveryCharge     Decimal @default(0) @db.Decimal(10, 2)
+  taxableValue       Decimal @default(0) @db.Decimal(12, 2)
+  totalTax           Decimal @default(0) @db.Decimal(10, 2)
+  totalAmount        Decimal @db.Decimal(12, 2)
   // Total the customer saved on this order vs MRP (Σ (mrp−price)×qty + coupon discount
   // + delivery waived). Snapshotted at placement so the celebration screen + year counter
   // are immutable and truthful. 0 for pre-migration orders.
-  savedAmount           Decimal            @default(0) @db.Decimal(12, 2)
-  couponCode            String?
+  savedAmount        Decimal @default(0) @db.Decimal(12, 2)
+  couponCode         String?
   // Store credit applied as a payment tender (Phase 2): reduces the amount DUE after GST, does NOT
   // change taxableValue/totalTax. Refunded to the wallet if the order is cancelled.
-  walletApplied         Decimal            @default(0) @db.Decimal(10, 2)
+  walletApplied      Decimal @default(0) @db.Decimal(10, 2)
   // Loyalty (membership) attribution, snapshotted at placement so the owner's cost dashboard is
   // honest & immutable. loyaltyDiscount = the standing member % this order gave (already folded into
   // `discount`); tierDeliveryWaived = the delivery fee this order avoided SPECIFICALLY because of the
   // member free-delivery perk (0 if it was free anyway via threshold/coupon/pickup). 0 for
   // pre-migration orders and orders placed by non-members.
-  loyaltyDiscount       Decimal            @default(0) @db.Decimal(10, 2)
-  tierDeliveryWaived    Decimal            @default(0) @db.Decimal(10, 2)
+  loyaltyDiscount    Decimal @default(0) @db.Decimal(10, 2)
+  tierDeliveryWaived Decimal @default(0) @db.Decimal(10, 2)
 
   // Delivery
-  deliveryBoyId         String?
-  deliveryBoy           User?              @relation("DeliveryOrders", fields: [deliveryBoyId], references: [id])
-  deliveryOtpRequired   Boolean            @default(false)
-  deliveredAt           DateTime?
+  deliveryBoyId       String?
+  deliveryBoy         User?     @relation("DeliveryOrders", fields: [deliveryBoyId], references: [id])
+  deliveryOtpRequired Boolean   @default(false)
+  deliveredAt         DateTime?
   // Honest ETA: placedAt + StoreConfig.avg{Delivery,Pickup}Minutes. Rendered as a range/slot,
   // never a hard minutes-promise. Null = fall back to the store's next-day schedule label.
-  estimatedReadyAt      DateTime?
+  estimatedReadyAt    DateTime?
   // Free sample (Delight Phase 3B). Rolled at placement; the customer sees the NAMED sample only
   // after the owner confirms it's physically in the bag (freeSamplePacked) — never before.
-  freeSampleVariantId   String?
-  freeSampleName        String?
-  freeSampleImageUrl    String?
-  freeSamplePacked      Boolean            @default(false)
+  freeSampleVariantId String?
+  freeSampleName      String?
+  freeSampleImageUrl  String?
+  freeSamplePacked    Boolean   @default(false)
 
   // Razorpay
-  razorpayOrderId       String?
-  razorpayPaymentId     String?
+  razorpayOrderId   String?
+  razorpayPaymentId String?
 
   // Invoice link
-  invoiceId             String?            @unique
+  invoiceId String? @unique
 
   // Bulk Express: set when this order was materialized from an approved QuoteRequest. @unique is the
   // idempotency guard — a quote can produce exactly one order. source tags how the order originated
   // ("APP" normal checkout | "BULK_QUOTE" bulk fulfillment).
-  quoteRequestId        String?            @unique
-  source                String             @default("APP")
+  quoteRequestId String? @unique
+  source         String  @default("APP")
   // Amount already captured online before fulfillment (bulk advance). balanceDue = totalAmount −
   // amountPaid is what the delivery agent collects (0 for fully-paid / pure-COD orders).
-  amountPaid            Decimal            @default(0) @db.Decimal(12, 2)
+  amountPaid     Decimal @default(0) @db.Decimal(12, 2)
 
-  notes                 String?
+  notes          String?
   // Client-supplied key to make order placement idempotent (dedupes double-tap/retry).
-  idempotencyKey        String?            @unique
+  idempotencyKey String? @unique
   // Customer-selected delivery window, e.g. "2026-06-08 09:00-12:00". Null = use the
   // store's default next-day schedule.
-  deliverySlot          String?
+  deliverySlot   String?
   // Optional customer-uploaded photo of their home gate/door, shown to the delivery agent.
-  gatePhotoUrl          String?
+  gatePhotoUrl   String?
   // Optional customer-recorded voice note (delivery clarification), played by the delivery agent.
-  voiceNoteUrl          String?
+  voiceNoteUrl   String?
 
   // Subscriptions — set when this order was auto-generated from a standing Subscription.
   // subscriptionDate is the IST-midnight date this delivery is FOR; the composite unique below is
   // the engine's idempotency guard (it can never generate two orders for the same sub on the same day).
-  subscriptionId        String?
-  subscription          Subscription?      @relation("SubscriptionOrders", fields: [subscriptionId], references: [id])
-  subscriptionDate      DateTime?
-  statementId           String?
-  statement             SubscriptionStatement? @relation("StatementOrders", fields: [statementId], references: [id])
+  subscriptionId   String?
+  subscription     Subscription?          @relation("SubscriptionOrders", fields: [subscriptionId], references: [id])
+  subscriptionDate DateTime?
+  statementId      String?
+  statement        SubscriptionStatement? @relation("StatementOrders", fields: [statementId], references: [id])
 
-  createdAt             DateTime           @default(now())
-  updatedAt             DateTime           @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  items                 OrderItem[]
-  secret                OrderSecret?
-  rating                OrderRating?
-  scratchReward         ScratchReward?
-  subOrders             SubOrder[]
+  items         OrderItem[]
+  secret        OrderSecret?
+  rating        OrderRating?
+  scratchReward ScratchReward?
+  subOrders     SubOrder[]
 
+  // The engine can never create two orders for the same subscription on the same date.
+  @@unique([subscriptionId, subscriptionDate])
   @@index([customerId])
   @@index([status])
   @@index([createdAt])
@@ -1159,8 +1239,6 @@ model Order {
   // and owner status-filtered lists.
   @@index([customerId, createdAt])
   @@index([status, createdAt])
-  // The engine can never create two orders for the same subscription on the same date.
-  @@unique([subscriptionId, subscriptionDate])
   @@index([subscriptionId])
   @@index([statementId])
 }
@@ -1168,35 +1246,40 @@ model Order {
 // ─── 11. OrderItem (snapshotted at sale time) ────────────────────────
 
 model OrderItem {
-  id              String         @id @default(cuid())
-  orderId         String
-  order           Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  variantId       String?
-  variant         ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  id        String          @id @default(cuid())
+  orderId   String
+  order     Order           @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  variantId String?
+  variant   ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
 
   // Snapshotted product info
-  productName     String
-  variantSku      String
-  imageUrl        String?
-  hsnCode         String?        @db.VarChar(8)
+  productName String
+  variantSku  String
+  imageUrl    String?
+  hsnCode     String? @db.VarChar(8)
 
   // Snapshotted pricing
-  unitPrice       Decimal        @db.Decimal(10, 2)
+  unitPrice         Decimal  @db.Decimal(10, 2)
   // MRP at sale time (per app-format unit/increment). Drives per-line savings + the invoice
   // strike-through. Nullable: pre-migration items have none.
-  mrp             Decimal?       @db.Decimal(10, 2)
-  quantity        Decimal        @db.Decimal(14, 6)
-  gstRate         Decimal        @default(0) @db.Decimal(5, 2)
-  taxableValue    Decimal        @default(0) @db.Decimal(12, 2)
-  cgst            Decimal        @default(0) @db.Decimal(10, 2)
-  sgst            Decimal        @default(0) @db.Decimal(10, 2)
-  lineTotal       Decimal        @db.Decimal(12, 2)
+  mrp               Decimal? @db.Decimal(10, 2)
+  // Weighted cost actually consumed for this line, computed by services/stockBatches.ts from the
+  // FIFO batch(es) drawn on at sale time — NOT the live ProductVariant.costPrice. This is what makes
+  // margin analytics historically accurate even after a restock changes cost. Null for pre-migration
+  // items (no batch data exists for them) and for lines with no resolved variant.
+  costPriceSnapshot Decimal? @db.Decimal(10, 2)
+  quantity          Decimal  @db.Decimal(14, 6)
+  gstRate           Decimal  @default(0) @db.Decimal(5, 2)
+  taxableValue      Decimal  @default(0) @db.Decimal(12, 2)
+  cgst              Decimal  @default(0) @db.Decimal(10, 2)
+  sgst              Decimal  @default(0) @db.Decimal(10, 2)
+  lineTotal         Decimal  @db.Decimal(12, 2)
 
   // Loose item metadata
-  isLoose         Boolean        @default(false)
-  stepSize        Decimal?       @db.Decimal(10, 3)
-  stepUnit        String?
-  packageUnit     String?
+  isLoose     Boolean  @default(false)
+  stepSize    Decimal? @db.Decimal(10, 3)
+  stepUnit    String?
+  packageUnit String?
 
   // OOS substitution (owner proposes → customer approves/rejects at packing time)
   substitutionStatus    SubstitutionStatus @default(NONE)
@@ -1209,11 +1292,11 @@ model OrderItem {
 
   // Marketplace: the seller fulfilling this line (snapshot at sale time) + the per-seller
   // sub-order it groups into. Null on pre-migration items (backfilled to the house seller).
-  sellerId        String?
-  subOrderId      String?
-  subOrder        SubOrder?      @relation(fields: [subOrderId], references: [id], onDelete: SetNull)
+  sellerId   String?
+  subOrderId String?
+  subOrder   SubOrder? @relation(fields: [subOrderId], references: [id], onDelete: SetNull)
 
-  createdAt       DateTime       @default(now())
+  createdAt DateTime @default(now())
 
   @@index([orderId])
   @@index([sellerId])
@@ -1222,32 +1305,32 @@ model OrderItem {
 // ─── 12. OrderSecret (delivery/pickup OTP) ───────────────────────────
 
 model OrderSecret {
-  id            String   @id @default(cuid())
-  orderId       String   @unique
-  order         Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  otp           String   @db.VarChar(6)
-  customerId    String
+  id              String    @id @default(cuid())
+  orderId         String    @unique
+  order           Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  otp             String    @db.VarChar(6)
+  customerId      String
   fulfillmentType String
-  attempts      Int      @default(0)
-  maxAttempts   Int      @default(5)
+  attempts        Int       @default(0)
+  maxAttempts     Int       @default(5)
   // Set when the attempt cap is hit → verification is paused until this time (then attempts reset).
   // Replaces the old permanent hard-lock so a mistyped code can never brick the handover forever.
-  lockedUntil   DateTime?
-  verified      Boolean  @default(false)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  lockedUntil     DateTime?
+  verified        Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 }
 
 // ─── 13. FcmToken ────────────────────────────────────────────────────
 
 model FcmToken {
-  id          String   @id @default(cuid())
-  userId      String
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  token       String   @unique
-  deviceInfo  String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token      String   @unique
+  deviceInfo String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   @@index([userId])
 }
@@ -1255,93 +1338,97 @@ model FcmToken {
 // ─── 14. StoreConfig (singleton — app-facing store settings) ─────────
 
 model StoreConfig {
-  id                    String   @id @default(cuid())
-  storeName             String   @default("Oneshelf")
-  storeAddress          String?
-  storePhone            String?
-  storeEmail            String?
-  gstin                 String?  @db.VarChar(15)
-  pan                   String?  @db.VarChar(10)
-  stateCode             String   @default("09") @db.VarChar(2)
-  legalName             String?
-  deliveryDateLabel     String   @default("Today")
-  freeDeliveryAbove     Decimal  @default(500) @db.Decimal(10, 2)
-  deliveryCharge        Decimal  @default(30) @db.Decimal(10, 2)
-  isOrderingAllowed     Boolean  @default(true)
-  operatingHoursStart   String?
-  operatingHoursEnd     String?
+  id                                   String   @id @default(cuid())
+  storeName                            String   @default("Oneshelf")
+  storeAddress                         String?
+  storePhone                           String?
+  storeEmail                           String?
+  gstin                                String?  @db.VarChar(15)
+  pan                                  String?  @db.VarChar(10)
+  stateCode                            String   @default("09") @db.VarChar(2)
+  legalName                            String?
+  deliveryDateLabel                    String   @default("Today")
+  freeDeliveryAbove                    Decimal  @default(500) @db.Decimal(10, 2)
+  deliveryCharge                       Decimal  @default(30) @db.Decimal(10, 2)
+  isOrderingAllowed                    Boolean  @default(true)
+  operatingHoursStart                  String?
+  operatingHoursEnd                    String?
   // Max delivery distance in km from the store (null = unenforced). Also the ceiling used by
   // distance-based delivery pricing below (an address beyond this is rejected at checkout).
-  deliveryRadius        Decimal? @db.Decimal(5, 2)
+  deliveryRadius                       Decimal? @db.Decimal(5, 2)
   // Store's own pickup location, set once by the owner (GPS or manual pin). Distance-based delivery
   // pricing is INACTIVE until both this AND an order's address have coordinates — falls back to the
   // flat `deliveryCharge` otherwise, so this is safe to leave unset.
-  storeLat              Decimal? @db.Decimal(10, 7)
-  storeLng              Decimal? @db.Decimal(10, 7)
+  storeLat                             Decimal? @db.Decimal(10, 7)
+  storeLng                             Decimal? @db.Decimal(10, 7)
   // Distance-based delivery pricing (slabs), owner-tunable JSON, validated on write AND read:
   //   [{ uptoKm: 2, charge: 20 }, { uptoKm: 5, charge: 30 }, { uptoKm: 8, charge: 50 }]
   // A distance beyond the last slab is charged at that slab's rate (a ceiling), NOT blocked — only
   // `deliveryRadius` blocks. NULL ⇒ fall back to the code-defined DEFAULT_DELIVERY_SLABS.
-  deliverySlabs         Json?
+  deliverySlabs                        Json?
   // Average fulfillment time used to compute the honest order ETA (shown as a range).
-  avgDeliveryMinutes    Int      @default(40)
-  avgPickupMinutes      Int      @default(20)
+  avgDeliveryMinutes                   Int      @default(40)
+  avgPickupMinutes                     Int      @default(20)
   // Delight engine (Phase 3). delightEnabled is the master kill switch. Scratch-card outcome
   // weights (a real NONE weight is mandatory so wins stay variable, not an entitlement);
   // scratchFlatOffValue = ₹ off for a FLAT_OFF win.
-  delightEnabled            Boolean @default(true)
-  scratchNoneWeight         Int     @default(55)
-  scratchFreeDeliveryWeight Int     @default(30)
-  scratchFlatOffWeight      Int     @default(15)
-  scratchFlatOffValue       Int     @default(20)
+  delightEnabled                       Boolean  @default(true)
+  scratchNoneWeight                    Int      @default(55)
+  scratchFreeDeliveryWeight            Int      @default(30)
+  scratchFlatOffWeight                 Int      @default(15)
+  scratchFlatOffValue                  Int      @default(20)
   // Free-sample engine (Phase 3B). sampleChancePct = % of orders that get a sample (gated also by
   // having ≥1 eligible product + budget). sampleMaxValue caps the ₹ value of a giveaway item;
   // monthlySampleBudget caps total monthly sample spend (conservative count×maxValue cap).
-  sampleChancePct           Int     @default(12)
-  sampleMaxValue            Int     @default(50)
-  monthlySampleBudget       Int     @default(500)
+  sampleChancePct                      Int      @default(12)
+  sampleMaxValue                       Int      @default(50)
+  monthlySampleBudget                  Int      @default(500)
   // Referral wallet (Phase 2 — refer & earn). referralEnabled is the master gate.
   // referralRewardAmount = ₹ store credit the referrer earns when their referee's first order is
   // delivered; referralWelcomeAmount = ₹ off the referee's welcome coupon (min order
   // referralMinOrder, valid for referralWelcomeExpiryDays).
-  referralEnabled           Boolean @default(true)
-  referralRewardAmount      Int     @default(50)
-  referralWelcomeAmount     Int     @default(50)
-  referralMinOrder          Int     @default(199)
-  referralWelcomeExpiryDays Int     @default(30)
+  referralEnabled                      Boolean  @default(true)
+  referralRewardAmount                 Int      @default(50)
+  referralWelcomeAmount                Int      @default(50)
+  referralMinOrder                     Int      @default(199)
+  referralWelcomeExpiryDays            Int      @default(30)
   // Customer wallet top-up bounds (₹). A top-up amount must be within [min, max].
-  walletTopupMin            Int     @default(50)
-  walletTopupMax            Int     @default(10000)
+  walletTopupMin                       Int      @default(50)
+  walletTopupMax                       Int      @default(10000)
   // Subscriptions (milk / newspaper / recurring). subscriptionsEnabled is the master kill switch;
   // defaultSubscriptionAgentId (optional) is the single "subscription runner" — every generated order
   // auto-assigns to this delivery boy for one batched daily run;
   // subscriptionCutoffHour is the IST hour (0..23) after which the next day's delivery is locked (a
   // skip/cancel must happen before it, the day before);
   // subscriptionBillingDay is DEPRECATED (old monthly-khata model — no new writes; kept for legacy rows).
-  subscriptionsEnabled       Boolean @default(true)
-  subscriptionBillingDay     Int     @default(1)
-  subscriptionCutoffHour     Int     @default(21)
-  defaultSubscriptionAgentId String?
+  subscriptionsEnabled                 Boolean  @default(true)
+  subscriptionBillingDay               Int      @default(1)
+  subscriptionCutoffHour               Int      @default(21)
+  defaultSubscriptionAgentId           String?
   // Bulk-quote advance payment: when a customer approves a quote with the "pay advance" option,
   // this % of the grand total is charged online now; the rest is collected on delivery.
-  quoteAdvancePercent        Int     @default(10)
+  quoteAdvancePercent                  Int      @default(10)
   // Account-deletion grace window: days a soft-deleted account is kept (restorable by signing in)
   // before the sweeper permanently scrubs PII + refunds any wallet money.
-  accountDeletionGraceDays   Int     @default(15)
+  accountDeletionGraceDays             Int      @default(15)
   // Loyalty / membership program (Oneshelf Rewards). Owner-tunable tier ladder stored as JSON so the
   // owner can retune thresholds/perks from the app without a code deploy:
   //   { enabled, windowDays, tiers: [{ key, name, minSpend, freeDelivery, discountPct, perks[] }] }
   // NULL ⇒ fall back to the code-defined LOYALTY_TIERS (loyaltyTiers.ts). Validated (≤6 tiers,
   // discountPct ≤ 15, ascending minSpend) on every write AND read; an invalid stored value falls
   // back rather than crashing the pricing hot path. enabled=false is the master kill switch.
-  loyaltyConfig              Json?
+  loyaltyConfig                        Json?
   // Seller payout automation: when enabled, the daily internal cron auto-creates a SellerPayout
   // (mode="AUTO") for every non-house seller whose unsettled netPayable is at least the min amount,
   // instead of requiring the owner to tap "Pay out" per seller. Off by default (manual payout, as before).
-  autoSellerPayoutEnabled    Boolean  @default(false)
-  autoSellerPayoutMinAmount  Int      @default(500)
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  autoSellerPayoutEnabled              Boolean  @default(false)
+  autoSellerPayoutMinAmount            Int      @default(500)
+  // Seller & Delivery-Partner Onboarding Phase 2 knob (schema added now, enforcement not built
+  // until Phase 2 — SELLER_DELIVERY_ONBOARDING_PLAN.md). Off by default (optional, not mandatory
+  // at this scale — see the plan's compliance table).
+  requirePoliceVerificationForDelivery Boolean  @default(false)
+  createdAt                            DateTime @default(now())
+  updatedAt                            DateTime @updatedAt
 }
 
 // ─── 15. Marketplace (multi-seller) ──────────────────────────────────
@@ -1368,7 +1455,7 @@ model Seller {
   // KYC / GST (external shops with their own GSTIN).
   gstin              String?      @db.VarChar(15)
   pan                String?      @db.VarChar(10)
-  bankDetails        Json?        // acct / IFSC / UPI for the manual payout
+  bankDetails        Json? // acct / IFSC / UPI for the manual payout
   // Commission the platform keeps on this seller's item subtotal (snapshotted onto each SubOrder).
   commissionPct      Decimal      @default(5) @db.Decimal(5, 2)
   // Running balance the platform owes this seller (manual-ledger settlement).
@@ -1376,14 +1463,98 @@ model Seller {
   status             SellerStatus @default(PENDING)
   isHouse            Boolean      @default(false)
   isActive           Boolean      @default(true)
-  createdAt          DateTime     @default(now())
-  updatedAt          DateTime     @updatedAt
+
+  // ─── Onboarding KYC (Phase 1, SELLER_DELIVERY_ONBOARDING_PLAN.md) ──
+  // Rule 6 disclosure (Consumer Protection E-Commerce Rules 2020) + FSSAI. Document fields hold
+  // Firebase Storage URLs (uploaded client-side), same convention as every other doc/photo field
+  // in this schema — never raw file bytes, never a stored Aadhaar number.
+  fssaiNumber               String?
+  fssaiExpiry               DateTime?
+  fssaiDocUrl               String?
+  gstinDocUrl               String?
+  panDocUrl                 String?
+  bankProofUrl              String?
+  grievanceOfficerName      String?
+  grievanceOfficerPhone     String?
+  grievanceOfficerEmail     String?
+  // @default(APPROVED) is the deliberate backward-compat trick: every Seller row created BEFORE
+  // this feature (the only path that existed — direct owner-create, always immediately live) picks
+  // up APPROVED automatically when this column is added, with no manual backfill needed. The NEW
+  // self-serve stub creation (on PartnerApplication approval, ownerPartnerApplications.ts) explicitly
+  // overrides this to NOT_STARTED. The existing direct owner-create path (ownerSellers.ts POST /)
+  // is untouched and correctly keeps defaulting to APPROVED (the owner vouches for them directly).
+  onboardingStatus          OnboardingStatus @default(APPROVED)
+  onboardingRejectionReason String?
+  agreementVersion          String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   products  CatalogProduct[]
   subOrders SubOrder[]
   payouts   SellerPayout[]
 
   @@index([status])
+  @@index([onboardingStatus])
+}
+
+// NEW 1:1 profile for delivery riders (Phase 1, SELLER_DELIVERY_ONBOARDING_PLAN.md). Kept off the
+// lean User model — only riders need this bulk of KYC fields. No row = a rider pre-dating this
+// feature (registered via ownerStaff.ts's phone-only flow) → treated as grandfathered/approved by
+// every onboarding-gate check (never blocked retroactively); a row only exists for riders who went
+// through the new self-serve flow, so onboardingStatus @default(NOT_STARTED) is safe as-is.
+model DeliveryProfile {
+  id     String @id @default(cuid())
+  userId String @unique
+  user   User   @relation(fields: [userId], references: [id])
+
+  panNumber String?
+  // Visual human ID-check only — NEVER OCR'd or persisted as a raw Aadhaar number.
+  idDocType String? // "AADHAAR" | "VOTER_ID" | "DL"
+  idDocUrl  String?
+  selfieUrl String?
+
+  vehicleType     String? // CYCLE | SCOOTER | BIKE
+  dlNumber        String?
+  dlDocUrl        String?
+  rcNumber        String?
+  rcDocUrl        String?
+  insuranceExpiry DateTime?
+  insuranceDocUrl String?
+
+  bankDetails           Json? // acct/IFSC or UPI, manual payout (mirrors Seller.bankDetails)
+  emergencyContactName  String?
+  emergencyContactPhone String?
+
+  // Phase 2 field (StoreConfig.requirePoliceVerificationForDelivery) — collected now if the owner
+  // ever turns that on later; unused/unenforced in Phase 1.
+  policeVerificationDocUrl String?
+
+  onboardingStatus OnboardingStatus @default(NOT_STARTED)
+  agreementVersion String?
+  rejectionReason  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([onboardingStatus])
+}
+
+// Versioned, auditable per-purpose consent — DPDP requires being able to show what was agreed to
+// and when. NOT a single blanket checkbox: partner agreement, sensitive-KYC-data processing, and
+// location tracking (delivery only) are each recorded separately (Phase 1 captures these; Phase 2
+// adds re-prompt-on-version-bump logic).
+model ConsentRecord {
+  id          String      @id @default(cuid())
+  subjectType String // "SELLER" | "DELIVERY"
+  subjectId   String // Seller.id (SELLER) or User.id (DELIVERY)
+  consentType ConsentType
+  version     String // e.g. "seller-agreement-v1" — bump to re-prompt on change
+  granted     Boolean     @default(true)
+  grantedAt   DateTime    @default(now())
+  withdrawnAt DateTime?
+
+  @@index([subjectType, subjectId])
 }
 
 // Per-(order, seller) split. One parent Order → N SubOrders (one per seller in the cart). A
@@ -1396,11 +1567,11 @@ model SubOrder {
   seller           Seller         @relation(fields: [sellerId], references: [id])
   status           SubOrderStatus @default(PLACED)
   // Money, snapshotted at placement.
-  subtotal         Decimal        @db.Decimal(12, 2)  // seller's gross for this order
-  commissionPct    Decimal        @db.Decimal(5, 2)   // snapshot of Seller.commissionPct
-  commissionAmount Decimal        @db.Decimal(12, 2)  // = subtotal × pct (the platform's cut)
+  subtotal         Decimal        @db.Decimal(12, 2) // seller's gross for this order
+  commissionPct    Decimal        @db.Decimal(5, 2) // snapshot of Seller.commissionPct
+  commissionAmount Decimal        @db.Decimal(12, 2) // = subtotal × pct (the platform's cut)
   tcsAmount        Decimal        @default(0) @db.Decimal(12, 2) // GST Sec-52 TCS (accrued for later)
-  netPayable       Decimal        @db.Decimal(12, 2)  // = subtotal − commission − tcs (owed to seller)
+  netPayable       Decimal        @db.Decimal(12, 2) // = subtotal − commission − tcs (owed to seller)
   settled          Boolean        @default(false)
   payoutId         String?
   payout           SellerPayout?  @relation(fields: [payoutId], references: [id], onDelete: SetNull)
@@ -1411,7 +1582,7 @@ model SubOrder {
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
 
-  items            OrderItem[]
+  items OrderItem[]
 
   @@index([orderId])
   @@index([sellerId])
@@ -1421,20 +1592,20 @@ model SubOrder {
 // Manual settlement record: the platform pays a seller their accumulated net and marks the
 // covered sub-orders settled.
 model SellerPayout {
-  id          String     @id @default(cuid())
+  id          String   @id @default(cuid())
   sellerId    String
-  seller      Seller     @relation(fields: [sellerId], references: [id])
-  grossAmount Decimal    @db.Decimal(12, 2)
-  commission  Decimal    @db.Decimal(12, 2)
-  tcs         Decimal    @default(0) @db.Decimal(12, 2)
-  netPaid     Decimal    @db.Decimal(12, 2)
-  paidAt      DateTime   @default(now())
-  mode        String?    // BANK_TRANSFER / UPI / CASH
+  seller      Seller   @relation(fields: [sellerId], references: [id])
+  grossAmount Decimal  @db.Decimal(12, 2)
+  commission  Decimal  @db.Decimal(12, 2)
+  tcs         Decimal  @default(0) @db.Decimal(12, 2)
+  netPaid     Decimal  @db.Decimal(12, 2)
+  paidAt      DateTime @default(now())
+  mode        String? // BANK_TRANSFER / UPI / CASH
   reference   String?
   note        String?
-  createdAt   DateTime   @default(now())
+  createdAt   DateTime @default(now())
 
-  subOrders   SubOrder[]
+  subOrders SubOrder[]
 
   @@index([sellerId])
 }
@@ -1458,21 +1629,21 @@ model CashSettlement {
 // ─── Existing billing models (unchanged) ─────────────────────────────
 
 model Customer {
-  id                  String       @id @default(cuid())
-  name                String
-  phone               String
-  email               String?
-  gstin               String?      @db.VarChar(15)
-  customerType        CustomerType @default(B2C)
-  panNumber           String?      @db.VarChar(10)
-  billingAddress      Json?
-  shippingAddress     Json?
-  creditLimit         Decimal?     @db.Decimal(12, 2)
-  paymentTermsDays    Int          @default(0)
-  outstandingBalance  Decimal      @default(0) @db.Decimal(12, 2)
-  isActive            Boolean      @default(true)
-  createdAt           DateTime     @default(now())
-  updatedAt           DateTime     @updatedAt
+  id                 String       @id @default(cuid())
+  name               String
+  phone              String
+  email              String?
+  gstin              String?      @db.VarChar(15)
+  customerType       CustomerType @default(B2C)
+  panNumber          String?      @db.VarChar(10)
+  billingAddress     Json?
+  shippingAddress    Json?
+  creditLimit        Decimal?     @db.Decimal(12, 2)
+  paymentTermsDays   Int          @default(0)
+  outstandingBalance Decimal      @default(0) @db.Decimal(12, 2)
+  isActive           Boolean      @default(true)
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
 
   invoices Invoice[]
 
@@ -1503,73 +1674,88 @@ model Vendor {
 }
 
 model Invoice {
-  id                    String        @id @default(cuid())
-  invoiceNumber         String        @unique
-  invoiceDate           DateTime
-  invoiceType           InvoiceType
-  supplyType            SupplyType
+  id            String      @id @default(cuid())
+  invoiceNumber String      @unique
+  invoiceDate   DateTime
+  invoiceType   InvoiceType
+  supplyType    SupplyType
 
-  customerId            String
-  customer              Customer      @relation(fields: [customerId], references: [id])
-  customerName          String
-  customerGstin         String?
-  billingAddress        Json?
-  shippingAddress       Json?
+  customerId      String
+  customer        Customer @relation(fields: [customerId], references: [id])
+  customerName    String
+  customerGstin   String?
+  billingAddress  Json?
+  shippingAddress Json?
 
-  supplierStateCode     String        @default("09") @db.VarChar(2)
-  placeOfSupplyCode     String        @default("09") @db.VarChar(2)
-  isInterState          Boolean       @default(false)
+  supplierStateCode String  @default("09") @db.VarChar(2)
+  placeOfSupplyCode String  @default("09") @db.VarChar(2)
+  isInterState      Boolean @default(false)
 
-  subtotal              Decimal       @db.Decimal(12, 2)
-  totalCgst             Decimal       @db.Decimal(12, 2)
-  totalSgst             Decimal       @db.Decimal(12, 2)
-  totalIgst             Decimal       @default(0) @db.Decimal(12, 2)
-  totalCess             Decimal       @default(0) @db.Decimal(12, 2)
-  totalDiscount         Decimal       @default(0) @db.Decimal(12, 2)
-  roundOff              Decimal       @default(0) @db.Decimal(8, 2)
-  totalAmount           Decimal       @db.Decimal(12, 2)
-  amountInWords         String
+  subtotal      Decimal @db.Decimal(12, 2)
+  totalCgst     Decimal @db.Decimal(12, 2)
+  totalSgst     Decimal @db.Decimal(12, 2)
+  totalIgst     Decimal @default(0) @db.Decimal(12, 2)
+  totalCess     Decimal @default(0) @db.Decimal(12, 2)
+  totalDiscount Decimal @default(0) @db.Decimal(12, 2)
+  roundOff      Decimal @default(0) @db.Decimal(8, 2)
+  totalAmount   Decimal @db.Decimal(12, 2)
+  amountInWords String
 
   originalInvoiceId     String?
-  originalInvoice       Invoice?      @relation("CreditDebitNotes", fields: [originalInvoiceId], references: [id])
-  creditDebitNotes      Invoice[]     @relation("CreditDebitNotes")
+  originalInvoice       Invoice?  @relation("CreditDebitNotes", fields: [originalInvoiceId], references: [id])
+  creditDebitNotes      Invoice[] @relation("CreditDebitNotes")
   originalInvoiceNumber String?
 
-  status                InvoiceStatus @default(DRAFT)
-  paymentStatus         PaymentStatus @default(UNPAID)
-  paymentDueDate        DateTime?
-  amountPaid            Decimal       @default(0) @db.Decimal(12, 2)
-  amountDue             Decimal       @db.Decimal(12, 2)
+  status         InvoiceStatus @default(DRAFT)
+  paymentStatus  PaymentStatus @default(UNPAID)
+  paymentDueDate DateTime?
+  amountPaid     Decimal       @default(0) @db.Decimal(12, 2)
+  amountDue      Decimal       @db.Decimal(12, 2)
 
-  gstr1Period           String?
-  gstr1Filed            Boolean       @default(false)
+  gstr1Period String?
+  gstr1Filed  Boolean @default(false)
+
+  // Audit stamp: which GST rate ruleset computed this invoice (P1c). NULL = pre-stamp/legacy. Line item
+  // amounts are already frozen per row, so this is for traceability only, never recomputation.
+  taxRuleVersion String?
 
   // Link to app order (V2). NOT unique any more: a multi-seller marketplace order produces ONE
   // invoice per seller sub-order, so an Order can own several invoices (queried by orderId).
-  orderId               String?
+  orderId         String?
   // Marketplace (Phase 6): the per-seller SubOrder this invoice covers (one invoice / SubOrder).
   // Null for legacy single-invoice orders. @unique → idempotent regeneration keys off the sub-order.
-  subOrderId            String?       @unique
+  subOrderId      String? @unique
   // The seller whose supply this invoice bills. Null ⇒ house (store-issued, the pre-Phase-6 path).
-  sellerId              String?
+  sellerId        String?
   // ⚠️ GST/CA: for an EXTERNAL seller the tax invoice is issued under THE SELLER'S identity (their
   // GSTIN), not the store's — these snapshot the issuing supplier so the PDF/GSTR-1 reflect it.
   // All null ⇒ the PDF falls back to the store Company (house-seller / legacy path, unchanged).
-  supplierName          String?
-  supplierGstin         String?       @db.VarChar(15)
-  supplierPan           String?       @db.VarChar(10)
-  supplierAddress       String?
-  supplierPhone         String?
+  // ⚠️ supplierName's nullness is ALSO relied on elsewhere (routes/orders.ts, this file's own
+  // syncInvoicePaymentStatus) as the "is this a house invoice" signal — do not repurpose it for a
+  // house snapshot; see houseCompanySnapshot below instead.
+  supplierName    String?
+  supplierGstin   String? @db.VarChar(15)
+  supplierPan     String? @db.VarChar(10)
+  supplierAddress String?
+  supplierPhone   String?
 
-  createdBy             String
-  approvedBy            String?
-  cancelledAt           DateTime?
-  cancellationReason    String?
-  pdfUrl                String?
-  isLocked              Boolean       @default(false)
+  // A snapshot of the store's own Company row AT THE MOMENT this (house) invoice was created — so
+  // editing the store's GSTIN/address/PAN in Settings later can never retroactively change what an
+  // already-issued invoice's PDF shows (a real GST-compliance requirement: the document must reflect
+  // the supplier's details as of the date of supply). Null for external-seller invoices (they use
+  // supplier* above) AND for invoices created before this field existed — both fall back to reading
+  // the live Company row, unchanged from the pre-existing behaviour.
+  houseCompanySnapshot Json?
 
-  createdAt             DateTime      @default(now())
-  updatedAt             DateTime      @updatedAt
+  createdBy          String
+  approvedBy         String?
+  cancelledAt        DateTime?
+  cancellationReason String?
+  pdfUrl             String?
+  isLocked           Boolean   @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   lineItems InvoiceLineItem[]
 
@@ -1583,40 +1769,40 @@ model Invoice {
 }
 
 model InvoiceLineItem {
-  id              String  @id @default(cuid())
-  invoiceId       String
-  invoice         Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
-  lineNumber      Int
+  id         String  @id @default(cuid())
+  invoiceId  String
+  invoice    Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  lineNumber Int
 
-  productId       String?
-  product         Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
-  variantId       String?
-  variant         ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
-  description     String
-  hsnCode         String   @db.VarChar(8)
+  productId   String?
+  product     Product?        @relation(fields: [productId], references: [id], onDelete: SetNull)
+  variantId   String?
+  variant     ProductVariant? @relation(fields: [variantId], references: [id], onDelete: SetNull)
+  description String
+  hsnCode     String          @db.VarChar(8)
 
-  quantity        Decimal  @db.Decimal(10, 3)
-  unit            String
-  unitPrice       Decimal  @db.Decimal(10, 2)
+  quantity  Decimal @db.Decimal(10, 3)
+  unit      String
+  unitPrice Decimal @db.Decimal(10, 2)
 
-  discountPercent Decimal  @default(0) @db.Decimal(5, 2)
-  discountAmount  Decimal  @default(0) @db.Decimal(10, 2)
-  taxableValue    Decimal  @db.Decimal(12, 2)
+  discountPercent Decimal @default(0) @db.Decimal(5, 2)
+  discountAmount  Decimal @default(0) @db.Decimal(10, 2)
+  taxableValue    Decimal @db.Decimal(12, 2)
 
-  gstRate         Decimal  @db.Decimal(5, 2)
-  cgstRate        Decimal  @db.Decimal(5, 2)
-  cgstAmount      Decimal  @db.Decimal(10, 2)
-  sgstRate        Decimal  @db.Decimal(5, 2)
-  sgstAmount      Decimal  @db.Decimal(10, 2)
-  igstRate        Decimal  @default(0) @db.Decimal(5, 2)
-  igstAmount      Decimal  @default(0) @db.Decimal(10, 2)
-  cessRate        Decimal  @default(0) @db.Decimal(5, 2)
-  cessAmount      Decimal  @default(0) @db.Decimal(10, 2)
+  gstRate    Decimal @db.Decimal(5, 2)
+  cgstRate   Decimal @db.Decimal(5, 2)
+  cgstAmount Decimal @db.Decimal(10, 2)
+  sgstRate   Decimal @db.Decimal(5, 2)
+  sgstAmount Decimal @db.Decimal(10, 2)
+  igstRate   Decimal @default(0) @db.Decimal(5, 2)
+  igstAmount Decimal @default(0) @db.Decimal(10, 2)
+  cessRate   Decimal @default(0) @db.Decimal(5, 2)
+  cessAmount Decimal @default(0) @db.Decimal(10, 2)
 
-  totalAmount     Decimal  @db.Decimal(12, 2)
-  isFreeItem      Boolean  @default(false)
+  totalAmount Decimal @db.Decimal(12, 2)
+  isFreeItem  Boolean @default(false)
 
-  createdAt       DateTime @default(now())
+  createdAt DateTime @default(now())
 }
 
 model Payment {
@@ -1640,33 +1826,33 @@ model Payment {
 }
 
 model PurchaseBill {
-  id               String             @id @default(cuid())
-  vendorId         String
-  vendor           Vendor             @relation(fields: [vendorId], references: [id])
-  billNumber       String
-  billDate         DateTime
-  receivedDate     DateTime
-  vendorGstin      String?            @db.VarChar(15)
+  id           String   @id @default(cuid())
+  vendorId     String
+  vendor       Vendor   @relation(fields: [vendorId], references: [id])
+  billNumber   String
+  billDate     DateTime
+  receivedDate DateTime
+  vendorGstin  String?  @db.VarChar(15)
 
-  subtotal         Decimal            @db.Decimal(12, 2)
-  totalCgst        Decimal            @db.Decimal(12, 2)
-  totalSgst        Decimal            @db.Decimal(12, 2)
-  totalIgst        Decimal            @default(0) @db.Decimal(12, 2)
-  totalCess        Decimal            @default(0) @db.Decimal(12, 2)
-  totalAmount      Decimal            @db.Decimal(12, 2)
-  tdsAmount        Decimal            @default(0) @db.Decimal(10, 2)
-  netPayable       Decimal            @db.Decimal(12, 2)
+  subtotal    Decimal @db.Decimal(12, 2)
+  totalCgst   Decimal @db.Decimal(12, 2)
+  totalSgst   Decimal @db.Decimal(12, 2)
+  totalIgst   Decimal @default(0) @db.Decimal(12, 2)
+  totalCess   Decimal @default(0) @db.Decimal(12, 2)
+  totalAmount Decimal @db.Decimal(12, 2)
+  tdsAmount   Decimal @default(0) @db.Decimal(10, 2)
+  netPayable  Decimal @db.Decimal(12, 2)
 
-  itcEligible      Boolean            @default(true)
+  itcEligible        Boolean @default(true)
   itcClaimedInPeriod String?
-  isReverseCharge  Boolean            @default(false)
+  isReverseCharge    Boolean @default(false)
 
-  status           PurchaseBillStatus @default(DRAFT)
-  paymentDueDate   DateTime?
-  documentUrl      String?
+  status         PurchaseBillStatus @default(DRAFT)
+  paymentDueDate DateTime?
+  documentUrl    String?
 
-  createdAt        DateTime           @default(now())
-  updatedAt        DateTime           @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   lineItems PurchaseBillLine[]
 
@@ -1675,22 +1861,22 @@ model PurchaseBill {
 }
 
 model PurchaseBillLine {
-  id              String       @id @default(cuid())
-  purchaseBillId  String
-  purchaseBill    PurchaseBill @relation(fields: [purchaseBillId], references: [id], onDelete: Cascade)
+  id             String       @id @default(cuid())
+  purchaseBillId String
+  purchaseBill   PurchaseBill @relation(fields: [purchaseBillId], references: [id], onDelete: Cascade)
 
-  description     String
-  hsnCode         String       @db.VarChar(8)
-  quantity        Decimal      @db.Decimal(10, 3)
-  unitPrice       Decimal      @db.Decimal(10, 2)
-  taxableValue    Decimal      @db.Decimal(12, 2)
-  gstRate         Decimal      @db.Decimal(5, 2)
-  cgstAmount      Decimal      @db.Decimal(10, 2)
-  sgstAmount      Decimal      @db.Decimal(10, 2)
-  igstAmount      Decimal      @default(0) @db.Decimal(10, 2)
-  totalAmount     Decimal      @db.Decimal(12, 2)
+  description  String
+  hsnCode      String  @db.VarChar(8)
+  quantity     Decimal @db.Decimal(10, 3)
+  unitPrice    Decimal @db.Decimal(10, 2)
+  taxableValue Decimal @db.Decimal(12, 2)
+  gstRate      Decimal @db.Decimal(5, 2)
+  cgstAmount   Decimal @db.Decimal(10, 2)
+  sgstAmount   Decimal @db.Decimal(10, 2)
+  igstAmount   Decimal @default(0) @db.Decimal(10, 2)
+  totalAmount  Decimal @db.Decimal(12, 2)
 
-  createdAt       DateTime     @default(now())
+  createdAt DateTime @default(now())
 }
 
 model Expense {
@@ -1734,59 +1920,59 @@ model Employee {
 }
 
 model SalaryRecord {
-  id               String       @id @default(cuid())
-  employeeId       String
-  employee         Employee     @relation(fields: [employeeId], references: [id])
-  month            Int
-  year             Int
-  basicSalary      Decimal      @db.Decimal(10, 2)
-  hra              Decimal      @default(0) @db.Decimal(10, 2)
-  otherAllowances  Decimal      @default(0) @db.Decimal(10, 2)
-  grossSalary      Decimal      @db.Decimal(10, 2)
-  pfDeduction      Decimal      @default(0) @db.Decimal(10, 2)
-  esiDeduction     Decimal      @default(0) @db.Decimal(10, 2)
-  tdsDeduction     Decimal      @default(0) @db.Decimal(10, 2)
-  otherDeductions  Decimal      @default(0) @db.Decimal(10, 2)
-  netSalary        Decimal      @db.Decimal(10, 2)
-  paymentDate      DateTime?
-  paymentMode      PaymentMode?
-  paymentRef       String?
-  status           SalaryStatus @default(DRAFT)
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
+  id              String       @id @default(cuid())
+  employeeId      String
+  employee        Employee     @relation(fields: [employeeId], references: [id])
+  month           Int
+  year            Int
+  basicSalary     Decimal      @db.Decimal(10, 2)
+  hra             Decimal      @default(0) @db.Decimal(10, 2)
+  otherAllowances Decimal      @default(0) @db.Decimal(10, 2)
+  grossSalary     Decimal      @db.Decimal(10, 2)
+  pfDeduction     Decimal      @default(0) @db.Decimal(10, 2)
+  esiDeduction    Decimal      @default(0) @db.Decimal(10, 2)
+  tdsDeduction    Decimal      @default(0) @db.Decimal(10, 2)
+  otherDeductions Decimal      @default(0) @db.Decimal(10, 2)
+  netSalary       Decimal      @db.Decimal(10, 2)
+  paymentDate     DateTime?
+  paymentMode     PaymentMode?
+  paymentRef      String?
+  status          SalaryStatus @default(DRAFT)
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
 
   @@unique([employeeId, month, year])
 }
 
 model TdsRecord {
-  id               String         @id @default(cuid())
-  deducteeType     TdsDeducteeType
-  deducteeId       String
-  deducteeName     String
-  deducteePan      String?        @db.VarChar(10)
-  section          String
-  paymentDate      DateTime
-  paymentAmount    Decimal        @db.Decimal(12, 2)
-  tdsRate          Decimal        @db.Decimal(5, 2)
-  tdsAmount        Decimal        @db.Decimal(10, 2)
-  challanNumber    String?
-  challanDate      DateTime?
-  depositedToGovt  Boolean        @default(false)
-  depositDate      DateTime?
-  quarter          TdsQuarter
-  financialYear    String
-  returnFiled      Boolean        @default(false)
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  id              String          @id @default(cuid())
+  deducteeType    TdsDeducteeType
+  deducteeId      String
+  deducteeName    String
+  deducteePan     String?         @db.VarChar(10)
+  section         String
+  paymentDate     DateTime
+  paymentAmount   Decimal         @db.Decimal(12, 2)
+  tdsRate         Decimal         @db.Decimal(5, 2)
+  tdsAmount       Decimal         @db.Decimal(10, 2)
+  challanNumber   String?
+  challanDate     DateTime?
+  depositedToGovt Boolean         @default(false)
+  depositDate     DateTime?
+  quarter         TdsQuarter
+  financialYear   String
+  returnFiled     Boolean         @default(false)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
 }
 
 model InvoiceCounter {
-  id             String   @id @default(cuid())
-  prefix         String
-  financialYear  String
-  lastNumber     Int      @default(0)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  id            String   @id @default(cuid())
+  prefix        String
+  financialYear String
+  lastNumber    Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
 
   @@unique([prefix, financialYear])
 }
@@ -1831,15 +2017,15 @@ enum ProductIntakeStatus {
 }
 
 model ProductIntake {
-  id          String              @id @default(cuid())
-  submittedBy String              // Free-text "Who are you?" (e.g. "Rohit (brother)")
-  payload     Json                // Array of product objects matching the HTML form's shape
-  productCount Int                @default(0) // Denormalized for cheap list rendering
-  variantCount Int                @default(0)
-  status      ProductIntakeStatus @default(PENDING)
-  notes       String?             // Owner notes after review
-  createdAt   DateTime            @default(now())
-  updatedAt   DateTime            @updatedAt
+  id           String              @id @default(cuid())
+  submittedBy  String // Free-text "Who are you?" (e.g. "Rohit (brother)")
+  payload      Json // Array of product objects matching the HTML form's shape
+  productCount Int                 @default(0) // Denormalized for cheap list rendering
+  variantCount Int                 @default(0)
+  status       ProductIntakeStatus @default(PENDING)
+  notes        String? // Owner notes after review
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
 
   @@index([status, createdAt])
 }
@@ -1851,7 +2037,7 @@ model ProductIntake {
 // searches), never a per-customer search history, so there's nothing to scrub on account deletion.
 model SearchQuery {
   id          String   @id @default(cuid())
-  term        String   // normalized: trimmed + lowercased, so "Amul"/" amul " roll up together
+  term        String // normalized: trimmed + lowercased, so "Amul"/" amul " roll up together
   resultCount Int
   createdAt   DateTime @default(now())
 

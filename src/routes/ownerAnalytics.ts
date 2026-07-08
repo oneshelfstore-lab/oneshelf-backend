@@ -184,7 +184,7 @@ async function buildProductSparklines(
 async function buildCatalogHealth(range: string) {
   const since = rangeSince(range);
 
-  const [revenueByVariant, unitsByVariant, activeProducts] = await Promise.all([
+  const [revenueByVariant, unitsByVariant, costRows, activeProducts] = await Promise.all([
     // Realized revenue — DELIVERED only, same convention as todayRevenue/revenue30 above.
     prisma.orderItem.groupBy({
       by: ["variantId"],
@@ -196,6 +196,15 @@ async function buildCatalogHealth(range: string) {
       by: ["variantId"],
       _sum: { quantity: true },
       where: { variantId: { not: null }, order: { status: { not: "CANCELLED" }, createdAt: { gte: since } } },
+    }),
+    // Cost actually paid at sale time (OrderItem.costPriceSnapshot, from services/stockBatches.ts's
+    // FIFO ledger) — same population as unitsByVariant above. NOT a groupBy: rows with vs without a
+    // snapshot need to be told apart (a null snapshot means a pre-migration order that predates the
+    // batch ledger, handled as a fallback below), so this is summed in JS — same pattern the basket
+    // affinity query further down already uses for a comparably-sized dataset.
+    prisma.orderItem.findMany({
+      where: { variantId: { not: null }, order: { status: { not: "CANCELLED" }, createdAt: { gte: since } } },
+      select: { variantId: true, quantity: true, costPriceSnapshot: true },
     }),
     prisma.catalogProduct.findMany({
       where: { isActive: true },
@@ -220,6 +229,25 @@ async function buildCatalogHealth(range: string) {
     unitsByVariant.map((r) => [r.variantId as string, Number(r._sum.quantity ?? 0)])
   );
 
+  // Real historical cost per variant, split into what has a snapshot (accurate) vs what doesn't
+  // (pre-migration rows with no batch data — costPriceSnapshot is null). The latter is filled in
+  // below from the variant's CURRENT cost, same as this endpoint always did, but now scoped only to
+  // the rows that genuinely have no better number, instead of applied blanket to every unit sold.
+  interface VariantCostAgg { knownCost: number; knownQty: number; estimatedQty: number }
+  const costByVariant = new Map<string, VariantCostAgg>();
+  for (const row of costRows) {
+    const vid = row.variantId as string;
+    const agg = costByVariant.get(vid) ?? { knownCost: 0, knownQty: 0, estimatedQty: 0 };
+    const qty = Number(row.quantity);
+    if (row.costPriceSnapshot != null) {
+      agg.knownCost += qty * Number(row.costPriceSnapshot);
+      agg.knownQty += qty;
+    } else {
+      agg.estimatedQty += qty;
+    }
+    costByVariant.set(vid, agg);
+  }
+
   // Roll variant-level revenue/units/stock up to their parent product.
   interface ProductAgg {
     id: string;
@@ -232,6 +260,7 @@ async function buildCatalogHealth(range: string) {
     stockValue: number;
     costKnownRevenue: number;
     costKnownCost: number;
+    hasEstimatedCost: boolean;
     createdAt: Date;
   }
   const products: ProductAgg[] = [];
@@ -240,6 +269,7 @@ async function buildCatalogHealth(range: string) {
 
   for (const p of activeProducts) {
     let revenue = 0, units = 0, stock = 0, stockValue = 0, costKnownRevenue = 0, costKnownCost = 0;
+    let hasEstimatedCost = false;
     for (const v of p.variants) {
       variantToProductId.set(v.id, p.id);
       const vRevenue = revenueByVariantMap.get(v.id) ?? 0;
@@ -249,9 +279,19 @@ async function buildCatalogHealth(range: string) {
       units += vUnits;
       stock += vStock;
       stockValue += vStock * Number(v.sellingPrice);
-      if (v.costPrice != null) {
-        costKnownRevenue += vRevenue;
-        costKnownCost += vUnits * Number(v.costPrice);
+
+      const vCost = costByVariant.get(v.id);
+      if (vCost) {
+        // Snapshotted cost is always usable; a pre-migration row with no snapshot only counts if the
+        // variant currently has SOME cost on file to estimate from (v.costPrice != null) — otherwise
+        // those units simply have no cost basis at all, same as before this fix existed.
+        const estimatedQtyUsable = v.costPrice != null ? vCost.estimatedQty : 0;
+        const consideredQty = vCost.knownQty + estimatedQtyUsable;
+        if (consideredQty > 0) {
+          costKnownRevenue += vRevenue;
+          costKnownCost += vCost.knownCost + estimatedQtyUsable * Number(v.costPrice ?? 0);
+          if (estimatedQtyUsable > 0) hasEstimatedCost = true;
+        }
       }
     }
     const agg: ProductAgg = {
@@ -259,7 +299,7 @@ async function buildCatalogHealth(range: string) {
       name: p.name,
       categoryId: p.categoryId,
       categoryName: p.category.name,
-      revenue, units, stock, stockValue, costKnownRevenue, costKnownCost,
+      revenue, units, stock, stockValue, costKnownRevenue, costKnownCost, hasEstimatedCost,
       createdAt: p.createdAt,
     };
     products.push(agg);
@@ -306,19 +346,23 @@ async function buildCatalogHealth(range: string) {
       sublabel: `${p.units} sold this window`,
     }));
 
-  // 4. Category revenue + margin. Margin only counts lines whose variant has costPrice set
-  // (`hasFullCostData` tells the client whether that's ~all of the category's revenue or a
-  // partial sample, so a category with no cost data entered doesn't silently show 0% margin).
-  interface CategoryAgg { name: string; revenue: number; units: number; costKnownRevenue: number; costKnownCost: number }
+  // 4. Category revenue + margin, computed from each sale's REAL cost at the time it sold
+  // (OrderItem.costPriceSnapshot — see the costByVariant aggregation above), not today's live
+  // costPrice against historical units. `hasFullCostData` tells the client whether that's ~all of
+  // the category's revenue or a partial sample, so a category with no cost data entered doesn't
+  // silently show 0% margin; `hasEstimatedCost` separately flags the transitional case where some of
+  // it fell back to today's cost for a pre-migration order with no snapshot.
+  interface CategoryAgg { name: string; revenue: number; units: number; costKnownRevenue: number; costKnownCost: number; hasEstimatedCost: boolean }
   const byCategory = new Map<string, CategoryAgg>();
   for (const p of products) {
     const c = byCategory.get(p.categoryId) ?? {
-      name: p.categoryName, revenue: 0, units: 0, costKnownRevenue: 0, costKnownCost: 0,
+      name: p.categoryName, revenue: 0, units: 0, costKnownRevenue: 0, costKnownCost: 0, hasEstimatedCost: false,
     };
     c.revenue += p.revenue;
     c.units += p.units;
     c.costKnownRevenue += p.costKnownRevenue;
     c.costKnownCost += p.costKnownCost;
+    if (p.hasEstimatedCost) c.hasEstimatedCost = true;
     byCategory.set(p.categoryId, c);
   }
   const categoryBreakdown = [...byCategory.entries()]
@@ -336,6 +380,9 @@ async function buildCatalogHealth(range: string) {
         marginAmount,
         marginPct,
         hasFullCostData: c.costKnownRevenue >= c.revenue * 0.99,
+        // True only while pre-migration orders (no costPriceSnapshot) are still inside the analytics
+        // window — ages out on its own as those orders fall out of range, never needs a backfill.
+        hasEstimatedCost: c.hasEstimatedCost,
       };
     });
 

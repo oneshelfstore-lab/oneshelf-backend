@@ -22,6 +22,7 @@ import { refundWalletOnCancel } from "../services/referralRewards.js";
 import { markOrderPaid } from "../services/orderPayment.js";
 import { reconcileOrderPayment } from "../services/paymentReconciliation.js";
 import { generateOtp, orderRequiresOtp, OTP_VISIBLE_STATUSES } from "../lib/otp.js";
+import { consumeFifo, recordConsumption, restoreConsumption, type ConsumeResult } from "../services/stockBatches.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -143,28 +144,31 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
 
     // Transactional: decrement stock + create order + clear cart
     const order = await prisma.$transaction(async (tx) => {
-      // Validate + atomically decrement stock for each item.
-      // A guarded conditional update (updateMany WHERE stock >= needed) makes the
-      // check-and-decrement a single atomic operation, eliminating the read-check-write
-      // race that previously allowed two concurrent orders to both buy the last unit
-      // (overselling). updateMany returns count=0 when the guard fails.
+      // Validate + atomically consume FIFO stock batches for each item. consumeFifo replicates the
+      // exact same guarded-decrement atomicity the old single-row updateMany gave (see its own
+      // doc comment) — it just walks oldest-batch-first instead of one flat counter — and additionally
+      // returns what was actually drawn so we can snapshot the real cost onto each OrderItem below.
+      // Keyed by variantId (never duplicated within one order — CartItem has
+      // @@unique([userId, variantId, savedForLater])) so it can be looked up again once the
+      // OrderItems exist, without depending on Prisma's nested-create return array order.
+      const consumeResultByVariant = new Map<string, ConsumeResult>();
       for (const item of cartItems) {
         const isLoose = isLooseType(item.variant.product.productType);
         const packageSize = Number(item.variant.packageSize);
         const needed = isLoose ? Number(item.quantity) * packageSize : Number(item.quantity);
 
-        const result = await tx.productVariant.updateMany({
-          where: { id: item.variantId, isActive: true, stock: { gte: needed } },
-          data: { stock: { decrement: needed } },
-        });
-
-        if (result.count === 0) {
-          // Distinguish "gone/inactive" from "not enough stock" for a clear message.
-          const variant = await tx.productVariant.findUnique({ where: { id: item.variantId } });
-          if (!variant || !variant.isActive) {
-            throw new AppError(400, "PRODUCT_UNAVAILABLE", `Product variant ${item.variantId} is no longer available`);
+        try {
+          consumeResultByVariant.set(item.variantId, await consumeFifo(tx, item.variantId, needed));
+        } catch (e) {
+          if (e instanceof AppError && e.code === "INSUFFICIENT_STOCK") {
+            // Distinguish "gone/inactive" from "not enough stock" for a clear message.
+            const variant = await tx.productVariant.findUnique({ where: { id: item.variantId } });
+            if (!variant || !variant.isActive) {
+              throw new AppError(400, "PRODUCT_UNAVAILABLE", `Product variant ${item.variantId} is no longer available`);
+            }
+            throw new AppError(400, "INSUFFICIENT_STOCK", `Insufficient stock for ${item.variant.product.name}`);
           }
-          throw new AppError(400, "INSUFFICIENT_STOCK", `Insufficient stock for ${item.variant.product.name}`);
+          throw e;
         }
       }
 
@@ -175,6 +179,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         const pricingLine = totals.items.find(l => l.variantId === item.variantId);
         const effectivePrice = pricingLine?.effectiveUnitPrice ?? converted.sellingPrice;
         const lineTotal = pricingLine?.lineTotal ?? (effectivePrice * Number(item.quantity));
+        const consumeResult = consumeResultByVariant.get(item.variantId);
 
         return {
           variantId: item.variantId,
@@ -184,6 +189,8 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           hsnCode: item.variant.product.hsnCode,
           unitPrice: effectivePrice,
           mrp: pricingLine?.mrp ?? null,
+          // Weighted cost of the exact FIFO batches this sale drew from — see OrderItem.costPriceSnapshot.
+          costPriceSnapshot: consumeResult && consumeResult.totalQty > 0 ? consumeResult.weightedUnitCost : null,
           quantity: item.quantity,
           gstRate: pricingLine?.gstRate ?? 0,
           taxableValue: pricingLine?.taxableValue ?? lineTotal,
@@ -238,6 +245,14 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         },
         include: { items: true },
       });
+
+      // Now that each OrderItem has a real id, persist the batch draws recorded above against it
+      // (looked up by variantId — safe per the uniqueness note above).
+      for (const it of created.items) {
+        if (!it.variantId) continue;
+        const consumeResult = consumeResultByVariant.get(it.variantId);
+        if (consumeResult) await recordConsumption(tx, { orderItemId: it.id }, consumeResult.consumed);
+      }
 
       // Create OTP secret if required
       if (needsOtp) {
@@ -521,18 +536,11 @@ router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
     }
 
     await prisma.$transaction(async (tx) => {
-      // Restore stock
+      // Restore stock back into whichever batches each item actually drew from (a no-op for
+      // pre-migration items with no recorded consumption — nothing to restore, same as before).
       for (const item of order.items) {
         if (!item.variantId) continue;
-        const isLoose = item.isLoose;
-        const restoreAmount = isLoose && item.stepSize
-          ? item.quantity * Number(item.stepSize)
-          : item.quantity;
-
-        await tx.productVariant.update({
-          where: { id: item.variantId },
-          data: { stock: { increment: restoreAmount } },
-        });
+        await restoreConsumption(tx, { orderItemId: item.id });
       }
 
       await tx.order.update({
@@ -856,7 +864,7 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
       id: iv.id,
       invoiceNumber: iv.invoiceNumber,
       sellerName: iv.supplierName,
-      isHouse: iv.sellerId == null,
+      isHouse: iv.supplierName == null,
       totalAmount: Number(iv.totalAmount),
       invoiceType: iv.invoiceType,
     }));
@@ -909,29 +917,33 @@ router.post("/:orderId/items/:itemId/substitute/respond", async (req: FirebaseAu
     const priceDelta = Number(item.substitutePriceDelta ?? 0);
 
     await prisma.$transaction(async (tx) => {
-      // Decrement stock for the substitute variant.
+      // Restore the original variant's batches first (frees them up — and matters if the
+      // substitute happens to BE the original's own product in some other pack size drawing from
+      // the same underlying stock pool, though that's not a case this app currently creates).
+      if (item.variantId) {
+        await restoreConsumption(tx, { orderItemId: item.id });
+      }
+
+      // Consume FIFO batches for the substitute variant, then re-link this SAME orderItemId's
+      // consumption ledger to the substitute's draw (restoreConsumption above already cleared the
+      // old rows for this id) — costPriceSnapshot below reflects the substitute's real cost, not
+      // the original's.
+      let substituteCostSnapshot: number | null = item.costPriceSnapshot != null ? Number(item.costPriceSnapshot) : null;
       if (item.substituteVariantId) {
         const decrementBy = item.isLoose && item.stepSize
           ? Number(item.quantity) * Number(item.stepSize)
           : Number(item.quantity);
-        const updated = await tx.productVariant.updateMany({
-          where: { id: item.substituteVariantId, stock: { gte: decrementBy } },
-          data: { stock: { decrement: decrementBy } },
-        });
-        if (updated.count === 0) {
-          throw new ValidationError("Substitute is now out of stock");
+        let consumeResult;
+        try {
+          consumeResult = await consumeFifo(tx, item.substituteVariantId, decrementBy);
+        } catch (e) {
+          if (e instanceof AppError && e.code === "INSUFFICIENT_STOCK") {
+            throw new ValidationError("Substitute is now out of stock");
+          }
+          throw e;
         }
-      }
-
-      // Restore stock for the original variant.
-      if (item.variantId) {
-        const restoreBy = item.isLoose && item.stepSize
-          ? Number(item.quantity) * Number(item.stepSize)
-          : Number(item.quantity);
-        await tx.productVariant.update({
-          where: { id: item.variantId },
-          data: { stock: { increment: restoreBy } },
-        });
+        await recordConsumption(tx, { orderItemId: item.id }, consumeResult.consumed);
+        substituteCostSnapshot = consumeResult.totalQty > 0 ? consumeResult.weightedUnitCost : null;
       }
 
       // Update the order item — swap to the substitute.
@@ -944,6 +956,7 @@ router.post("/:orderId/items/:itemId/substitute/respond", async (req: FirebaseAu
           productName: item.substituteProductName ?? item.productName,
           imageUrl: item.substituteImageUrl,
           unitPrice: item.substituteUnitPrice ?? item.unitPrice,
+          costPriceSnapshot: substituteCostSnapshot,
           lineTotal: Number(item.substituteUnitPrice ?? item.unitPrice) * Number(item.quantity),
         },
       });

@@ -4,6 +4,7 @@ import prisma from "../lib/prisma.js";
 import { sendError, NotFoundError } from "../lib/errors.js";
 import { requireRole, type AuthRequest } from "../middleware/auth.js";
 import { isUpGstin } from "../validators/index.js";
+import { bustStoreState } from "../lib/stateCodes.js";
 
 const router = Router();
 
@@ -45,6 +46,7 @@ router.post("/", requireRole("OWNER") as any, async (req: Request, res: Response
 
     const data = companySchema.parse(req.body);
     const company = await prisma.company.create({ data });
+    bustStoreState(); // GSTIN → state code is derived; refresh the memo
     res.status(201).json({ success: true, data: company });
   } catch (e) {
     sendError(res, e);
@@ -64,6 +66,7 @@ router.put("/", requireRole("OWNER") as any, async (req: Request, res: Response)
 
     const data = companySchema.partial().parse(req.body);
     const company = await prisma.company.update({ where: { id: existing.id }, data });
+    bustStoreState(); // GSTIN → state code is derived; refresh the memo
     res.json({ success: true, data: company });
   } catch (e) {
     sendError(res, e);

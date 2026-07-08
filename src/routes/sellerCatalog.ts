@@ -5,6 +5,7 @@ import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
 import { formatVariantForApp, fromAppFormat, toAppFormat, assertVariantFloors } from "../utils/looseUnitConverter.js";
+import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
 
 // Seller-scoped catalog. Mounted at /api/app/seller/catalog. Every query is hard-filtered to the
 // caller's own sellerId — a seller can never see or edit another seller's products. New products are
@@ -60,6 +61,11 @@ function formatProductForApp(product: any) {
     isExempt: product.isExempt,
     isBranded: product.isBranded,
     isSubscribable: product.isSubscribable,
+    // Legal Metrology country-of-origin filter (Onboarding Phase 3) — editable by every seller
+    // (a factual origin declaration, not a merchandising privilege, so it's NOT house-gated like
+    // featuredIn99Store/isSampleEligible/isBuyOneGetOne below).
+    isImported: product.isImported,
+    countryOfOrigin: product.countryOfOrigin,
     // Surfaced so the HOUSE manager's editor prefills these correctly on edit (third-party sellers
     // can't change them anyway).
     featuredIn99Store: product.featuredIn99Store,
@@ -112,6 +118,10 @@ const productSchema = z.object({
   isExempt: z.boolean().default(false),
   isBranded: z.boolean().default(false),
   isSubscribable: z.boolean().default(false),
+  // Universally editable (not house-gated) — a factual origin declaration every seller can set
+  // for their own products, unlike the merchandising toggles below.
+  isImported: z.boolean().default(false),
+  countryOfOrigin: z.string().max(80).optional().nullable(),
   // Owner-only merchandising toggles — accepted only from the HOUSE manager (stripped for
   // third-party sellers below, so they keep the limited editor).
   isSampleEligible: z.boolean().optional(),
@@ -207,28 +217,48 @@ router.post("/", async (req: SellerRequest, res: Response) => {
       );
       if (floorErr) throw new ValidationError(floorErr);
     }
+    // Initial stock is seeded as each new variant's first StockBatch (below, after creation) rather
+    // than written directly onto the row — receiveBatch is the ONLY place ProductVariant.stock/
+    // costPrice should be written. SKU is unique within this creation (enforced above), so it's a
+    // safe correlation key back to the created row.
     const convertedVariants = variants.map((v) => {
       const c = fromAppFormat({ mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: v.costPrice, saleFloor: v.saleFloor, stock: v.stock, bulkPrice: v.bulkPrice, packageSize: v.packageSize }, isLoose);
       return {
         sku: v.sku, barcode: v.barcode, packageSize: v.packageSize, packageUnit: v.packageUnit,
-        mrp: c.mrp, sellingPrice: c.sellingPrice, costPrice: c.costPrice, saleFloor: c.saleFloor, stock: c.stock,
+        mrp: c.mrp, sellingPrice: c.sellingPrice, saleFloor: c.saleFloor, stock: 0,
+        initialStock: c.stock, initialCost: c.costPrice ?? 0,
         lowStockThreshold: v.lowStockThreshold, bulkMinQty: v.bulkMinQty, bulkPrice: c.bulkPrice, gstRateOverride: v.gstRateOverride,
       };
     });
 
-    const product = await prisma.catalogProduct.create({
-      data: {
-        ...productData,
-        handle,
-        categoryId: cat.id,
-        sellerId: req.sellerId!,
-        ...merchandising, // house → live now (+toggles); third-party → inactive pending approval
-        variants: { create: convertedVariants },
-      },
-      include: { variants: { orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
+    const product = await prisma.$transaction(async (tx) => {
+      const created = await tx.catalogProduct.create({
+        data: {
+          ...productData,
+          handle,
+          categoryId: cat.id,
+          sellerId: req.sellerId!,
+          ...merchandising, // house → live now (+toggles); third-party → inactive pending approval
+          variants: { create: convertedVariants.map(({ initialStock, initialCost, ...rest }) => rest) },
+        },
+        include: { variants: { orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
+      });
+
+      const bySku = new Map(created.variants.map((v) => [v.sku, v]));
+      for (const cv of convertedVariants) {
+        if (cv.initialStock > 0) {
+          const row = bySku.get(cv.sku);
+          if (row) await receiveBatch(tx, row.id, cv.initialStock, cv.initialCost, "Initial stock");
+        }
+      }
+
+      return tx.catalogProduct.findUnique({
+        where: { id: created.id },
+        include: { variants: { orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
+      });
     });
 
-    await ensureBrandPersisted(product.brand);
+    await ensureBrandPersisted(product?.brand);
 
     res.status(201).json({ success: true, data: formatProductForApp(product) });
   } catch (e) {
@@ -308,11 +338,16 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
           if (floorErr) throw new ValidationError(floorErr);
           const c = fromAppFormat({ mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: (v as any).costPrice, saleFloor: (v as any).saleFloor, stock: v.stock, bulkPrice: v.bulkPrice, packageSize: v.packageSize }, isLoose);
           if (v.id) {
-            const { id: vid, ...rest } = v;
-            await tx.productVariant.update({ where: { id: vid }, data: { ...rest, mrp: c.mrp, sellingPrice: c.sellingPrice, costPrice: c.costPrice, saleFloor: c.saleFloor, stock: c.stock, bulkPrice: c.bulkPrice } });
+            // Existing variant: stock/costPrice are batch rollups — route the edit through
+            // applyStockEdit instead of overwriting them directly (was silently blending a
+            // different-cost restock into the same row with no history).
+            const { id: vid, stock: _stock, costPrice: _costPrice, ...rest } = v as any;
+            await tx.productVariant.update({ where: { id: vid }, data: { ...rest, mrp: c.mrp, sellingPrice: c.sellingPrice, saleFloor: c.saleFloor, bulkPrice: c.bulkPrice } });
+            await applyStockEdit(tx, vid, c.stock, c.costPrice, "Edited via product editor");
           } else {
-            const { id: _unused, ...rest } = v;
-            await tx.productVariant.create({ data: { ...rest, mrp: c.mrp, sellingPrice: c.sellingPrice, costPrice: c.costPrice, saleFloor: c.saleFloor, stock: c.stock, bulkPrice: c.bulkPrice, productId } });
+            const { id: _unused, stock: _stock, costPrice: _costPrice, ...rest } = v as any;
+            const createdVariant = await tx.productVariant.create({ data: { ...rest, mrp: c.mrp, sellingPrice: c.sellingPrice, saleFloor: c.saleFloor, stock: 0, bulkPrice: c.bulkPrice, productId } });
+            if (c.stock > 0) await receiveBatch(tx, createdVariant.id, c.stock, c.costPrice ?? 0, "Initial stock");
           }
         }
       }
@@ -358,8 +393,50 @@ router.patch("/:id/stock", async (req: SellerRequest, res: Response) => {
 
     const isLoose = isLooseType(variant.product.productType);
     const c = fromAppFormat({ mrp: Number(variant.mrp), sellingPrice: Number(variant.sellingPrice), stock, bulkPrice: variant.bulkPrice ? Number(variant.bulkPrice) : undefined, packageSize: Number(variant.packageSize) }, isLoose);
-    await prisma.productVariant.update({ where: { id: variantId }, data: { stock: c.stock } });
+    // Quick stepper — no new cost info: an increase restocks at the variant's current weighted-
+    // average cost, a decrease is a shrinkage/miscount correction. A genuinely different cost
+    // belongs in the full editor or the dedicated Restock action below.
+    await prisma.$transaction((tx) => applyStockEdit(tx, variantId, c.stock));
     res.json({ success: true, message: "Stock updated" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /:id/stock/receive — restock a variant, at whatever cost it actually came in at ──
+// Mirrors ownerCatalog's equivalent endpoint — see its comment for why this is separate from the
+// quick stepper above.
+const receiveStockSchema = z.object({
+  variantId: z.string().min(1),
+  qty: z.number().positive(),
+  unitCost: z.number().min(0),
+  note: z.string().max(200).optional(),
+});
+
+router.post("/:id/stock/receive", async (req: SellerRequest, res: Response) => {
+  try {
+    const productId = req.params.id as string;
+    const { variantId, qty, unitCost, note } = receiveStockSchema.parse(req.body);
+
+    const variant = await prisma.productVariant.findFirst({
+      where: { id: variantId, productId, product: { sellerId: req.sellerId } },
+      include: { product: { select: { productType: true } } },
+    });
+    if (!variant) throw new NotFoundError("Variant", variantId);
+
+    const isLoose = isLooseType(variant.product.productType);
+    const c = fromAppFormat(
+      {
+        mrp: Number(variant.mrp), sellingPrice: Number(variant.sellingPrice),
+        costPrice: unitCost, stock: qty,
+        bulkPrice: variant.bulkPrice ? Number(variant.bulkPrice) : undefined,
+        packageSize: Number(variant.packageSize),
+      },
+      isLoose,
+    );
+
+    await prisma.$transaction((tx) => receiveBatch(tx, variantId, c.stock, c.costPrice ?? 0, note));
+    res.json({ success: true, message: "Stock received" });
   } catch (e) {
     sendError(res, e);
   }

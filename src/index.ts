@@ -39,6 +39,8 @@ import ownerUsersRoutes from "./routes/ownerUsers.js";
 import ownerSellersRoutes from "./routes/ownerSellers.js";
 import ownerAnalyticsRoutes from "./routes/ownerAnalytics.js";
 import ownerGstr8Routes from "./routes/ownerGstr8.js";
+import ownerReportsRoutes from "./routes/ownerReports.js";
+import sellerReportsRoutes from "./routes/sellerReports.js";
 import sellerCatalogRoutes from "./routes/sellerCatalog.js";
 import sellerOrdersRoutes from "./routes/sellerOrders.js";
 import sellerAccountRoutes from "./routes/sellerAccount.js";
@@ -52,6 +54,9 @@ import internalRoutes from "./routes/internal.js";
 import webhookRoutes from "./routes/webhooks.js";
 import productIntakeRoutes from "./routes/productIntake.js";
 import ownerProductIntakeRoutes from "./routes/ownerProductIntake.js";
+import onboardingAgreementRoutes from "./routes/onboardingAgreements.js";
+import deliveryOnboardingRoutes from "./routes/deliveryOnboarding.js";
+import ownerOnboardingQueueRoutes from "./routes/ownerOnboardingQueue.js";
 import { authMiddleware } from "./middleware/auth.js";
 import { auditLoggerMiddleware } from "./middleware/auditLogger.js";
 import { globalErrorHandler } from "./middleware/errorHandler.js";
@@ -276,6 +281,9 @@ app.use("/api/app/deal-collages", publicDealCollageRouter);
 app.use("/api/app/brands", publicBrandRouter);
 // Public — submitted from the login page, before the user has an account.
 app.use("/api/app/partner-applications", partnerApplicationRoutes);
+// Public — static onboarding consent/agreement copy (nothing sensitive; see the file's own note
+// on why this is server-served rather than hardcoded in the app).
+app.use("/api/app/onboarding", onboardingAgreementRoutes);
 // Internal automation (subscriptions engine) — shared-secret header, no user auth. Must stay BEFORE
 // the global JWT guard so an external scheduler with no identity can reach it.
 app.use("/api/app/internal", internalRoutes);
@@ -294,6 +302,7 @@ app.use("/api/app/owner/delivery-agents", ownerStaffRoutes);
 app.use("/api/app/owner/complaints", ownerComplaintRoutes);
 app.use("/api/app/owner/quote-requests", ownerQuoteRoutes);
 app.use("/api/app/owner/partner-applications", ownerPartnerApplicationRoutes);
+app.use("/api/app/owner/onboarding-queue", ownerOnboardingQueueRoutes);
 app.use("/api/app/owner/broadcast", ownerBroadcastRoutes);
 app.use("/api/app/owner/banners", ownerBannerRouter);
 app.use("/api/app/owner/coupons", ownerCouponRouter);
@@ -304,6 +313,7 @@ app.use("/api/app/owner/users", ownerUsersRoutes);
 app.use("/api/app/owner/sellers", ownerSellersRoutes);
 app.use("/api/app/owner/analytics", ownerAnalyticsRoutes);
 app.use("/api/app/owner/gstr8", ownerGstr8Routes);
+app.use("/api/app/owner/reports", ownerReportsRoutes);
 app.use("/api/app/owner/subscriptions", ownerSubscriptionRoutes);
 app.use("/api/app/owner/membership", ownerMembershipRoutes);
 // Owner review queue for the product-intake form (Firebase OWNER auth) — approve/reject/delete.
@@ -313,8 +323,10 @@ app.use("/api/app/seller/brands", sellerBrandRouter);
 app.use("/api/app/seller/orders", sellerOrdersRoutes);
 app.use("/api/app/seller/subscriptions", sellerSubscriptionRoutes);
 app.use("/api/app/seller/me", sellerAccountRoutes);
+app.use("/api/app/seller/reports", sellerReportsRoutes);
 app.use("/api/app/seller/quote-requests", sellerQuoteRoutes);
 app.use("/api/app/delivery/orders", deliveryRoutes);
+app.use("/api/app/delivery/onboarding", deliveryOnboardingRoutes);
 // More-specific than "/api/app/me" → MUST be mounted before it (Express matches prefixes in order).
 app.use("/api/app/me/subscriptions", subscriptionRoutes);
 app.use("/api/app/me", appUserRoutes);

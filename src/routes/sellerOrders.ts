@@ -5,6 +5,23 @@ import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
 import { notifyOrderStatusChange, notifyNewDeliveryAvailable, notifyNewComplaint, notifySubOrderPacked } from "../services/fcmNotifier.js";
+import { bustUserSpend } from "../services/loyalty.js";
+import { refundPayment } from "../services/razorpay.js";
+import { syncInvoicePaymentStatus } from "../services/orderInvoice.js";
+import { refundWalletOnCancel } from "../services/referralRewards.js";
+import { restoreConsumption } from "../services/stockBatches.js";
+
+// Fixed, translatable reason set the co-manager/seller picks from when rejecting an order — mirrors
+// the shape of the customer-facing "Need help" reason chips (see OrderHelpSheet) so both surfaces feel
+// consistent. Kept as a small closed enum (not free text) so the owner's Complaints inbox gets a
+// scannable reason, not a wall of ad-hoc prose; `note` still allows an optional short elaboration.
+const REJECT_REASON_LABELS: Record<string, string> = {
+  OUT_OF_STOCK: "Item(s) out of stock",
+  TOO_BUSY: "Store too busy to fulfill in time",
+  ITEM_UNAVAILABLE: "Item(s) no longer available",
+  PRICING_ERROR: "Pricing / listing error",
+  OTHER: "Other reason",
+};
 
 // When a seller marks their slice PACKED, the PARENT order may now be fully ready. If every sub-order
 // is PACKED/COLLECTED/CANCELLED and the parent is still pre-packed (PLACED/CONFIRMED), advance it:
@@ -151,6 +168,97 @@ router.patch("/:id/status", async (req: SellerRequest, res: Response) => {
     }
 
     res.json({ success: true, data: shape(updated) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /:id/reject — seller/co-manager declines their slice before packing ──
+// Distinct from flag-unavailable (subscriptions only, owner resolves manually): this is a full reject
+// of a regular order slice, allowed only before packing starts (PLACED/ACCEPTED). Restores stock for
+// this slice immediately (nothing was ever handed over) and, when this was the ONLY active seller on
+// the order (single-seller order, or the last still-active slice of a multi-seller one), cancels +
+// refunds the whole parent order — mirroring the customer's own /orders/:id/cancel path exactly, since
+// from the customer's perspective nothing is left to fulfill either way. If other sellers' slices are
+// still active, the parent order is left alone (they still get their items) and a Complaint is raised
+// so the owner can sort out a partial refund/replacement with the customer manually.
+const rejectSchema = z.object({
+  reason: z.enum(["OUT_OF_STOCK", "TOO_BUSY", "ITEM_UNAVAILABLE", "PRICING_ERROR", "OTHER"]),
+  note: z.string().max(500).optional(),
+});
+router.post("/:id/reject", async (req: SellerRequest, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const parsed = rejectSchema.safeParse(req.body ?? {});
+    if (!parsed.success) throw new ValidationError("Pick a reason for rejecting this order");
+    const { reason, note } = parsed.data;
+
+    const sub = await prisma.subOrder.findFirst({
+      where: { id, sellerId: req.sellerId },
+      include: {
+        items: { select: { id: true, variantId: true, quantity: true, isLoose: true, stepSize: true } },
+        order: { select: { id: true, orderNumber: true, status: true, paymentStatus: true, paymentMethod: true, razorpayPaymentId: true, totalAmount: true, customerId: true, shippingName: true } },
+      },
+    });
+    if (!sub) throw new NotFoundError("SubOrder", id);
+    if (sub.status !== "PLACED" && sub.status !== "ACCEPTED") {
+      throw new ValidationError(`Cannot reject an order that's already ${sub.status.toLowerCase()}.`);
+    }
+
+    const otherActiveSubs = await prisma.subOrder.count({
+      where: { orderId: sub.orderId, id: { not: sub.id }, status: { notIn: ["CANCELLED"] } },
+    });
+    const isLastActiveSeller = otherActiveSubs === 0;
+
+    await prisma.$transaction(async (tx) => {
+      for (const item of sub.items) {
+        if (!item.variantId) continue;
+        await restoreConsumption(tx, { orderItemId: item.id });
+      }
+
+      await tx.subOrder.update({ where: { id: sub.id }, data: { status: "CANCELLED" } });
+
+      if (isLastActiveSeller && (sub.order.status === "PLACED" || sub.order.status === "CONFIRMED")) {
+        await tx.order.update({ where: { id: sub.order.id }, data: { status: "CANCELLED" } });
+      }
+    });
+
+    const reasonLabel = REJECT_REASON_LABELS[reason] ?? reason;
+    const complaint = await prisma.complaint.create({
+      data: {
+        userId: sub.order.customerId,
+        orderId: sub.orderId,
+        subject: `Seller rejected order #${sub.order.orderNumber}`,
+        message: `Reason: ${reasonLabel}.` + (note ? ` Note: ${note}` : ""),
+      },
+    });
+    notifyNewComplaint({
+      id: complaint.id,
+      subject: complaint.subject,
+      customerName: sub.order.shippingName || req.appUser!.name,
+    }).catch(() => {});
+
+    if (isLastActiveSeller && (sub.order.status === "PLACED" || sub.order.status === "CONFIRMED")) {
+      // Whole order is now cancelled — same refund/notify path as a customer-initiated cancel.
+      bustUserSpend(sub.order.customerId);
+      if (sub.order.paymentStatus === "PAID" && sub.order.razorpayPaymentId) {
+        try {
+          await prisma.order.update({ where: { id: sub.order.id }, data: { paymentStatus: "REFUND_INITIATED" } });
+          await refundPayment(sub.order.razorpayPaymentId, Math.round(Number(sub.order.totalAmount) * 100));
+          await prisma.order.update({ where: { id: sub.order.id }, data: { paymentStatus: "REFUNDED" } });
+        } catch (refundErr) {
+          console.error("Refund failed for order", sub.order.id, refundErr);
+        }
+      }
+      notifyOrderStatusChange({ id: sub.order.id, orderNumber: sub.order.orderNumber, status: "CANCELLED", customerId: sub.order.customerId }).catch(() => {});
+      syncInvoicePaymentStatus(sub.order.id).catch((e) => console.error("Invoice sync failed:", e));
+      refundWalletOnCancel(sub.order.id).catch((e) => console.error("wallet refund failed:", e));
+    }
+
+    res.json({
+      success: true,
+      data: { subOrderId: sub.id, orderCancelled: isLastActiveSeller, complaintId: complaint.id },
+    });
   } catch (e) {
     sendError(res, e);
   }

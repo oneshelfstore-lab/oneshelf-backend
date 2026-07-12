@@ -23,6 +23,7 @@ import { markOrderPaid } from "../services/orderPayment.js";
 import { reconcileOrderPayment } from "../services/paymentReconciliation.js";
 import { generateOtp, orderRequiresOtp, OTP_VISIBLE_STATUSES } from "../lib/otp.js";
 import { consumeFifo, recordConsumption, restoreConsumption, type ConsumeResult } from "../services/stockBatches.js";
+import { drawFreeGiftStock } from "../services/freeGifts.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -254,6 +255,25 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         if (consumeResult) await recordConsumption(tx, { orderItemId: it.id }, consumeResult.consumed);
       }
 
+      // ── Free-gift promo lines ("buy N, get M free") ──────────────────
+      // Created as SEPARATE rows (not nested in the batch above) specifically so each one's real id
+      // is known immediately — Prisma's nested-create return array order isn't guaranteed to match
+      // input order (see the comment above `consumeResultByVariant`), and a reward variant could
+      // collide with something already in the cart or with another gift line, so matching consumption
+      // results back by variantId alone would be unsafe here. Never blocks the real order: a reward
+      // that's out of stock is silently skipped by drawFreeGiftStock, not thrown.
+      const freeGiftItems: (typeof created.items)[number][] = [];
+      if (houseSeller && totals.freeGifts.length > 0) {
+        const drawn = await drawFreeGiftStock(tx, totals.freeGifts);
+        for (const { input, consumed } of drawn) {
+          const giftItem = await tx.orderItem.create({
+            data: { orderId: created.id, ...input, sellerId: houseSeller.id },
+          });
+          await recordConsumption(tx, { orderItemId: giftItem.id }, consumed);
+          freeGiftItems.push(giftItem);
+        }
+      }
+
       // Create OTP secret if required
       if (needsOtp) {
         await tx.orderSecret.create({
@@ -343,6 +363,14 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         const arr = itemsBySeller.get(it.sellerId) ?? [];
         arr.push(it);
         itemsBySeller.set(it.sellerId, arr);
+      }
+      // Free-gift rows are always house-only (v1 restriction, enforced at offer-creation) — fold
+      // them into the house seller's bucket so they get the same subOrderId as everything else. They
+      // contribute 0 to subtotal/taxableValue, so commission/TCS math is unaffected either way.
+      if (freeGiftItems.length > 0) {
+        const arr = itemsBySeller.get(houseSeller!.id) ?? [];
+        arr.push(...freeGiftItems);
+        itemsBySeller.set(houseSeller!.id, arr);
       }
       if (itemsBySeller.size > 0) {
         const sellers = await tx.seller.findMany({
@@ -718,7 +746,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         skip: (page - 1) * limit,
         take: limit,
         include: {
-          items: { select: { productName: true, quantity: true, unitPrice: true, mrp: true, lineTotal: true, imageUrl: true, isLoose: true, stepSize: true, stepUnit: true, packageUnit: true, hsnCode: true, gstRate: true, variantId: true } },
+          items: { select: { productName: true, quantity: true, unitPrice: true, mrp: true, lineTotal: true, imageUrl: true, isLoose: true, stepSize: true, stepUnit: true, packageUnit: true, hsnCode: true, gstRate: true, variantId: true, isFreeGift: true } },
         },
       }),
       prisma.order.count({ where: listWhere }),

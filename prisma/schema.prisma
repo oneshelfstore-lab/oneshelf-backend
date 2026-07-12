@@ -694,9 +694,41 @@ model ProductVariant {
   invoiceLines    InvoiceLineItem[]
   subscriptions   Subscription[]
   stockBatches    StockBatch[]
+  freeGiftAsTrigger FreeGiftOffer?  @relation("FreeGiftTrigger")
+  freeGiftAsReward  FreeGiftOffer[] @relation("FreeGiftReward")
 
   @@index([productId])
   @@index([barcode])
+}
+
+// ─── FreeGiftOffer ("buy N of X, get M of Y free" promotional bundle) ──
+// Owner-configured: crossing `triggerQty` units of `triggerVariantId` in the cart grants
+// `rewardQty` units of `rewardVariantId` for FREE, materialized as a real ₹0 OrderItem at
+// placement (visible on the packing slip + invoice, not just a hidden discount) — see
+// services/freeGifts.ts. v1 restriction: BOTH variants must belong to the HOUSE seller's
+// catalog (a third-party seller's product can't be given away without a payout/commission
+// story — out of scope for v1; enforced in ownerFreeGifts.ts's create validation).
+// One offer per trigger variant (@unique) — keeps the owner UI + the qualifying-multiple math
+// simple; a product needing several promos would need this relaxed later.
+// ⚠️ GST/CA: the free line is recorded at ₹0 (taxableValue/cgst/sgst = 0) — no extra tax
+// collected on it, mirroring CatalogProduct.isBuyOneGetOne's "order-level discount, GST
+// already fully paid on the trigger item" treatment (CBIC Circular 92/11/2019-GST on BOGO-
+// style bundles). UNLIKE BOGO, a free gift can span two DIFFERENT products/GST rates — confirm
+// with the CA whether Sec 8(b) "mixed supply" (tax at the higher rate) applies here instead
+// before this is used for a real cross-rate promotion.
+model FreeGiftOffer {
+  id               String         @id @default(cuid())
+  triggerVariantId String         @unique
+  triggerVariant   ProductVariant @relation("FreeGiftTrigger", fields: [triggerVariantId], references: [id], onDelete: Cascade)
+  triggerQty       Int            @default(1)
+  rewardVariantId  String
+  rewardVariant    ProductVariant @relation("FreeGiftReward", fields: [rewardVariantId], references: [id], onDelete: Restrict)
+  rewardQty        Int            @default(1)
+  isActive         Boolean        @default(true)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([rewardVariantId])
 }
 
 // ─── StockBatch / StockBatchConsumption (FIFO cost lots) ─────────────
@@ -1295,6 +1327,14 @@ model OrderItem {
   sellerId   String?
   subOrderId String?
   subOrder   SubOrder? @relation(fields: [subOrderId], references: [id], onDelete: SetNull)
+
+  // Free gift (promotional bundle — "buy N, get M free", FreeGiftOffer). isFreeGift ⇒
+  // unitPrice/mrp/lineTotal/taxableValue/cgst/sgst are always 0 — see services/freeGifts.ts.
+  // freeGiftOfferId is a plain scratch label (no relation, same convention as
+  // Order.freeSampleVariantId) so a sold line survives even if the offer config is later
+  // deleted/deactivated.
+  isFreeGift      Boolean @default(false)
+  freeGiftOfferId String?
 
   createdAt DateTime @default(now())
 

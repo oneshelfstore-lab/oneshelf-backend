@@ -3,6 +3,7 @@ import { toAppFormat } from "../utils/looseUnitConverter.js";
 import { getUserSpend365, resolveLoyaltyConfig } from "./loyalty.js";
 import { tierForSpend, nextTier } from "../data/loyaltyTiers.js";
 import { computeDistanceDelivery } from "./deliveryPricing.js";
+import { computeFreeGiftLines, type FreeGiftLine } from "./freeGifts.js";
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -61,6 +62,10 @@ export interface CartTotals {
   // the checkout toggle). Both 0 for anonymous quotes (no userId).
   walletApplied: number;
   walletAvailable: number;
+  // Free-gift promo lines this cart currently qualifies for ("buy N of X, get M of Y free").
+  // Preview only — placement is what actually decrements stock/materializes the reward line(s),
+  // and can differ slightly if stock runs out between quote and placement (same as `outOfRange`).
+  freeGifts: FreeGiftLine[];
 }
 
 interface CartItemWithVariant {
@@ -155,6 +160,11 @@ export async function calculateCartTotals(
 
   bogoDiscount = round2(bogoDiscount);
   const subtotal = round2(lines.reduce((sum, l) => sum + l.lineTotal, 0));
+
+  // Free-gift promo preview — a pure read, no stock touched (placement is authoritative).
+  const freeGifts = await computeFreeGiftLines(
+    cartItems.map((i) => ({ variantId: i.variantId, quantity: i.quantity })),
+  );
 
   // Coupon
   let discount = 0;
@@ -312,5 +322,6 @@ export async function calculateCartTotals(
     walletAvailable,
     distanceKm: distanceResult.distanceKm,
     outOfRange: distanceResult.outOfRange,
+    freeGifts,
   };
 }

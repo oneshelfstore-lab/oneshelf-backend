@@ -166,6 +166,21 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     const address = await prisma.address.findFirst({ where: { id: d.addressId, userId } });
     if (!address) throw new NotFoundError("Address", d.addressId);
 
+    // Guard against duplicate standing subscriptions for the same product: without this, subscribing
+    // twice to the same variant (e.g. re-subscribing after forgetting an earlier one, or a double-tap)
+    // leaves two ACTIVE rows — cancelling one still leaves the other generating daily orders, which
+    // reads to the customer/owner as "I cancelled it but it keeps ordering." Editing an existing
+    // subscription already goes through PATCH, so a second create for the same live subscription is
+    // never intentional.
+    const duplicate = await prisma.subscription.findFirst({
+      where: { customerId: userId, variantId: d.variantId, status: { in: ["ACTIVE", "PAUSED"] } },
+    });
+    if (duplicate) {
+      throw new ValidationError(
+        "You already have a subscription for this product. Manage it from My Subscriptions instead of creating a new one.",
+      );
+    }
+
     const isLoose = isLooseType(variant.product.productType);
     const startDate = istMidnight(new Date(d.startDate));
     const endDate = d.endDate ? istMidnight(new Date(d.endDate)) : null;

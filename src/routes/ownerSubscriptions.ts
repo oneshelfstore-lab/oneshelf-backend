@@ -36,6 +36,25 @@ router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
+// ─── POST /:id/cancel  — owner force-cancels a customer's subscription ──
+// Gives the owner/co-manager a way to stop a subscription that keeps generating daily orders even
+// though the customer believes they already cancelled it (e.g. a duplicate row from re-subscribing,
+// or the customer cancelling the wrong one of several) — previously only the customer themselves
+// could cancel (routes/subscriptions.ts DELETE /:id), leaving the owner with no lever to intervene.
+router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const existing = await prisma.subscription.findUnique({ where: { id: req.params.id as string } });
+    if (!existing) throw new NotFoundError("Subscription", req.params.id as string);
+    if (existing.status === "CANCELLED") {
+      return res.json({ success: true, data: { id: existing.id, status: "CANCELLED" } });
+    }
+    await prisma.subscription.update({ where: { id: existing.id }, data: { status: "CANCELLED" } });
+    res.json({ success: true, data: { id: existing.id, status: "CANCELLED" } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // ─── GET /upcoming?date=tomorrow|YYYY-MM-DD  — per-variant planning totals ──
 // "Tomorrow: 40× Milk 500ml, 12× Newspaper" — how many of each to stock.
 router.get("/upcoming", async (req: FirebaseAuthRequest, res: Response) => {

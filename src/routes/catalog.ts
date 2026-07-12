@@ -77,6 +77,55 @@ const SELLER_SELECT = {
   select: { id: true, name: true, isHouse: true, grievanceOfficerName: true, grievanceOfficerPhone: true },
 } as const;
 
+// ─── Free-gift promo badge ("buy N, get M free") ─────────────────────
+// A tiny secondary lookup so the product list/detail can advertise an active offer on its trigger
+// variant — cached alongside the other discovery data (small dataset, bust-on-write from the owner
+// CRUD in ownerFreeGifts.ts).
+interface FreeGiftBadgeInfo {
+  triggerQty: number;
+  rewardQty: number;
+  rewardName: string;
+  rewardNameHi: string | null;
+}
+
+async function loadActiveFreeGiftBadges(): Promise<Map<string, FreeGiftBadgeInfo>> {
+  return memoCache.get("freeGiftOffers:badges", DISCOVERY_TTL_MS, async () => {
+    const offers = await prisma.freeGiftOffer.findMany({
+      where: { isActive: true },
+      select: {
+        triggerVariantId: true,
+        triggerQty: true,
+        rewardQty: true,
+        rewardVariant: { select: { product: { select: { name: true, nameHi: true } } } },
+      },
+    });
+    const map = new Map<string, FreeGiftBadgeInfo>();
+    for (const o of offers) {
+      map.set(o.triggerVariantId, {
+        triggerQty: o.triggerQty,
+        rewardQty: o.rewardQty,
+        rewardName: o.rewardVariant.product.name,
+        rewardNameHi: o.rewardVariant.product.nameHi,
+      });
+    }
+    return map;
+  });
+}
+
+/** Enriches already-formatted products' variants in place with free-gift badge fields. */
+function attachFreeGiftBadges(products: any[], badges: Map<string, FreeGiftBadgeInfo>): any[] {
+  for (const p of products) {
+    for (const v of p.variants ?? []) {
+      const info = badges.get(v.id);
+      v.freeGiftTriggerQty = info?.triggerQty ?? 0;
+      v.freeGiftRewardQty = info?.rewardQty ?? 0;
+      v.freeGiftRewardName = info?.rewardName ?? null;
+      v.freeGiftRewardNameHi = info?.rewardNameHi ?? null;
+    }
+  }
+  return products;
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Public router (no auth, mounted at /api/app/products)
 // ═══════════════════════════════════════════════════════════════════════
@@ -127,9 +176,10 @@ publicCatalogRouter.get("/", cacheControl(CATALOG_LIST_TTL), async (req: Request
       prisma.catalogProduct.count({ where }),
     ]);
 
+    const badges = await loadActiveFreeGiftBadges();
     res.json({
       success: true,
-      data: products.map(formatProductForApp),
+      data: attachFreeGiftBadges(products.map(formatProductForApp), badges),
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     });
 
@@ -522,7 +572,8 @@ publicCatalogRouter.get("/:id", cacheControl(CATALOG_LIST_TTL), async (req: Requ
       throw new NotFoundError("Product", req.params.id!);
     }
 
-    res.json({ success: true, data: formatProductForApp(product) });
+    const badges = await loadActiveFreeGiftBadges();
+    res.json({ success: true, data: attachFreeGiftBadges([formatProductForApp(product)], badges)[0] });
   } catch (e) {
     sendError(res, e);
   }

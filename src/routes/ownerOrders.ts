@@ -266,6 +266,11 @@ router.post("/:orderId/items/:itemId/substitute", async (req: FirebaseAuthReques
     const item = order.items.find((i) => i.id === (req.params.itemId as string));
     if (!item) throw new NotFoundError("OrderItem", req.params.itemId as string);
 
+    // A free-gift line is a promised bonus, not a purchase — it can't be swapped for something else.
+    if (item.isFreeGift) {
+      throw new ValidationError("Free-gift lines can't be substituted.");
+    }
+
     if (item.substitutionStatus !== "NONE" && item.substitutionStatus !== "REJECTED") {
       throw new ValidationError(`Item already has substitution status '${item.substitutionStatus}'`);
     }

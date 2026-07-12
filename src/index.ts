@@ -50,6 +50,7 @@ import subscriptionRoutes from "./routes/subscriptions.js";
 import ownerSubscriptionRoutes from "./routes/ownerSubscriptions.js";
 import ownerMembershipRoutes from "./routes/ownerMembership.js";
 import { ownerFreeGiftRouter } from "./routes/ownerFreeGifts.js";
+import { sellerFreeGiftRouter } from "./routes/sellerFreeGifts.js";
 import sellerSubscriptionRoutes from "./routes/sellerSubscriptions.js";
 import internalRoutes from "./routes/internal.js";
 import webhookRoutes from "./routes/webhooks.js";
@@ -321,6 +322,7 @@ app.use("/api/app/owner/free-gifts", ownerFreeGiftRouter);
 // Owner review queue for the product-intake form (Firebase OWNER auth) — approve/reject/delete.
 app.use("/api/app/owner/product-intake", ownerProductIntakeRoutes);
 app.use("/api/app/seller/catalog", sellerCatalogRoutes);
+app.use("/api/app/seller/free-gifts", sellerFreeGiftRouter);
 app.use("/api/app/seller/brands", sellerBrandRouter);
 app.use("/api/app/seller/orders", sellerOrdersRoutes);
 app.use("/api/app/seller/subscriptions", sellerSubscriptionRoutes);

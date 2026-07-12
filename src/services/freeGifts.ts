@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
+import { z } from "zod";
 import prisma from "../lib/prisma.js";
-import { AppError } from "../lib/errors.js";
+import { AppError, ValidationError, NotFoundError, ConflictError } from "../lib/errors.js";
 import { consumeFifo } from "./stockBatches.js";
 import { memoCache } from "../lib/httpCache.js";
 
@@ -185,4 +186,88 @@ export async function drawFreeGiftStock(
     });
   }
   return out;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Offer CRUD — shared by BOTH admin routers that manage offers:
+// routes/ownerFreeGifts.ts (owner) and routes/sellerFreeGifts.ts (the
+// house co-manager). Both only ever touch house products (validated
+// below), so one implementation serves both — the routers differ only in
+// their auth stack (owner role vs. seller role + sellerIsHouse gate).
+// ═══════════════════════════════════════════════════════════════════════
+
+export const freeGiftOfferSchema = z.object({
+  triggerVariantId: z.string().min(1),
+  triggerQty: z.number().int().min(1).max(999),
+  rewardVariantId: z.string().min(1),
+  rewardQty: z.number().int().min(1).max(999),
+  isActive: z.boolean().default(true),
+});
+
+export const freeGiftOfferInclude = {
+  triggerVariant: { select: { id: true, sku: true, packageSize: true, packageUnit: true, product: { select: { name: true, imageUrls: true } } } },
+  rewardVariant: { select: { id: true, sku: true, packageSize: true, packageUnit: true, product: { select: { name: true, imageUrls: true } } } },
+} as const;
+
+/** Both variants must exist, be distinct, and belong to the HOUSE catalog (null sellerId ⇒ a
+ *  pre-backfill/legacy product, treated as house everywhere else in this codebase too). */
+export async function validateFreeGiftVariantPair(triggerVariantId: string, rewardVariantId: string): Promise<void> {
+  if (triggerVariantId === rewardVariantId) {
+    throw new ValidationError("The reward can't be the same product as the trigger.");
+  }
+  const [trigger, reward] = await Promise.all([
+    prisma.productVariant.findUnique({
+      where: { id: triggerVariantId },
+      select: { id: true, product: { select: { sellerId: true, seller: { select: { isHouse: true } } } } },
+    }),
+    prisma.productVariant.findUnique({
+      where: { id: rewardVariantId },
+      select: { id: true, product: { select: { sellerId: true, seller: { select: { isHouse: true } } } } },
+    }),
+  ]);
+  if (!trigger) throw new NotFoundError("Product variant", triggerVariantId);
+  if (!reward) throw new NotFoundError("Product variant", rewardVariantId);
+
+  const isHouse = (v: typeof trigger) => v.product.sellerId == null || v.product.seller?.isHouse === true;
+  if (!isHouse(trigger) || !isHouse(reward)) {
+    throw new ValidationError("Free-gift offers only work between the store's own (house) products for now.");
+  }
+}
+
+export function listFreeGiftOffers() {
+  return prisma.freeGiftOffer.findMany({ include: freeGiftOfferInclude, orderBy: { createdAt: "desc" } });
+}
+
+export async function createFreeGiftOfferRecord(data: z.infer<typeof freeGiftOfferSchema>) {
+  await validateFreeGiftVariantPair(data.triggerVariantId, data.rewardVariantId);
+  const existing = await prisma.freeGiftOffer.findUnique({ where: { triggerVariantId: data.triggerVariantId } });
+  if (existing) throw new ConflictError("This product already has a free-gift offer — edit or delete it instead.");
+  const offer = await prisma.freeGiftOffer.create({ data, include: freeGiftOfferInclude });
+  memoCache.bust("freeGiftOffers");
+  return offer;
+}
+
+export async function updateFreeGiftOfferRecord(id: string, data: Partial<z.infer<typeof freeGiftOfferSchema>>) {
+  const existingOffer = await prisma.freeGiftOffer.findUnique({ where: { id } });
+  if (!existingOffer) throw new NotFoundError("Free-gift offer", id);
+
+  const triggerVariantId = data.triggerVariantId ?? existingOffer.triggerVariantId;
+  const rewardVariantId = data.rewardVariantId ?? existingOffer.rewardVariantId;
+  await validateFreeGiftVariantPair(triggerVariantId, rewardVariantId);
+
+  if (triggerVariantId !== existingOffer.triggerVariantId) {
+    const dup = await prisma.freeGiftOffer.findUnique({ where: { triggerVariantId } });
+    if (dup) throw new ConflictError("This product already has a free-gift offer — edit or delete it instead.");
+  }
+
+  const offer = await prisma.freeGiftOffer.update({ where: { id }, data, include: freeGiftOfferInclude });
+  memoCache.bust("freeGiftOffers");
+  return offer;
+}
+
+export async function deleteFreeGiftOfferRecord(id: string): Promise<void> {
+  const existing = await prisma.freeGiftOffer.findUnique({ where: { id } });
+  if (!existing) throw new NotFoundError("Free-gift offer", id);
+  await prisma.freeGiftOffer.delete({ where: { id } });
+  memoCache.bust("freeGiftOffers");
 }

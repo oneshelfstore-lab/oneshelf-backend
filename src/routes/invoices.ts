@@ -73,6 +73,26 @@ const creditNoteSchema = z.object({
   lineItems: z.array(creditNoteLineSchema).min(1, "At least one line item is required"),
 });
 
+// A debit note bills an ADDITIONAL amount against an already-issued invoice (e.g. the original
+// quantity/price was under-billed, or a post-sale charge like freight needs to be added) — unlike a
+// credit note it isn't reversing an existing line, so each line is its own fresh taxable charge and
+// needs its own rate/HSN rather than inheriting one from the original invoice.
+const debitNoteLineSchema = z.object({
+  description: z.string().min(1, "Description is required"),
+  hsnCode: z.string().min(4).max(8).default("9997"), // 9997 = "other services", a safe default for ad-hoc charges
+  quantity: z.number().positive("Quantity must be > 0").default(1),
+  unit: z.string().min(1).default("NOS"),
+  unitPrice: z.number().positive("Unit price must be > 0"),
+  gstRate: z.number().min(0).max(28),
+  cessRate: z.number().min(0).max(100).default(0),
+});
+
+const debitNoteSchema = z.object({
+  originalInvoiceId: z.string().min(1),
+  reason: z.enum(["short_billed", "additional_charges", "price_revision", "other"]),
+  lineItems: z.array(debitNoteLineSchema).min(1, "At least one line item is required"),
+});
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 async function logAudit(
@@ -684,6 +704,132 @@ router.post("/credit-note", async (req: Request, res: Response) => {
     });
 
     res.status(201).json({ success: true, data: creditNote });
+  } catch (error) {
+    sendError(res, error);
+  }
+});
+
+// ─── POST /api/invoices/debit-note — Create debit note ───────────────
+
+router.post("/debit-note", async (req: Request, res: Response) => {
+  try {
+    const parsed = debitNoteSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new ValidationError("Invalid debit note data", parsed.error.errors);
+    }
+    const input = parsed.data;
+
+    const originalInvoice = await prisma.invoice.findUnique({
+      where: { id: input.originalInvoiceId },
+    });
+
+    if (!originalInvoice) {
+      throw new NotFoundError("Invoice", input.originalInvoiceId);
+    }
+
+    if (originalInvoice.status === "CANCELLED") {
+      throw new AppError(400, "INVOICE_CANCELLED", "Cannot create a debit note for a cancelled invoice");
+    }
+
+    // Each line is a fresh taxable charge (not a reversal of an existing one), so tax is computed
+    // per-line from the rate/HSN the caller supplies — mirrors the original invoice's CGST/SGST vs
+    // IGST split (same place of supply), same as a credit note does.
+    const dnLines = input.lineItems.map((line) =>
+      calculateLineItemTax({
+        unitPrice: line.unitPrice,
+        quantity: line.quantity,
+        discountPercent: 0,
+        gstRate: line.gstRate,
+        cessRate: line.cessRate,
+        isTaxInclusive: false,
+        isInterState: originalInvoice.isInterState,
+      }),
+    );
+
+    const totals = calculateInvoiceTotals(dnLines);
+    const dnNumber = await getNextInvoiceNumber("DN");
+
+    const debitNote = await prisma.$transaction(async (tx) => {
+      const dn = await tx.invoice.create({
+        data: {
+          invoiceNumber: dnNumber,
+          invoiceDate: new Date(),
+          invoiceType: "DEBIT_NOTE",
+          supplyType: originalInvoice.supplyType,
+
+          customerId: originalInvoice.customerId,
+          customerName: originalInvoice.customerName,
+          customerGstin: originalInvoice.customerGstin,
+          billingAddress: originalInvoice.billingAddress ?? undefined,
+          shippingAddress: originalInvoice.shippingAddress ?? undefined,
+
+          // A debit note mirrors the state / place-of-supply of the invoice it bills against.
+          supplierStateCode: originalInvoice.supplierStateCode,
+          placeOfSupplyCode: originalInvoice.placeOfSupplyCode,
+          isInterState: originalInvoice.isInterState,
+          taxRuleVersion: CURRENT_TAX_RULE_VERSION,
+
+          subtotal: totals.subtotal,
+          totalCgst: totals.totalCgst,
+          totalSgst: totals.totalSgst,
+          totalIgst: totals.totalIgst,
+          totalCess: totals.totalCess,
+          totalDiscount: totals.totalDiscount,
+          roundOff: totals.roundOff,
+          totalAmount: totals.totalAmount,
+          amountInWords: totals.amountInWords,
+
+          originalInvoiceId: originalInvoice.id,
+          originalInvoiceNumber: originalInvoice.invoiceNumber,
+
+          status: "APPROVED",
+          paymentStatus: "UNPAID",
+          amountPaid: 0,
+          amountDue: totals.totalAmount,
+
+          createdBy: getUserId(req),
+
+          lineItems: {
+            create: dnLines.map((tax, idx) => {
+              const src = input.lineItems[idx]!;
+              return {
+                lineNumber: idx + 1,
+                description: `${src.description}${input.reason !== "other" ? ` (${input.reason.replace(/_/g, " ")})` : ""}`,
+                hsnCode: src.hsnCode,
+                quantity: src.quantity,
+                unit: src.unit,
+                unitPrice: src.unitPrice,
+                discountPercent: 0,
+                discountAmount: 0,
+                taxableValue: tax.taxableValue,
+                gstRate: tax.gstRate,
+                cgstRate: tax.cgstRate,
+                cgstAmount: tax.cgstAmount,
+                sgstRate: tax.sgstRate,
+                sgstAmount: tax.sgstAmount,
+                igstRate: tax.igstRate,
+                igstAmount: tax.igstAmount,
+                cessRate: tax.cessRate,
+                cessAmount: tax.cessAmount,
+                totalAmount: tax.totalAmount,
+              };
+            }),
+          },
+        },
+        include: { lineItems: true },
+      });
+
+      return dn;
+    });
+
+    await logAudit(getUserId(req), "CREATE", "DebitNote", debitNote.id, null, {
+      debitNoteNumber: dnNumber,
+      originalInvoiceNumber: originalInvoice.invoiceNumber,
+      totalAmount: totals.totalAmount,
+      reason: input.reason,
+    });
+
+    res.status(201).json({ success: true, data: debitNote });
   } catch (error) {
     sendError(res, error);
   }

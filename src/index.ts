@@ -12,6 +12,9 @@ import invoiceRoutes from "./routes/invoices.js";
 import paymentRoutes from "./routes/payments.js";
 import vendorRoutes from "./routes/vendors.js";
 import purchaseBillRoutes from "./routes/purchaseBills.js";
+import expenseRoutes from "./routes/expenses.js";
+import employeeRoutes from "./routes/employees.js";
+import tdsRecordRoutes from "./routes/tdsRecords.js";
 import reportRoutes from "./routes/reports.js";
 import companyRoutes from "./routes/company.js";
 import storeConfigRoutes from "./routes/storeConfig.js";
@@ -357,6 +360,9 @@ app.use("/api/invoices", writeLimiter, invoiceRoutes);
 app.use("/api/payments", writeLimiter, paymentRoutes);
 app.use("/api/vendors", vendorRoutes);
 app.use("/api/purchase-bills", purchaseBillRoutes);
+app.use("/api/expenses", expenseRoutes);
+app.use("/api/employees", employeeRoutes);
+app.use("/api/tds-records", tdsRecordRoutes);
 app.use("/api/reports", reportRoutes);
 
 // ─── Audit Log viewer endpoint ──────────────────────────────────────

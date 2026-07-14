@@ -3,6 +3,8 @@ import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError, sendError } from "../lib/errors.js";
 import { calculateLineItemTax, calculateInvoiceTotals } from "../services/taxEngine.js";
+import { receiveBatch } from "../services/stockBatches.js";
+import { recordVendorPayment } from "../services/vendorPayments.js";
 
 const router = Router();
 
@@ -14,6 +16,11 @@ const billLineSchema = z.object({
   quantity: z.number().positive(),
   unitPrice: z.number().min(0),
   gstRate: z.number().min(0).max(100),
+  // Optional link to a real catalog SKU — when present, creating the bill also receives this
+  // quantity into stock (see the POST / handler below). Quantity/unitPrice are base-unit, same
+  // convention as routes/invoices.ts's variantId-linked lines (no app-format/loose conversion here
+  // — this is a dashboard-only entry point, not the mobile app's per-increment convention).
+  variantId: z.string().min(1).optional(),
 });
 
 const createBillSchema = z.object({
@@ -66,6 +73,20 @@ router.post("/", async (req: Request, res: Response) => {
       throw new ValidationError(`Unknown HSN codes: ${invalidHsn.join(", ")}. Add them to HSN master first.`);
     }
 
+    // Validate any linked catalog variants exist
+    const variantIds = [...new Set(input.lineItems.map((li) => li.variantId).filter((v): v is string => !!v))];
+    if (variantIds.length > 0) {
+      const variantRecords = await prisma.productVariant.findMany({
+        where: { id: { in: variantIds } },
+        select: { id: true },
+      });
+      const validVariants = new Set(variantRecords.map((v) => v.id));
+      const invalidVariants = variantIds.filter((v) => !validVariants.has(v));
+      if (invalidVariants.length > 0) {
+        throw new ValidationError(`Unknown product variant(s): ${invalidVariants.join(", ")}`);
+      }
+    }
+
     // Calculate tax for each line (purchase bills are tax-exclusive from vendor)
     const calculatedLines = input.lineItems.map((li) => {
       const tax = calculateLineItemTax({
@@ -85,7 +106,7 @@ router.post("/", async (req: Request, res: Response) => {
     const netPayable = Math.round((totals.totalAmount - input.tdsAmount) * 100) / 100;
 
     const bill = await prisma.$transaction(async (tx) => {
-      return tx.purchaseBill.create({
+      const created = await tx.purchaseBill.create({
         data: {
           vendorId: vendor.id,
           billNumber: input.billNumber,
@@ -107,24 +128,52 @@ router.post("/", async (req: Request, res: Response) => {
           status: "APPROVED",
           paymentDueDate: input.paymentDueDate ? new Date(input.paymentDueDate) : null,
           documentUrl: input.documentUrl,
-
-          lineItems: {
-            create: calculatedLines.map((cl) => ({
-              description: cl.input.description,
-              hsnCode: cl.input.hsnCode,
-              quantity: cl.input.quantity,
-              unitPrice: cl.input.unitPrice,
-              taxableValue: cl.tax.taxableValue,
-              gstRate: cl.tax.gstRate,
-              cgstAmount: cl.tax.cgstAmount,
-              sgstAmount: cl.tax.sgstAmount,
-              igstAmount: 0,
-              totalAmount: cl.tax.totalAmount,
-            })),
-          },
         },
-        include: { lineItems: true },
       });
+
+      // Created one-by-one (not a nested `create: [...]`) so each line's real id is known before
+      // deciding whether to receive stock against it — Prisma's nested-create return array order
+      // isn't something this codebase relies on (see services/freeGifts.ts for the same reasoning).
+      const lineItems = [];
+      for (const cl of calculatedLines) {
+        const line = await tx.purchaseBillLine.create({
+          data: {
+            purchaseBillId: created.id,
+            variantId: cl.input.variantId ?? null,
+            description: cl.input.description,
+            hsnCode: cl.input.hsnCode,
+            quantity: cl.input.quantity,
+            unitPrice: cl.input.unitPrice,
+            taxableValue: cl.tax.taxableValue,
+            gstRate: cl.tax.gstRate,
+            cgstAmount: cl.tax.cgstAmount,
+            sgstAmount: cl.tax.sgstAmount,
+            igstAmount: 0,
+            totalAmount: cl.tax.totalAmount,
+          },
+        });
+        lineItems.push(line);
+
+        if (cl.input.variantId) {
+          await receiveBatch(
+            tx,
+            cl.input.variantId,
+            cl.input.quantity,
+            cl.input.unitPrice,
+            `Bill ${input.billNumber}`,
+            line.id,
+          );
+        }
+      }
+
+      // The one write path that maintains this rollup going forward (mirrors
+      // services/stockBatches.ts's ProductVariant.stock/costPrice convention).
+      await tx.vendor.update({
+        where: { id: vendor.id },
+        data: { outstandingBalance: { increment: netPayable } },
+      });
+
+      return { ...created, lineItems };
     });
 
     // MSME warning
@@ -230,54 +279,15 @@ router.post("/:id/payment", async (req: Request, res: Response) => {
     }
     const input = parsed.data;
 
-    const bill = await prisma.purchaseBill.findUnique({
-      where: { id: req.params.id },
-    });
-    if (!bill) throw new NotFoundError("PurchaseBill", req.params.id!);
-
-    // Calculate remaining
-    const existingPayments = await prisma.payment.aggregate({
-      where: {
-        relatedType: "PURCHASE_BILL",
-        relatedId: bill.id,
-        status: "COMPLETED",
-      },
-      _sum: { amount: true },
-    });
-    const alreadyPaid = Number(existingPayments._sum.amount ?? 0);
-    const remaining = Math.round((Number(bill.netPayable) - alreadyPaid) * 100) / 100;
-
-    if (input.amount > remaining) {
-      throw new ValidationError(
-        `Payment ₹${input.amount} exceeds remaining ₹${remaining}`,
-      );
-    }
-
-    const newStatus = remaining - input.amount <= 0 ? "PAID" : "PARTIALLY_PAID";
-    const paymentDate = input.paymentDate ? new Date(input.paymentDate) : new Date();
-
-    const payment = await prisma.$transaction(async (tx) => {
-      const pmt = await tx.payment.create({
-        data: {
-          paymentType: "PAYMENT",
-          relatedType: "PURCHASE_BILL",
-          relatedId: bill.id,
-          amount: input.amount,
-          paymentMode: input.paymentMode,
-          paymentDate,
-          referenceNumber: input.referenceNumber,
-          narration: input.narration,
-          status: "COMPLETED",
-        },
-      });
-
-      await tx.purchaseBill.update({
-        where: { id: bill.id },
-        data: { status: newStatus },
-      });
-
-      return pmt;
-    });
+    const payment = await prisma.$transaction((tx) =>
+      recordVendorPayment(tx, req.params.id!, {
+        amount: input.amount,
+        paymentMode: input.paymentMode,
+        paymentDate: input.paymentDate ? new Date(input.paymentDate) : undefined,
+        referenceNumber: input.referenceNumber,
+        narration: input.narration,
+      }),
+    );
 
     res.status(201).json({ success: true, data: payment });
   } catch (error) {

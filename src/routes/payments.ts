@@ -3,6 +3,7 @@ import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError, AppError, sendError } from "../lib/errors.js";
 import type { AuthRequest } from "../middleware/auth.js";
+import { recordVendorPayment } from "../services/vendorPayments.js";
 
 const router = Router();
 
@@ -38,6 +39,7 @@ const listQuerySchema = z.object({
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 async function logAudit(
+  res: Response,
   userId: string,
   action: "CREATE" | "UPDATE",
   entityType: string,
@@ -45,6 +47,9 @@ async function logAudit(
   oldValues?: unknown,
   newValues?: unknown,
 ) {
+  // Tell the global auditLoggerMiddleware to skip its own generic write for this request — this
+  // entry already carries a proper "Payment" entityType instead of the URL-derived generic one.
+  res.locals.auditLogged = true;
   await prisma.auditLog.create({
     data: {
       userId,
@@ -121,7 +126,7 @@ router.post("/", async (req: Request, res: Response) => {
         return pmt;
       });
 
-      await logAudit(getUserId(req), "CREATE", "Payment", payment.id, null, {
+      await logAudit(res, getUserId(req), "CREATE", "Payment", payment.id, null, {
         amount: input.amount,
         invoiceNumber: invoice.invoiceNumber,
         newPaymentStatus,
@@ -131,63 +136,27 @@ router.post("/", async (req: Request, res: Response) => {
       return;
     }
 
-    // If it's a purchase bill payment, update bill balances
+    // If it's a purchase bill payment, update bill balances (a purchase-bill payment is always
+    // money going OUT to the vendor — recordVendorPayment ignores input.paymentType and records it
+    // as PAYMENT regardless of what was sent, since RECEIPT would be semantically backwards here).
     if (input.relatedType === "PURCHASE_BILL") {
-      const bill = await prisma.purchaseBill.findUnique({
-        where: { id: input.relatedId },
-      });
+      const bill = await prisma.purchaseBill.findUnique({ where: { id: input.relatedId } });
       if (!bill) throw new NotFoundError("PurchaseBill", input.relatedId);
 
-      const currentPayable = Number(bill.netPayable);
-      // Sum existing payments
-      const existingPayments = await prisma.payment.aggregate({
-        where: {
-          relatedType: "PURCHASE_BILL",
-          relatedId: input.relatedId,
-          status: "COMPLETED",
-        },
-        _sum: { amount: true },
-      });
-      const alreadyPaid = Number(existingPayments._sum.amount ?? 0);
-      const remaining = Math.round((currentPayable - alreadyPaid) * 100) / 100;
+      const payment = await prisma.$transaction((tx) =>
+        recordVendorPayment(tx, input.relatedId, {
+          amount: input.amount,
+          paymentMode: input.paymentMode,
+          paymentDate,
+          referenceNumber: input.referenceNumber,
+          bankAccount: input.bankAccount,
+          narration: input.narration,
+        }),
+      );
 
-      if (input.amount > remaining) {
-        throw new ValidationError(
-          `Payment ₹${input.amount} exceeds remaining payable ₹${remaining}`,
-        );
-      }
-
-      const newBillStatus =
-        remaining - input.amount <= 0 ? "PAID" : "PARTIALLY_PAID";
-
-      const payment = await prisma.$transaction(async (tx) => {
-        const pmt = await tx.payment.create({
-          data: {
-            paymentType: input.paymentType,
-            relatedType: input.relatedType,
-            relatedId: input.relatedId,
-            amount: input.amount,
-            paymentMode: input.paymentMode,
-            paymentDate,
-            referenceNumber: input.referenceNumber,
-            bankAccount: input.bankAccount,
-            narration: input.narration,
-            status: "COMPLETED",
-          },
-        });
-
-        await tx.purchaseBill.update({
-          where: { id: input.relatedId },
-          data: { status: newBillStatus },
-        });
-
-        return pmt;
-      });
-
-      await logAudit(getUserId(req), "CREATE", "Payment", payment.id, null, {
+      await logAudit(res, getUserId(req), "CREATE", "Payment", payment.id, null, {
         amount: input.amount,
         billNumber: bill.billNumber,
-        newStatus: newBillStatus,
       });
 
       res.status(201).json({ success: true, data: payment });

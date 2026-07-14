@@ -10,6 +10,7 @@ import {
 import { formatVariantForApp, fromAppFormat, toAppFormat, assertVariantFloors } from "../utils/looseUnitConverter.js";
 import { memoCache } from "../lib/httpCache.js";
 import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
+import { calculateLineItemTax, calculateInvoiceTotals } from "../services/taxEngine.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -446,18 +447,30 @@ const receiveStockSchema = z.object({
   qty: z.number().positive(),
   unitCost: z.number().min(0),
   note: z.string().max(200).optional(),
+  // Optional — lets the owner attribute this restock to a real vendor bill straight from the shop
+  // floor. When both are present, this also creates a single-line PurchaseBill (see below) so the
+  // restock shows up in the vendor's ledger/outstanding balance, not just the stock ledger.
+  vendorId: z.string().min(1).optional(),
+  billNumber: z.string().min(1).max(100).optional(),
+  paymentDueDate: z.string().optional().nullable(),
 });
 
 router.post("/:id/stock/receive", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const productId = req.params.id as string;
-    const { variantId, qty, unitCost, note } = receiveStockSchema.parse(req.body);
+    const { variantId, qty, unitCost, note, vendorId, billNumber, paymentDueDate } = receiveStockSchema.parse(req.body);
 
     const variant = await prisma.productVariant.findFirst({
       where: { id: variantId, productId },
-      include: { product: { select: { productType: true } } },
+      include: { product: { select: { productType: true, name: true, hsnCode: true, gstRate: true } } },
     });
     if (!variant) throw new NotFoundError("Variant", variantId);
+
+    let vendor = null;
+    if (vendorId) {
+      vendor = await prisma.vendor.findUnique({ where: { id: vendorId } });
+      if (!vendor || !vendor.isActive) throw new NotFoundError("Vendor", vendorId);
+    }
 
     const isLoose = isLooseType(variant.product.productType);
     // qty/unitCost arrive in app format (per-increment for loose items) — convert to base-unit,
@@ -473,11 +486,94 @@ router.post("/:id/stock/receive", async (req: FirebaseAuthRequest, res: Response
       isLoose,
     );
 
-    await prisma.$transaction((tx) =>
-      receiveBatch(tx, variantId, converted.stock, converted.costPrice ?? 0, note),
-    );
+    await prisma.$transaction(async (tx) => {
+      if (vendor && billNumber) {
+        // Mirrors routes/purchaseBills.ts's create logic for a single line — a vendor-linked
+        // restock IS a one-line purchase bill, just entered from the phone instead of the dashboard.
+        const tax = calculateLineItemTax({
+          unitPrice: converted.costPrice ?? 0,
+          quantity: converted.stock,
+          gstRate: Number(variant.product.gstRate ?? 0),
+          isTaxInclusive: false,
+        });
+        const totals = calculateInvoiceTotals([tax]);
+
+        const bill = await tx.purchaseBill.create({
+          data: {
+            vendorId: vendor.id,
+            billNumber,
+            billDate: new Date(),
+            receivedDate: new Date(),
+            vendorGstin: vendor.gstin,
+            subtotal: totals.subtotal,
+            totalCgst: totals.totalCgst,
+            totalSgst: totals.totalSgst,
+            totalIgst: 0,
+            totalCess: totals.totalCess,
+            totalAmount: totals.totalAmount,
+            tdsAmount: 0,
+            netPayable: totals.totalAmount,
+            itcEligible: true,
+            isReverseCharge: false,
+            status: "APPROVED",
+            paymentDueDate: paymentDueDate ? new Date(paymentDueDate) : null,
+          },
+        });
+        const line = await tx.purchaseBillLine.create({
+          data: {
+            purchaseBillId: bill.id,
+            variantId,
+            description: variant.product.name,
+            hsnCode: variant.product.hsnCode || "0000",
+            quantity: converted.stock,
+            unitPrice: converted.costPrice ?? 0,
+            taxableValue: tax.taxableValue,
+            gstRate: tax.gstRate,
+            cgstAmount: tax.cgstAmount,
+            sgstAmount: tax.sgstAmount,
+            igstAmount: 0,
+            totalAmount: tax.totalAmount,
+          },
+        });
+        await receiveBatch(tx, variantId, converted.stock, converted.costPrice ?? 0, `Bill ${billNumber}${note ? ` — ${note}` : ""}`, line.id);
+        await tx.vendor.update({ where: { id: vendor.id }, data: { outstandingBalance: { increment: totals.totalAmount } } });
+      } else {
+        await receiveBatch(tx, variantId, converted.stock, converted.costPrice ?? 0, note);
+      }
+    });
+
     memoCache.bust("ownerCatalogHealth");
     res.json({ success: true, message: "Stock received" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── GET /vendors/search — vendor picker for the Restock dialog's optional bill-link ────
+// Re-gated copy of routes/vendors.ts's dashboard-side search (same query shape) — the dashboard's
+// /api/vendors sits behind JWT auth the Android app doesn't have, so this Firebase-gated mirror is
+// what the owner app's RestockDialog actually calls.
+
+router.get("/vendors/search", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const q = String(req.query.q ?? "").trim();
+    if (q.length < 1) { res.json({ success: true, data: [] }); return; }
+
+    const vendors = await prisma.vendor.findMany({
+      where: {
+        isActive: true,
+        OR: [
+          { name: { contains: q, mode: "insensitive" } },
+          { phone: { startsWith: q } },
+          { gstin: { startsWith: q, mode: "insensitive" } },
+        ],
+      },
+      take: 20,
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, phone: true, gstin: true },
+    });
+
+    res.json({ success: true, data: vendors });
   } catch (e) {
     sendError(res, e);
   }

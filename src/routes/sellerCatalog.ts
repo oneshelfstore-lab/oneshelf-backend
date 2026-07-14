@@ -6,6 +6,7 @@ import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAu
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
 import { formatVariantForApp, fromAppFormat, toAppFormat, assertVariantFloors } from "../utils/looseUnitConverter.js";
 import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
+import { calculateLineItemTax, calculateInvoiceTotals } from "../services/taxEngine.js";
 
 // Seller-scoped catalog. Mounted at /api/app/seller/catalog. Every query is hard-filtered to the
 // caller's own sellerId — a seller can never see or edit another seller's products. New products are
@@ -405,24 +406,35 @@ router.patch("/:id/stock", async (req: SellerRequest, res: Response) => {
 
 // ─── POST /:id/stock/receive — restock a variant, at whatever cost it actually came in at ──
 // Mirrors ownerCatalog's equivalent endpoint — see its comment for why this is separate from the
-// quick stepper above.
+// quick stepper above. The optional vendor-bill link (below) is HOUSE-ONLY — vendors/purchase bills
+// are the STORE's own bookkeeping (kirana-billing), not a per-seller ledger; a genuine third-party
+// seller has their own suppliers outside this system, same "house-only" gate as add-category above.
 const receiveStockSchema = z.object({
   variantId: z.string().min(1),
   qty: z.number().positive(),
   unitCost: z.number().min(0),
   note: z.string().max(200).optional(),
+  vendorId: z.string().min(1).optional(),
+  billNumber: z.string().min(1).max(100).optional(),
+  paymentDueDate: z.string().optional().nullable(),
 });
 
 router.post("/:id/stock/receive", async (req: SellerRequest, res: Response) => {
   try {
     const productId = req.params.id as string;
-    const { variantId, qty, unitCost, note } = receiveStockSchema.parse(req.body);
+    const { variantId, qty, unitCost, note, vendorId, billNumber, paymentDueDate } = receiveStockSchema.parse(req.body);
 
     const variant = await prisma.productVariant.findFirst({
       where: { id: variantId, productId, product: { sellerId: req.sellerId } },
-      include: { product: { select: { productType: true } } },
+      include: { product: { select: { productType: true, name: true, hsnCode: true, gstRate: true } } },
     });
     if (!variant) throw new NotFoundError("Variant", variantId);
+
+    let vendor = null;
+    if (vendorId && req.sellerIsHouse) {
+      vendor = await prisma.vendor.findUnique({ where: { id: vendorId } });
+      if (!vendor || !vendor.isActive) throw new NotFoundError("Vendor", vendorId);
+    }
 
     const isLoose = isLooseType(variant.product.productType);
     const c = fromAppFormat(
@@ -435,8 +447,92 @@ router.post("/:id/stock/receive", async (req: SellerRequest, res: Response) => {
       isLoose,
     );
 
-    await prisma.$transaction((tx) => receiveBatch(tx, variantId, c.stock, c.costPrice ?? 0, note));
+    await prisma.$transaction(async (tx) => {
+      if (vendor && billNumber) {
+        const tax = calculateLineItemTax({
+          unitPrice: c.costPrice ?? 0,
+          quantity: c.stock,
+          gstRate: Number(variant.product.gstRate ?? 0),
+          isTaxInclusive: false,
+        });
+        const totals = calculateInvoiceTotals([tax]);
+
+        const bill = await tx.purchaseBill.create({
+          data: {
+            vendorId: vendor.id,
+            billNumber,
+            billDate: new Date(),
+            receivedDate: new Date(),
+            vendorGstin: vendor.gstin,
+            subtotal: totals.subtotal,
+            totalCgst: totals.totalCgst,
+            totalSgst: totals.totalSgst,
+            totalIgst: 0,
+            totalCess: totals.totalCess,
+            totalAmount: totals.totalAmount,
+            tdsAmount: 0,
+            netPayable: totals.totalAmount,
+            itcEligible: true,
+            isReverseCharge: false,
+            status: "APPROVED",
+            paymentDueDate: paymentDueDate ? new Date(paymentDueDate) : null,
+          },
+        });
+        const line = await tx.purchaseBillLine.create({
+          data: {
+            purchaseBillId: bill.id,
+            variantId,
+            description: variant.product.name,
+            hsnCode: variant.product.hsnCode || "0000",
+            quantity: c.stock,
+            unitPrice: c.costPrice ?? 0,
+            taxableValue: tax.taxableValue,
+            gstRate: tax.gstRate,
+            cgstAmount: tax.cgstAmount,
+            sgstAmount: tax.sgstAmount,
+            igstAmount: 0,
+            totalAmount: tax.totalAmount,
+          },
+        });
+        await receiveBatch(tx, variantId, c.stock, c.costPrice ?? 0, `Bill ${billNumber}${note ? ` — ${note}` : ""}`, line.id);
+        await tx.vendor.update({ where: { id: vendor.id }, data: { outstandingBalance: { increment: totals.totalAmount } } });
+      } else {
+        await receiveBatch(tx, variantId, c.stock, c.costPrice ?? 0, note);
+      }
+    });
+
     res.json({ success: true, message: "Stock received" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── GET /vendors/search — vendor picker for the house co-manager's Restock dialog ─────
+// HOUSE-ONLY (see the note above) — a non-house seller gets an empty list rather than a 403, so the
+// Android RestockDialog's optional vendor-link section can simply not render for them without a
+// special-cased error path (mirrors how the section is hidden client-side for non-house sellers too).
+
+router.get("/vendors/search", async (req: SellerRequest, res: Response) => {
+  try {
+    if (!req.sellerIsHouse) { res.json({ success: true, data: [] }); return; }
+    const q = String(req.query.q ?? "").trim();
+    if (q.length < 1) { res.json({ success: true, data: [] }); return; }
+
+    const vendors = await prisma.vendor.findMany({
+      where: {
+        isActive: true,
+        OR: [
+          { name: { contains: q, mode: "insensitive" } },
+          { phone: { startsWith: q } },
+          { gstin: { startsWith: q, mode: "insensitive" } },
+        ],
+      },
+      take: 20,
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, phone: true, gstin: true },
+    });
+
+    res.json({ success: true, data: vendors });
   } catch (e) {
     sendError(res, e);
   }

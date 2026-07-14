@@ -62,12 +62,20 @@ export async function receiveBatch(
   qty: number,
   unitCost: number,
   note?: string,
+  sourcePurchaseBillLineId?: string,
 ): Promise<{ batchId: string }> {
   if (qty <= 0) throw new AppError(400, "VALIDATION_ERROR", "Restock quantity must be greater than 0");
   if (unitCost < 0) throw new AppError(400, "VALIDATION_ERROR", "Unit cost cannot be negative");
 
   const batch = await tx.stockBatch.create({
-    data: { variantId, unitCost, qtyReceived: qty, qtyRemaining: qty, note: note ?? null },
+    data: {
+      variantId,
+      unitCost,
+      qtyReceived: qty,
+      qtyRemaining: qty,
+      note: note ?? null,
+      sourcePurchaseBillLineId: sourcePurchaseBillLineId ?? null,
+    },
   });
   await tx.productVariant.update({ where: { id: variantId }, data: { stock: { increment: qty } } });
   await recomputeRollupCost(tx, variantId);

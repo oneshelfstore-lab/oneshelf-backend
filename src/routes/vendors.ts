@@ -148,6 +148,9 @@ router.get("/search", async (req: Request, res: Response) => {
 });
 
 // ─── GET /api/vendors/:id ────────────────────────────────────────────
+// Includes a chronological ledger (bills = debits, payments = credits, running balance) — the one
+// place to see "what do we owe this vendor and how did we get there," same shape a paper khata for
+// a supplier would have.
 
 router.get("/:id", async (req: Request, res: Response) => {
   try {
@@ -165,6 +168,54 @@ router.get("/:id", async (req: Request, res: Response) => {
       _count: true,
     });
 
+    const bills = await prisma.purchaseBill.findMany({
+      where: { vendorId: vendor.id, status: { not: "DRAFT" } },
+      orderBy: { billDate: "asc" },
+      select: {
+        id: true, billNumber: true, billDate: true, netPayable: true,
+        status: true, paymentDueDate: true,
+      },
+    });
+
+    const payments = bills.length > 0
+      ? await prisma.payment.findMany({
+          where: { relatedType: "PURCHASE_BILL", relatedId: { in: bills.map((b) => b.id) }, status: "COMPLETED" },
+          orderBy: { paymentDate: "asc" },
+        })
+      : [];
+    const billNumberById = new Map(bills.map((b) => [b.id, b.billNumber]));
+
+    const now = Date.now();
+    interface LedgerEntry {
+      type: "BILL" | "PAYMENT";
+      id: string;
+      date: Date;
+      billNumber: string;
+      amount: number;
+      status?: string;
+      isOverdue?: boolean;
+      paymentMode?: string;
+      referenceNumber?: string | null;
+    }
+    const entries: LedgerEntry[] = [
+      ...bills.map((b): LedgerEntry => ({
+        type: "BILL", id: b.id, date: b.billDate, billNumber: b.billNumber,
+        amount: Number(b.netPayable), status: b.status,
+        isOverdue: !!b.paymentDueDate && b.paymentDueDate.getTime() < now && b.status !== "PAID",
+      })),
+      ...payments.map((p): LedgerEntry => ({
+        type: "PAYMENT", id: p.id, date: p.paymentDate,
+        billNumber: billNumberById.get(p.relatedId) ?? "—",
+        amount: -Number(p.amount), paymentMode: p.paymentMode, referenceNumber: p.referenceNumber,
+      })),
+    ].sort((a, b) => a.date.getTime() - b.date.getTime());
+
+    let running = 0;
+    const ledger = entries.map((e) => {
+      running = Math.round((running + e.amount) * 100) / 100;
+      return { ...e, runningBalance: running };
+    });
+
     res.json({
       success: true,
       data: {
@@ -174,6 +225,7 @@ router.get("/:id", async (req: Request, res: Response) => {
           totalAmount: billStats._sum.totalAmount ?? 0,
           totalPayable: billStats._sum.netPayable ?? 0,
         },
+        ledger,
       },
     });
   } catch (error) {

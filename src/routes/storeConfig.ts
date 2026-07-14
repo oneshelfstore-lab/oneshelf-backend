@@ -55,6 +55,13 @@ const updateSchema = z.object({
   // (optional at this scale). When on, deliveryOnboarding.ts's submit handler requires a
   // policeVerificationDocUrl before a rider can be submitted for owner review.
   requirePoliceVerificationForDelivery: z.boolean().optional(),
+  // Income Tax Sec 194-O TDS on marketplace seller payouts (services/sellerTds194o.ts). Off by
+  // default — a real withholding decision; confirm with the CA before enabling
+  // (CA_COMPLIANCE_BRIEF.md §2.1). tds194oThreshold is the ₹5L individual/HUF no-TDS threshold.
+  tds194oEnabled: z.boolean().optional(),
+  tds194oRatePct: z.number().min(0).max(30).optional(),
+  tds194oThreshold: z.number().min(0).max(100000000).optional(),
+  tds194oNoPanRatePct: z.number().min(0).max(30).optional(),
 });
 
 // GET /api/app/config — public, no auth

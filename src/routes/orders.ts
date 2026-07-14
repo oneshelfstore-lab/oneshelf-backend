@@ -24,6 +24,7 @@ import { reconcileOrderPayment } from "../services/paymentReconciliation.js";
 import { generateOtp, orderRequiresOtp, OTP_VISIBLE_STATUSES } from "../lib/otp.js";
 import { consumeFifo, recordConsumption, restoreConsumption, type ConsumeResult } from "../services/stockBatches.js";
 import { drawFreeGiftStock } from "../services/freeGifts.js";
+import { computeSubOrderTds194o } from "../services/sellerTds194o.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -375,7 +376,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       if (itemsBySeller.size > 0) {
         const sellers = await tx.seller.findMany({
           where: { id: { in: [...itemsBySeller.keys()] } },
-          select: { id: true, commissionPct: true, isHouse: true, ownerUserId: true },
+          select: { id: true, commissionPct: true, isHouse: true, ownerUserId: true, pan: true, entityType: true },
         });
         const sellerById = new Map(sellers.map((s) => [s.id, s]));
         for (const [sid, sellerItems] of itemsBySeller) {
@@ -391,7 +392,10 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           // is the GST-exclusive taxable value (prices are GST-inclusive). Confirm the rate/base w/ CA.
           const taxableValue = +sellerItems.reduce((sum, it) => sum + Number(it.taxableValue), 0).toFixed(2);
           const tcsAmount = seller.isHouse ? 0 : +((taxableValue * TCS_RATE_PCT) / 100).toFixed(2);
-          const netPayable = +(subtotal - commissionAmount - tcsAmount).toFixed(2);
+          // Income Tax Sec 194-O TDS — off (0) unless StoreConfig.tds194oEnabled. See
+          // services/sellerTds194o.ts for the rate/threshold/deduction-point discipline.
+          const { tdsAmount } = await computeSubOrderTds194o(tx, seller, subtotal);
+          const netPayable = +(subtotal - commissionAmount - tcsAmount - tdsAmount).toFixed(2);
 
           const subOrder = await tx.subOrder.create({
             data: {
@@ -402,6 +406,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
               commissionPct,
               commissionAmount,
               tcsAmount,
+              tdsAmount,
               netPayable,
             },
           });

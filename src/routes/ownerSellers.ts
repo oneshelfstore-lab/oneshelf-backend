@@ -49,6 +49,8 @@ function shape(s: any) {
     commissionPct: Number(s.commissionPct),
     outstandingBalance: Number(s.outstandingBalance),
     gstin: s.gstin,
+    pan: s.pan,
+    entityType: s.entityType,
     city: s.city,
     productCount: s._count?.products ?? 0,
     ownerUserId: s.ownerUserId,
@@ -320,6 +322,11 @@ const patchSchema = z.object({
   commissionPct: z.number().min(0).max(100).optional(),
   name: z.string().min(1).optional(),
   isActive: z.boolean().optional(),
+  // Income Tax Sec 194-O — only an INDIVIDUAL_HUF seller with PAN gets the ₹5L no-TDS threshold
+  // (services/sellerTds194o.ts). The owner sets this explicitly once the seller's actual business
+  // constitution is verified — it defaults to OTHER (no exemption) on creation, deliberately, so
+  // nobody is under-withheld by a wrong default.
+  entityType: z.enum(["INDIVIDUAL_HUF", "OTHER"]).optional(),
 });
 
 router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
@@ -327,7 +334,7 @@ router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     const id = String(req.params.id ?? "");
     const parsed = patchSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
-    const { status, commissionPct, name, isActive } = parsed.data;
+    const { status, commissionPct, name, isActive, entityType } = parsed.data;
 
     const seller = await prisma.seller.findUnique({ where: { id }, select: { id: true, isHouse: true } });
     if (!seller) throw new NotFoundError("Seller", id);
@@ -342,6 +349,7 @@ router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
         ...(commissionPct !== undefined ? { commissionPct } : {}),
         ...(name !== undefined ? { name: name.trim() } : {}),
         ...(isActive !== undefined ? { isActive } : {}),
+        ...(entityType !== undefined ? { entityType } : {}),
       },
       include: INCLUDE,
     });

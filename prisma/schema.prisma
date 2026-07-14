@@ -106,6 +106,7 @@ enum TdsDeducteeType {
   VENDOR
   EMPLOYEE
   LANDLORD
+  SELLER // Sec 194-O — marketplace e-commerce participant (auto-logged by sellerPayout.ts)
 }
 
 enum TdsQuarter {
@@ -253,6 +254,13 @@ enum SubOrderStatus {
   PACKED
   COLLECTED
   CANCELLED
+}
+
+// Income Tax Sec 194-O: the ₹5L no-TDS-below-threshold exemption only applies to a resident
+// individual/HUF seller who has furnished PAN — a company/partnership/firm/LLP gets no exemption.
+enum SellerEntityType {
+  INDIVIDUAL_HUF
+  OTHER
 }
 
 // ─── Enums (V4 — referral wallet / store credit) ───────────────────
@@ -1467,6 +1475,17 @@ model StoreConfig {
   // until Phase 2 — SELLER_DELIVERY_ONBOARDING_PLAN.md). Off by default (optional, not mandatory
   // at this scale — see the plan's compliance table).
   requirePoliceVerificationForDelivery Boolean  @default(false)
+  // Income Tax Sec 194-O — TDS the platform (as an e-commerce operator) must withhold from what it
+  // pays external sellers, before paying them (services/sellerTds194o.ts). ⚠️ CA-gated, same
+  // discipline as the GST TCS rate above — OFF by default. Turning this on is a real withholding
+  // decision, not a cosmetic toggle: confirm the rate, the ₹5L-threshold interpretation, and the
+  // deduction-trigger point with the CA first (see CA_COMPLIANCE_BRIEF.md §2.1).
+  tds194oEnabled                       Boolean  @default(false)
+  tds194oRatePct                       Decimal  @default(0.1) @db.Decimal(5, 2)
+  // ₹5L individual/HUF no-TDS threshold (cumulative gross sales through the platform, current FY).
+  tds194oThreshold                     Decimal  @default(500000) @db.Decimal(12, 2)
+  // Sec 206AA floor rate when the seller has no PAN on file.
+  tds194oNoPanRatePct                  Decimal  @default(5) @db.Decimal(5, 2)
   createdAt                            DateTime @default(now())
   updatedAt                            DateTime @updatedAt
 }
@@ -1496,6 +1515,12 @@ model Seller {
   gstin              String?      @db.VarChar(15)
   pan                String?      @db.VarChar(10)
   bankDetails        Json? // acct / IFSC / UPI for the manual payout
+  // Income Tax Sec 194-O: only a resident INDIVIDUAL/HUF seller with PAN on file gets the ₹5L
+  // no-TDS threshold (services/sellerTds194o.ts). Defaults OTHER (no exemption, full-rate TDS from
+  // rupee one) — the conservative default, since UNDER-withholding is a real penalty exposure for
+  // the platform while OVER-withholding is merely correctable via the seller's own ITR. The owner
+  // must explicitly reclassify a seller as INDIVIDUAL_HUF once their constitution is verified.
+  entityType         SellerEntityType @default(OTHER)
   // Commission the platform keeps on this seller's item subtotal (snapshotted onto each SubOrder).
   commissionPct      Decimal      @default(5) @db.Decimal(5, 2)
   // Running balance the platform owes this seller (manual-ledger settlement).
@@ -1611,7 +1636,8 @@ model SubOrder {
   commissionPct    Decimal        @db.Decimal(5, 2) // snapshot of Seller.commissionPct
   commissionAmount Decimal        @db.Decimal(12, 2) // = subtotal × pct (the platform's cut)
   tcsAmount        Decimal        @default(0) @db.Decimal(12, 2) // GST Sec-52 TCS (accrued for later)
-  netPayable       Decimal        @db.Decimal(12, 2) // = subtotal − commission − tcs (owed to seller)
+  tdsAmount        Decimal        @default(0) @db.Decimal(12, 2) // Income Tax Sec 194-O TDS (accrued for later)
+  netPayable       Decimal        @db.Decimal(12, 2) // = subtotal − commission − tcs − tds (owed to seller)
   settled          Boolean        @default(false)
   payoutId         String?
   payout           SellerPayout?  @relation(fields: [payoutId], references: [id], onDelete: SetNull)
@@ -1638,6 +1664,7 @@ model SellerPayout {
   grossAmount Decimal  @db.Decimal(12, 2)
   commission  Decimal  @db.Decimal(12, 2)
   tcs         Decimal  @default(0) @db.Decimal(12, 2)
+  tds         Decimal  @default(0) @db.Decimal(12, 2) // Income Tax Sec 194-O withheld across this batch
   netPaid     Decimal  @db.Decimal(12, 2)
   paidAt      DateTime @default(now())
   mode        String? // BANK_TRANSFER / UPI / CASH

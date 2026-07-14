@@ -12,6 +12,7 @@ import { generateOrderInvoice, generateStatementInvoice, markStatementInvoicePai
 import { chargeSubscriptionMandate } from "./razorpay.js";
 import { consumeFifo, recordConsumption, type ConsumeResult } from "./stockBatches.js";
 import { AppError } from "../lib/errors.js";
+import { computeSubOrderTds194o } from "./sellerTds194o.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Subscriptions engine (milk / newspaper / recurring deliveries).
@@ -480,14 +481,16 @@ async function generateOrderFor(
       if (sellerId) {
         const seller = await tx.seller.findUnique({
           where: { id: sellerId },
-          select: { id: true, commissionPct: true, isHouse: true },
+          select: { id: true, commissionPct: true, isHouse: true, pan: true, entityType: true },
         });
         if (seller) {
           const subtotal = pricing.lineTotal;
           const commissionPct = Number(seller.commissionPct);
           const commissionAmount = +((subtotal * commissionPct) / 100).toFixed(2);
           const tcsAmount = seller.isHouse ? 0 : +((pricing.taxableValue * TCS_RATE_PCT) / 100).toFixed(2);
-          const netPayable = +(subtotal - commissionAmount - tcsAmount).toFixed(2);
+          // Sec 194-O TDS — same discipline as routes/orders.ts. Off (0) unless StoreConfig.tds194oEnabled.
+          const { tdsAmount } = await computeSubOrderTds194o(tx, seller, subtotal);
+          const netPayable = +(subtotal - commissionAmount - tcsAmount - tdsAmount).toFixed(2);
 
           const subOrder = await tx.subOrder.create({
             data: {
@@ -498,6 +501,7 @@ async function generateOrderFor(
               commissionPct,
               commissionAmount,
               tcsAmount,
+              tdsAmount,
               netPayable,
             },
           });

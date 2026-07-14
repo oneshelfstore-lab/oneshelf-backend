@@ -9,7 +9,9 @@ const router = Router();
 
 // ─── Validation ──────────────────────────────────────────────────────
 
-const deducteeTypeSchema = z.enum(["VENDOR", "EMPLOYEE", "LANDLORD"]);
+// SELLER = Sec 194-O marketplace withholding — usually auto-logged by services/sellerPayout.ts (one
+// row per payout batch), listed here too so the dashboard can manually add/correct an entry.
+const deducteeTypeSchema = z.enum(["VENDOR", "EMPLOYEE", "LANDLORD", "SELLER"]);
 const quarterSchema = z.enum(["Q1", "Q2", "Q3", "Q4"]);
 
 const tdsBaseSchema = z.object({

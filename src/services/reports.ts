@@ -605,6 +605,18 @@ export async function getDailySummary(date: string, scope: InvoiceScope = HOUSE_
   };
 }
 
+// ─── 10b. Payment Mode Breakdown (for the dashboard's "Payment Modes" chart) ─────────────────
+
+/** Real amount received per payment mode (COMPLETED payments against invoices) in a date range. */
+export async function getPaymentModeBreakdown(from: Date, to: Date) {
+  const payments = await prisma.payment.findMany({
+    where: { paymentDate: { gte: from, lte: to }, relatedType: "INVOICE", status: "COMPLETED" },
+  });
+  const byMode: Record<string, number> = {};
+  for (const p of payments) { byMode[p.paymentMode] = (byMode[p.paymentMode] || 0) + num(p.amount); }
+  return byMode;
+}
+
 // ─── Income-tax reports (P1b) ────────────────────────────────────────
 
 /** Round to 2 dp (money). */

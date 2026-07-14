@@ -12,6 +12,8 @@ import {
   getOutstandingPayables,
   getTdsRegister,
   getDailySummary,
+  getGstHealth,
+  getPaymentModeBreakdown,
   salesRegisterToExcel,
   type InvoiceScope,
 } from "../services/reports.js";
@@ -191,6 +193,38 @@ router.get("/daily-summary", async (req: Request, res: Response) => {
   try {
     const { date } = dateSchema.parse(req.query);
     const data = await getDailySummary(date, parseScope(req.query));
+    res.json({ success: true, data });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── 11. GST Health (compliance checklist — powers the dashboard banner) ──
+
+function currentPeriod(): string {
+  const now = new Date();
+  return String(now.getMonth() + 1).padStart(2, "0") + String(now.getFullYear());
+}
+
+router.get("/gst-health", async (req: Request, res: Response) => {
+  try {
+    const period = typeof req.query.period === "string" && /^\d{6}$/.test(req.query.period)
+      ? req.query.period
+      : currentPeriod();
+    const data = await getGstHealth(period);
+    res.json({ success: true, data });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── 12. Payment Mode Breakdown (dashboard "Payment Modes" chart) ──────
+
+router.get("/payment-modes", async (req: Request, res: Response) => {
+  try {
+    const { from, to } = dateRangeSchema.parse(req.query);
+    const range = parseDateRange(from, to);
+    const data = await getPaymentModeBreakdown(range.from, range.to);
     res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);

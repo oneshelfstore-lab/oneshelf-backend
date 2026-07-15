@@ -11,7 +11,7 @@ import { formatProductForApp } from "./catalog.js";
 import { computeUserSavings } from "../services/savings.js";
 import { computeUserLoyalty } from "../services/loyalty.js";
 import { notifyNewComplaint, notifyNewQuoteRequest, notifyQuoteMessage } from "../services/fcmNotifier.js";
-import { mintReferralWelcomeCoupon } from "../services/referralRewards.js";
+import { mintReferralWelcomeCoupon, istMonthKey } from "../services/referralRewards.js";
 import { createTopup, creditTopup } from "../services/walletTopup.js";
 import { verifyPaymentSignature, createRazorpayOrder, isRazorpayConfigured } from "../services/razorpay.js";
 import {
@@ -383,13 +383,20 @@ function genReferralCode(name: string): string {
   return `${base}${rand}`;
 }
 
-// GET /api/app/me/referral → the user's code (generated on first access) + stats + wallet
+// GET /api/app/me/referral → the user's code (generated on first access) + stats + wallet +
+// commission-program summary + payout history
 router.get("/referral", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
     const user = await prisma.user.findUnique({
       where: { id: userId },
-      select: { referralCode: true, walletBalance: true },
+      select: {
+        referralCode: true,
+        walletBalance: true,
+        referralBankAccountName: true,
+        referralBankAccountNumber: true,
+        referralBankIfsc: true,
+      },
     });
 
     let code = user?.referralCode ?? null;
@@ -409,17 +416,29 @@ router.get("/referral", async (req: FirebaseAuthRequest, res: Response) => {
       }
     }
 
-    const [referredCount, earned, cfg] = await Promise.all([
+    const currentMonth = istMonthKey(new Date());
+    const [referredCount, earned, cfg, pendingThisMonth, payouts] = await Promise.all([
       prisma.user.count({ where: { referredById: userId } }),
-      prisma.walletTransaction.aggregate({
+      prisma.referralCommission.aggregate({
         _sum: { amount: true },
-        where: { userId, type: "REFERRAL_CREDIT" },
+        where: { referrerId: userId },
       }),
       prisma.storeConfig.findFirst(),
+      prisma.referralCommission.aggregate({
+        _sum: { amount: true },
+        where: { referrerId: userId, periodMonth: currentMonth },
+      }),
+      prisma.referralPayout.findMany({
+        where: { referrerId: userId },
+        orderBy: { createdAt: "desc" },
+        take: 12,
+        select: { periodMonth: true, amount: true, status: true, paidAt: true },
+      }),
     ]);
 
-    const getAmount = cfg?.referralRewardAmount ?? 50;   // referrer earns (store credit)
-    const giveAmount = cfg?.referralWelcomeAmount ?? 50;  // referee gets (welcome coupon)
+    const giveAmount = cfg?.referralWelcomeAmount ?? 50; // referee gets (welcome coupon)
+    const commissionPct = Number(cfg?.referralCommissionPct ?? 1);
+    const windowMonths = cfg?.referralCommissionMonths ?? 12;
 
     res.json({
       success: true,
@@ -430,9 +449,50 @@ router.get("/referral", async (req: FirebaseAuthRequest, res: Response) => {
         walletBalance: Number(user?.walletBalance ?? 0),
         totalEarned: Number(earned._sum.amount ?? 0),
         giveAmount,
-        getAmount,
+        commissionPct,
+        windowMonths,
+        pendingThisMonth: Number(pendingThisMonth._sum.amount ?? 0),
+        hasBankDetails: Boolean(user?.referralBankAccountNumber),
+        payouts: payouts.map((p) => ({
+          periodMonth: p.periodMonth,
+          amount: Number(p.amount),
+          status: p.status,
+          paidAt: p.paidAt ? p.paidAt.getTime() : null,
+        })),
       },
     });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// PUT /api/app/me/referral/bank-details { accountName, accountNumber, ifsc } → save the bank
+// account the referrer's monthly commission payout is settled to. Its own small route (not folded
+// into the generic PUT /me) — smaller surface, no risk to unrelated profile fields.
+const bankDetailsSchema = z.object({
+  accountName: z.string().trim().min(2).max(100),
+  accountNumber: z.string().regex(/^\d{9,18}$/, "Invalid account number"),
+  ifsc: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, "Invalid IFSC code"),
+});
+
+router.put("/referral/bank-details", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = bankDetailsSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid bank details", parsed.error.errors);
+    const { accountName, accountNumber, ifsc } = parsed.data;
+    await prisma.user.update({
+      where: { id: req.appUser!.id },
+      data: {
+        referralBankAccountName: accountName,
+        referralBankAccountNumber: accountNumber,
+        referralBankIfsc: ifsc,
+      },
+    });
+    res.json({ success: true, message: "Bank details saved" });
   } catch (e) {
     sendError(res, e);
   }

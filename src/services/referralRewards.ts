@@ -1,6 +1,5 @@
 import type { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma.js";
-import { notifyReferralReward } from "./fcmNotifier.js";
 
 // Unambiguous code chars (no 0/O/1/I) — same convention as the scratch-card mint.
 function randomSuffix(len = 6): string {
@@ -38,78 +37,140 @@ export async function mintReferralWelcomeCoupon(
   return { code, amount: opts.amount, minOrder: opts.minOrder, expiresAt };
 }
 
+const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+
+export function round2(n: number): number {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+/** "2026-07" for the IST calendar date of `d` — the ReferralCommission/ReferralPayout grouping key. */
+export function istMonthKey(d: Date): string {
+  const ist = new Date(d.getTime() + IST_OFFSET_MS);
+  const y = ist.getUTCFullYear();
+  const m = String(ist.getUTCMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+
+/** True once `now` is at least `months` calendar-months past `anchor` (IST). months<=0 = no cap. */
+export function isPastCommissionWindow(anchor: Date, months: number, now: Date): boolean {
+  if (months <= 0) return false;
+  const cutoff = new Date(anchor.getTime());
+  cutoff.setUTCMonth(cutoff.getUTCMonth() + months);
+  return now.getTime() > cutoff.getTime();
+}
+
 /**
- * Credit the REFERRER ₹X store credit when their referee's FIRST order is delivered.
+ * Accrue the REFERRER's ongoing commission (StoreConfig.referralCommissionPct % of the order
+ * subtotal) on every DELIVERED order placed by their referee, for up to
+ * StoreConfig.referralCommissionMonths from the day the referral was applied.
  *
- * Idempotent — keyed by Referral.status PENDING→REWARDED (guarded updateMany) + qualifyingOrderId
- * @unique + WalletTransaction is written in the same tx. Best-effort caller; safe to invoke from all
- * three DELIVERED paths (delivery agent / owner / admin) and from concurrent retries.
- *
- * No reversal path exists by design: a DELIVERED order can never be cancelled (cancel only allows
- * PLACED/CONFIRMED), so this trigger is monotonic.
+ * Idempotent — ReferralCommission.orderId is @unique; a re-run's insert throws P2002 and is
+ * swallowed as a no-op (same pattern as refundWalletOnCancel below). Best-effort caller; safe to
+ * invoke from all three DELIVERED paths (delivery agent / owner / admin) and from concurrent retries.
+ * No reversal path by design: a DELIVERED order can never be cancelled.
  */
-export async function creditReferrerOnFirstDelivered(orderId: string): Promise<void> {
+export async function accrueReferralCommission(orderId: string): Promise<void> {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    select: { id: true, customerId: true, status: true, createdAt: true },
+    select: { id: true, customerId: true, status: true, subtotal: true },
   });
   if (!order || order.status !== "DELIVERED") return;
 
-  // Only proceed if this customer is a referee with a still-PENDING referral.
+  const customer = await prisma.user.findUnique({
+    where: { id: order.customerId },
+    select: { referredById: true },
+  });
+  if (!customer?.referredById) return;
+
   const referral = await prisma.referral.findUnique({
     where: { refereeId: order.customerId },
-    select: { id: true, status: true, referrerId: true },
+    select: { referrerId: true, createdAt: true },
   });
-  if (!referral || referral.status !== "PENDING") return;
-
-  // "First delivered order" = no earlier DELIVERED order for this referee.
-  const priorDelivered = await prisma.order.count({
-    where: {
-      customerId: order.customerId,
-      status: "DELIVERED",
-      id: { not: order.id },
-      createdAt: { lt: order.createdAt },
-    },
-  });
-  if (priorDelivered > 0) return;
+  if (!referral) return;
 
   const cfg = await prisma.storeConfig.findFirst();
   if (cfg && cfg.referralEnabled === false) return;
-  const amount = Number(cfg?.referralRewardAmount ?? 50);
+  const pct = Number(cfg?.referralCommissionPct ?? 1);
+  if (pct <= 0) return;
+  const windowMonths = cfg?.referralCommissionMonths ?? 12;
+  if (isPastCommissionWindow(referral.createdAt, windowMonths, new Date())) return;
+
+  const amount = round2((Number(order.subtotal) * pct) / 100);
   if (amount <= 0) return;
 
-  await prisma.$transaction(async (tx) => {
-    // Guarded flip — the single idempotency gate. A concurrent path that already flipped it loses
-    // here (count === 0) and bails, so the credit is applied exactly once.
-    const bumped = await tx.referral.updateMany({
-      where: { id: referral.id, status: "PENDING" },
+  try {
+    await prisma.referralCommission.create({
       data: {
-        status: "REWARDED",
-        qualifyingOrderId: order.id,
-        rewardAmount: amount,
-        rewardedAt: new Date(),
-      },
-    });
-    if (bumped.count === 0) return;
-
-    const updated = await tx.user.update({
-      where: { id: referral.referrerId },
-      data: { walletBalance: { increment: amount } },
-      select: { walletBalance: true },
-    });
-    await tx.walletTransaction.create({
-      data: {
-        userId: referral.referrerId,
+        referrerId: referral.referrerId,
+        refereeId: order.customerId,
+        orderId: order.id,
         amount,
-        type: "REFERRAL_CREDIT",
-        balanceAfter: updated.walletBalance,
-        referralId: referral.id,
-        note: "Referral reward",
+        periodMonth: istMonthKey(new Date()),
       },
     });
-  });
+  } catch (e: any) {
+    if (e?.code !== "P2002") {
+      console.error(JSON.stringify({ level: "error", msg: "referral commission accrual failed", orderId, err: String(e) }));
+    }
+  }
+}
 
-  notifyReferralReward(referral.referrerId, amount).catch(() => {});
+/**
+ * Group every unpaid ReferralCommission by (referrer, periodMonth) for months that have fully
+ * elapsed (any month before the current IST month), and settle each group into one ReferralPayout.
+ * A referrer with no bank details on file is skipped for now — their commissions just keep
+ * accumulating unpaid until they add bank details; nothing is lost, nothing fails. No money moves
+ * here; the owner works the resulting PENDING queue by hand (Referral Payouts screen → "Mark paid").
+ */
+export async function closeMonthlyReferralPayouts(now: Date = new Date()): Promise<{ created: number }> {
+  const currentMonth = istMonthKey(now);
+
+  const unpaid = await prisma.referralCommission.findMany({
+    where: { payoutId: null, periodMonth: { lt: currentMonth } },
+    select: {
+      id: true,
+      referrerId: true,
+      periodMonth: true,
+      amount: true,
+      referrer: {
+        select: { referralBankAccountName: true, referralBankAccountNumber: true, referralBankIfsc: true },
+      },
+    },
+  });
+  if (unpaid.length === 0) return { created: 0 };
+
+  const groups = new Map<string, typeof unpaid>();
+  for (const row of unpaid) {
+    const key = `${row.referrerId}::${row.periodMonth}`;
+    const list = groups.get(key);
+    if (list) list.push(row);
+    else groups.set(key, [row]);
+  }
+
+  let created = 0;
+  for (const rows of groups.values()) {
+    const first = rows[0]!;
+    if (!first.referrer.referralBankAccountNumber) continue; // no bank details yet — leave accruing
+
+    await prisma.$transaction(async (tx) => {
+      const payout = await tx.referralPayout.create({
+        data: {
+          referrerId: first.referrerId,
+          periodMonth: first.periodMonth,
+          amount: rows.reduce((sum, r) => sum + Number(r.amount), 0),
+          bankAccountName: first.referrer.referralBankAccountName,
+          bankAccountNumber: first.referrer.referralBankAccountNumber,
+          bankIfsc: first.referrer.referralBankIfsc,
+        },
+      });
+      await tx.referralCommission.updateMany({
+        where: { id: { in: rows.map((r) => r.id) } },
+        data: { payoutId: payout.id },
+      });
+    });
+    created += 1;
+  }
+  return { created };
 }
 
 /**

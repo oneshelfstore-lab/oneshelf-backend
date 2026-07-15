@@ -399,6 +399,15 @@ model User {
   subscriptions          Subscription[]
   subscriptionStatements SubscriptionStatement[]
 
+  // Referral v2 — ongoing commission payouts. Bank details the referrer fills in once (Referral
+  // screen) so their monthly-accrued commission can be settled by manual bank transfer, same
+  // pattern as SellerPayout (owner sends the money outside the app, then marks it paid in-app).
+  referralBankAccountName   String?
+  referralBankAccountNumber String?
+  referralBankIfsc          String?
+  referralCommissionsEarned ReferralCommission[] @relation("ReferralCommissionsEarned")
+  referralPayoutsReceived   ReferralPayout[]     @relation("ReferralPayoutsReceived")
+
   @@index([phone])
   @@index([deletionStatus, deletedAt]) // the deletion sweeper's hot query
 }
@@ -1020,6 +1029,9 @@ model Referral {
   referee           User           @relation("Referee", fields: [refereeId], references: [id])
   status            ReferralStatus @default(PENDING)
   welcomeCouponCode String?
+  // rewardAmount/qualifyingOrderId/rewardedAt are historical — the old flat one-time bonus (Phase 2).
+  // Referral v2 replaced it with ongoing per-order ReferralCommission accrual; nothing new writes
+  // these fields, they're kept so old rows still read correctly.
   rewardAmount      Decimal?       @db.Decimal(10, 2)
   qualifyingOrderId String?        @unique
   rewardedAt        DateTime?
@@ -1027,6 +1039,47 @@ model Referral {
 
   @@index([referrerId])
   @@index([status])
+}
+
+// ─── Referral v2 — ongoing 1% commission + monthly bank payout ──────
+// One row per DELIVERED order placed by a referred customer, within the commission window
+// (StoreConfig.referralCommissionMonths from Referral.createdAt). orderId @unique = the accrual's
+// idempotency key (mirrors ReferralCommission's own guard in accrueReferralCommission).
+model ReferralCommission {
+  id          String          @id @default(cuid())
+  referrerId  String
+  referrer    User            @relation("ReferralCommissionsEarned", fields: [referrerId], references: [id])
+  refereeId   String
+  orderId     String          @unique
+  amount      Decimal         @db.Decimal(10, 2)
+  periodMonth String // IST month of accrual, "2026-07" — the payout-grouping key
+  payoutId    String?
+  payout      ReferralPayout? @relation(fields: [payoutId], references: [id], onDelete: SetNull)
+  createdAt   DateTime        @default(now())
+
+  @@index([referrerId, payoutId])
+  @@index([periodMonth])
+}
+
+// One settlement per referrer per elapsed month, grouping that month's unpaid ReferralCommission
+// rows. No money moves here — this is the "what's owed to whom" queue the owner works from by hand
+// (same manual-ledger pattern as SellerPayout: transfer the money outside the app, then mark paid).
+model ReferralPayout {
+  id                String   @id @default(cuid())
+  referrerId        String
+  referrer          User     @relation("ReferralPayoutsReceived", fields: [referrerId], references: [id])
+  periodMonth       String // the settled month, e.g. "2026-06"
+  amount            Decimal  @db.Decimal(10, 2)
+  status            String   @default("PENDING") // PENDING | PAID
+  bankAccountName   String? // snapshotted at creation, same "snapshot at the time" convention as Order
+  bankAccountNumber String?
+  bankIfsc          String?
+  paidAt            DateTime?
+  createdAt         DateTime @default(now())
+
+  commissions ReferralCommission[]
+
+  @@index([referrerId, status])
 }
 
 // ─── Wallet top-up (money-in via Razorpay) ───────────────────────────
@@ -1448,6 +1501,11 @@ model StoreConfig {
   referralWelcomeAmount                Int      @default(50)
   referralMinOrder                     Int      @default(199)
   referralWelcomeExpiryDays            Int      @default(30)
+  // Referral v2 — ongoing commission (replaces the old one-time referralRewardAmount bonus).
+  // referralCommissionPct = % of a referred customer's order subtotal the referrer earns, on every
+  // DELIVERED order; referralCommissionMonths = the accrual window from Referral.createdAt (0 = no cap).
+  referralCommissionPct                Decimal  @default(1) @db.Decimal(5, 2)
+  referralCommissionMonths             Int      @default(12)
   // Customer wallet top-up bounds (₹). A top-up amount must be within [min, max].
   walletTopupMin                       Int      @default(50)
   walletTopupMax                       Int      @default(10000)

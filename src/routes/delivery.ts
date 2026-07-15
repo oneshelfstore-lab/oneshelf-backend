@@ -8,7 +8,7 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { notifyOrderStatusChange, notifyDeliveryArrived } from "../services/fcmNotifier.js";
-import { creditReferrerOnFirstDelivered } from "../services/referralRewards.js";
+import { accrueReferralCommission } from "../services/referralRewards.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { OTP_LOCK_SECONDS } from "../lib/otp.js";
 
@@ -629,9 +629,9 @@ router.post("/:id/deliver", async (req: FirebaseAuthRequest, res: Response) => {
     }
 
     notifyOrderStatusChange({ ...order, status: "DELIVERED" }).catch(() => {});
-    // Referral payout: if this is the referee's first delivered order, credit their referrer's wallet.
-    // Idempotent + best-effort — never blocks the delivery response.
-    creditReferrerOnFirstDelivered(order.id).catch((e) => console.error("referral credit failed:", e));
+    // Referral commission: accrue the referrer's ongoing % on this order (idempotent + best-effort —
+    // never blocks the delivery response).
+    accrueReferralCommission(order.id).catch((e) => console.error("referral commission accrual failed:", e));
     checkTierUpOnDelivery(order.id).catch((e) => console.error("tier-up check failed:", e));
 
     res.json({ success: true, data: { orderId: order.id, status: "DELIVERED" } });

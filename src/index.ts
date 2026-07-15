@@ -40,6 +40,7 @@ import ownerPartnerApplicationRoutes from "./routes/ownerPartnerApplications.js"
 import ownerBroadcastRoutes from "./routes/ownerBroadcast.js";
 import ownerUsersRoutes from "./routes/ownerUsers.js";
 import ownerSellersRoutes from "./routes/ownerSellers.js";
+import ownerReferralPayoutsRoutes from "./routes/ownerReferralPayouts.js";
 import ownerAnalyticsRoutes from "./routes/ownerAnalytics.js";
 import ownerGstr8Routes from "./routes/ownerGstr8.js";
 import ownerTds194oRoutes from "./routes/ownerTds194o.js";
@@ -317,6 +318,7 @@ app.use("/api/app/owner/super-categories", ownerSuperCategoryRoutes);
 app.use("/api/app/owner/brands", ownerBrandRouter);
 app.use("/api/app/owner/users", ownerUsersRoutes);
 app.use("/api/app/owner/sellers", ownerSellersRoutes);
+app.use("/api/app/owner/referral-payouts", ownerReferralPayoutsRoutes);
 app.use("/api/app/owner/analytics", ownerAnalyticsRoutes);
 app.use("/api/app/owner/gstr8", ownerGstr8Routes);
 app.use("/api/app/owner/tds194o", ownerTds194oRoutes);

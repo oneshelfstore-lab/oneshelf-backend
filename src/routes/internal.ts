@@ -4,6 +4,7 @@ import { sendError } from "../lib/errors.js";
 import { generateDueSubscriptionOrders, closeMonthlyStatements } from "../services/subscriptionEngine.js";
 import { purgeExpiredDeletions } from "../services/accountDeletion.js";
 import { runAutoSellerPayouts } from "../services/sellerPayout.js";
+import { closeMonthlyReferralPayouts } from "../services/referralRewards.js";
 
 // Internal automation endpoints — NOT behind Firebase/JWT auth (an external scheduler with no user
 // identity calls them). Protected by a shared secret header instead. Mounted in index.ts BEFORE the
@@ -47,7 +48,19 @@ router.post("/subscriptions/run", async (req: Request, res: Response) => {
     const purged = await purgeExpiredDeletions();
     // Piggyback seller auto-payout too — a no-op unless the owner has turned it on (StoreConfig).
     const payout = await runAutoSellerPayouts();
-    res.json({ success: true, data: { generated: gen.generated, skipped: gen.skipped, billed: bill.billed, purged, sellersPaidOut: payout.paidCount } });
+    // Group last month's referral commissions into payouts for the owner's Referral Payouts queue.
+    const referralPayouts = await closeMonthlyReferralPayouts();
+    res.json({
+      success: true,
+      data: {
+        generated: gen.generated,
+        skipped: gen.skipped,
+        billed: bill.billed,
+        purged,
+        sellersPaidOut: payout.paidCount,
+        referralPayoutsCreated: referralPayouts.created,
+      },
+    });
   } catch (e) {
     sendError(res, e);
   }

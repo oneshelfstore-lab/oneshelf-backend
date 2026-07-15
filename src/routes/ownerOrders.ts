@@ -10,7 +10,7 @@ import {
 import { notifyOrderStatusChange, notifyDeliveryAssignment } from "../services/fcmNotifier.js";
 import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orderInvoice.js";
 import { markSamplePacked } from "../services/freeSample.js";
-import { creditReferrerOnFirstDelivered, refundWalletOnCancel } from "../services/referralRewards.js";
+import { accrueReferralCommission, refundWalletOnCancel } from "../services/referralRewards.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { restoreConsumption } from "../services/stockBatches.js";
 
@@ -186,10 +186,10 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
     }
 
     notifyOrderStatusChange({ ...order, status: newStatus }).catch(() => {});
-    // Referral wallet hooks (idempotent + best-effort). Credit the referrer on the referee's first
+    // Referral hooks (idempotent + best-effort). Accrue the referrer's ongoing commission on every
     // delivery; refund any store credit if the order is cancelled.
     if (newStatus === "DELIVERED") {
-      creditReferrerOnFirstDelivered(order.id).catch((e) => console.error("referral credit failed:", e));
+      accrueReferralCommission(order.id).catch((e) => console.error("referral commission accrual failed:", e));
       checkTierUpOnDelivery(order.id).catch((e) => console.error("tier-up check failed:", e));
     }
     if (newStatus === "CANCELLED") {

@@ -51,6 +51,16 @@ export function istMonthKey(d: Date): string {
   return `${y}-${m}`;
 }
 
+/** Masks a full name for public display: keeps the first name, reduces the rest to initials.
+ *  "Rahul Sharma" → "Rahul S.", "Rahul Kumar Sharma" → "Rahul K. S.", "Rahul" → "Rahul". */
+export function maskName(name: string | null | undefined): string {
+  const parts = (name ?? "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "Someone";
+  if (parts.length === 1) return parts[0]!;
+  const initials = parts.slice(1).map((p) => `${p[0]!.toUpperCase()}.`).join(" ");
+  return `${parts[0]} ${initials}`;
+}
+
 /** True once `now` is at least `months` calendar-months past `anchor` (IST). months<=0 = no cap. */
 export function isPastCommissionWindow(anchor: Date, months: number, now: Date): boolean {
   if (months <= 0) return false;

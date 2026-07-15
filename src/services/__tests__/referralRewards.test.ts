@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { round2, istMonthKey, isPastCommissionWindow } from "../referralRewards.js";
+import { round2, istMonthKey, isPastCommissionWindow, maskName } from "../referralRewards.js";
 
 // Note: accrueReferralCommission/closeMonthlyReferralPayouts require a live DB connection, so we
 // test the pure calculation/window functions here (matches this repo's invoiceNumbering.test.ts
@@ -49,5 +49,22 @@ describe("isPastCommissionWindow", () => {
 
   it("months <= 0 means no cap", () => {
     expect(isPastCommissionWindow(anchor, 0, new Date("2099-01-01T00:00:00Z"))).toBe(false);
+  });
+});
+
+describe("maskName", () => {
+  it("masks the surname to an initial", () => {
+    expect(maskName("Rahul Sharma")).toBe("Rahul S.");
+  });
+  it("masks every name after the first", () => {
+    expect(maskName("Rahul Kumar Sharma")).toBe("Rahul K. S.");
+  });
+  it("leaves a single name untouched", () => {
+    expect(maskName("Rahul")).toBe("Rahul");
+  });
+  it("falls back for blank/null", () => {
+    expect(maskName("")).toBe("Someone");
+    expect(maskName(null)).toBe("Someone");
+    expect(maskName("   ")).toBe("Someone");
   });
 });

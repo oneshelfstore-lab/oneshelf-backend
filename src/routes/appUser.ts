@@ -11,7 +11,7 @@ import { formatProductForApp } from "./catalog.js";
 import { computeUserSavings } from "../services/savings.js";
 import { computeUserLoyalty } from "../services/loyalty.js";
 import { notifyNewComplaint, notifyNewQuoteRequest, notifyQuoteMessage } from "../services/fcmNotifier.js";
-import { mintReferralWelcomeCoupon, istMonthKey } from "../services/referralRewards.js";
+import { mintReferralWelcomeCoupon, istMonthKey, maskName } from "../services/referralRewards.js";
 import { createTopup, creditTopup } from "../services/walletTopup.js";
 import { verifyPaymentSignature, createRazorpayOrder, isRazorpayConfigured } from "../services/razorpay.js";
 import {
@@ -392,6 +392,7 @@ router.get("/referral", async (req: FirebaseAuthRequest, res: Response) => {
       where: { id: userId },
       select: {
         referralCode: true,
+        referredById: true,
         walletBalance: true,
         referralBankAccountName: true,
         referralBankAccountNumber: true,
@@ -440,6 +441,41 @@ router.get("/referral", async (req: FirebaseAuthRequest, res: Response) => {
     const commissionPct = Number(cfg?.referralCommissionPct ?? 1);
     const windowMonths = cfg?.referralCommissionMonths ?? 12;
 
+    // The code the referrer used to join (if any), for the "You joined via X" chip.
+    let referredByCode: string | null = null;
+    if (user?.referredById) {
+      const ref = await prisma.user.findUnique({
+        where: { id: user.referredById },
+        select: { referralCode: true },
+      });
+      referredByCode = ref?.referralCode ?? null;
+    }
+
+    // Rich "friends you invited" list: masked name + ₹earned + order count, newest first.
+    const [friends, friendCommissions] = await Promise.all([
+      prisma.user.findMany({
+        where: { referredById: userId },
+        orderBy: { createdAt: "desc" },
+        take: 20,
+        select: { id: true, name: true },
+      }),
+      prisma.referralCommission.groupBy({
+        by: ["refereeId"],
+        where: { referrerId: userId },
+        _sum: { amount: true },
+        _count: { orderId: true },
+      }),
+    ]);
+    const byReferee = new Map(friendCommissions.map((c) => [c.refereeId, c]));
+    const referredFriends = friends.map((f) => {
+      const c = byReferee.get(f.id);
+      return {
+        name: maskName(f.name),
+        earned: Number(c?._sum.amount ?? 0),
+        orders: c?._count.orderId ?? 0,
+      };
+    });
+
     res.json({
       success: true,
       data: {
@@ -453,6 +489,10 @@ router.get("/referral", async (req: FirebaseAuthRequest, res: Response) => {
         windowMonths,
         pendingThisMonth: Number(pendingThisMonth._sum.amount ?? 0),
         hasBankDetails: Boolean(user?.referralBankAccountNumber),
+        bankLast4: user?.referralBankAccountNumber ? user.referralBankAccountNumber.slice(-4) : null,
+        wasReferred: Boolean(user?.referredById),
+        referredByCode,
+        referredFriends,
         payouts: payouts.map((p) => ({
           periodMonth: p.periodMonth,
           amount: Number(p.amount),

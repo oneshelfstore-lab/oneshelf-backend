@@ -34,6 +34,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         periodMonth: p.periodMonth,
         amount: Number(p.amount),
         status: p.status,
+        method: p.method,
         bankAccountName: p.bankAccountName,
         bankAccountNumber: p.bankAccountNumber,
         bankIfsc: p.bankIfsc,
@@ -41,6 +42,41 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         createdAt: p.createdAt.getTime(),
       })),
     });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// GET /api/app/owner/referral-payouts/outstanding — live "who we owe how much" before any
+// request/grouping: each referrer's un-grouped (payoutId=null) commission, biggest first.
+router.get("/outstanding", async (_req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const grouped = await prisma.referralCommission.groupBy({
+      by: ["referrerId"],
+      where: { payoutId: null },
+      _sum: { amount: true },
+      _count: { orderId: true },
+    });
+    const referrers = await prisma.user.findMany({
+      where: { id: { in: grouped.map((g) => g.referrerId) } },
+      select: { id: true, name: true, phone: true, referralBankAccountNumber: true },
+    });
+    const byId = new Map(referrers.map((u) => [u.id, u]));
+    const rows = grouped
+      .map((g) => {
+        const u = byId.get(g.referrerId);
+        return {
+          referrerId: g.referrerId,
+          referrerName: u?.name ?? "",
+          referrerPhone: u?.phone ?? null,
+          amount: Number(g._sum.amount ?? 0),
+          orders: g._count.orderId,
+          hasBankDetails: Boolean(u?.referralBankAccountNumber),
+        };
+      })
+      .filter((r) => r.amount > 0)
+      .sort((a, b) => b.amount - a.amount);
+    res.json({ success: true, data: rows });
   } catch (e) {
     sendError(res, e);
   }

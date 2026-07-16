@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma.js";
+import { ValidationError } from "../lib/errors.js";
 
 // Unambiguous code chars (no 0/O/1/I) — same convention as the scratch-card mint.
 function randomSuffix(len = 6): string {
@@ -222,4 +223,86 @@ export async function refundWalletOnCancel(orderId: string): Promise<void> {
       console.error(JSON.stringify({ level: "error", msg: "wallet refund failed", orderId, err: String(e) }));
     }
   }
+}
+
+/** Sum of a referrer's commission not yet grouped into any payout — their withdrawable balance. */
+export async function getAvailableReferralBalance(userId: string): Promise<number> {
+  const agg = await prisma.referralCommission.aggregate({
+    _sum: { amount: true },
+    where: { referrerId: userId, payoutId: null },
+  });
+  return round2(Number(agg._sum.amount ?? 0));
+}
+
+/**
+ * Self-serve withdrawal of a referrer's un-grouped commission balance, on demand.
+ *  - WALLET: instant — the amount becomes store credit (usable at checkout) and the payout is
+ *    recorded PAID/method=WALLET (auto-settled, no owner action). Needs no bank details.
+ *  - BANK:   creates a PENDING/method=BANK payout the owner settles by transfer (mark-paid queue).
+ *            Requires bank details on file (snapshotted onto the payout).
+ * Consuming the commissions (setting payoutId) is what prevents double-withdrawal.
+ * ponytail: no per-user lock — a single user double-tapping is guarded by the client loading state
+ *           + the txn; add SELECT FOR UPDATE only if real concurrent-withdrawal abuse shows up.
+ */
+export async function withdrawReferralBalance(
+  userId: string,
+  method: "BANK" | "WALLET",
+): Promise<{ method: "BANK" | "WALLET"; amount: number; walletBalance: number | null }> {
+  return prisma.$transaction(async (tx) => {
+    const rows = await tx.referralCommission.findMany({
+      where: { referrerId: userId, payoutId: null },
+      select: { id: true, amount: true },
+    });
+    const amount = round2(rows.reduce((s, r) => s + Number(r.amount), 0));
+    if (rows.length === 0 || amount <= 0) {
+      throw new ValidationError("No referral balance to withdraw yet.");
+    }
+
+    const user = await tx.user.findUnique({
+      where: { id: userId },
+      select: { referralBankAccountName: true, referralBankAccountNumber: true, referralBankIfsc: true },
+    });
+
+    if (method === "BANK" && !user?.referralBankAccountNumber) {
+      throw new ValidationError("Add your bank account details before requesting a bank payout.");
+    }
+
+    const periodMonth = istMonthKey(new Date());
+    const payout = await tx.referralPayout.create({
+      data: {
+        referrerId: userId,
+        periodMonth,
+        amount,
+        method,
+        status: method === "WALLET" ? "PAID" : "PENDING",
+        paidAt: method === "WALLET" ? new Date() : null,
+        bankAccountName: method === "BANK" ? user?.referralBankAccountName : null,
+        bankAccountNumber: method === "BANK" ? user?.referralBankAccountNumber : null,
+        bankIfsc: method === "BANK" ? user?.referralBankIfsc : null,
+      },
+    });
+    await tx.referralCommission.updateMany({
+      where: { id: { in: rows.map((r) => r.id) } },
+      data: { payoutId: payout.id },
+    });
+
+    if (method === "WALLET") {
+      const u = await tx.user.update({
+        where: { id: userId },
+        data: { walletBalance: { increment: amount } },
+        select: { walletBalance: true },
+      });
+      await tx.walletTransaction.create({
+        data: {
+          userId,
+          amount,
+          type: "REFERRAL_CREDIT",
+          balanceAfter: u.walletBalance,
+          note: "Referral earnings → store credit",
+        },
+      });
+      return { method, amount, walletBalance: Number(u.walletBalance) };
+    }
+    return { method, amount, walletBalance: null };
+  });
 }

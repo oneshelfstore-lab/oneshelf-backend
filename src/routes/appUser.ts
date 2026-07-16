@@ -11,7 +11,7 @@ import { formatProductForApp } from "./catalog.js";
 import { computeUserSavings } from "../services/savings.js";
 import { computeUserLoyalty } from "../services/loyalty.js";
 import { notifyNewComplaint, notifyNewQuoteRequest, notifyQuoteMessage } from "../services/fcmNotifier.js";
-import { mintReferralWelcomeCoupon, istMonthKey, maskName } from "../services/referralRewards.js";
+import { mintReferralWelcomeCoupon, istMonthKey, maskName, getAvailableReferralBalance, withdrawReferralBalance } from "../services/referralRewards.js";
 import { createTopup, creditTopup } from "../services/walletTopup.js";
 import { verifyPaymentSignature, createRazorpayOrder, isRazorpayConfigured } from "../services/razorpay.js";
 import {
@@ -418,7 +418,7 @@ router.get("/referral", async (req: FirebaseAuthRequest, res: Response) => {
     }
 
     const currentMonth = istMonthKey(new Date());
-    const [referredCount, earned, cfg, pendingThisMonth, payouts] = await Promise.all([
+    const [referredCount, earned, cfg, pendingThisMonth, payouts, availableBalance] = await Promise.all([
       prisma.user.count({ where: { referredById: userId } }),
       prisma.referralCommission.aggregate({
         _sum: { amount: true },
@@ -435,6 +435,7 @@ router.get("/referral", async (req: FirebaseAuthRequest, res: Response) => {
         take: 12,
         select: { periodMonth: true, amount: true, status: true, paidAt: true },
       }),
+      getAvailableReferralBalance(userId),
     ]);
 
     const giveAmount = cfg?.referralWelcomeAmount ?? 50; // referee gets (welcome coupon)
@@ -488,6 +489,7 @@ router.get("/referral", async (req: FirebaseAuthRequest, res: Response) => {
         commissionPct,
         windowMonths,
         pendingThisMonth: Number(pendingThisMonth._sum.amount ?? 0),
+        availableBalance,
         hasBankDetails: Boolean(user?.referralBankAccountNumber),
         bankLast4: user?.referralBankAccountNumber ? user.referralBankAccountNumber.slice(-4) : null,
         wasReferred: Boolean(user?.referredById),
@@ -533,6 +535,19 @@ router.put("/referral/bank-details", async (req: FirebaseAuthRequest, res: Respo
       },
     });
     res.json({ success: true, message: "Bank details saved" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// POST /api/app/me/referral/payout { method: "BANK" | "WALLET" } → withdraw the un-grouped
+// commission balance on demand. WALLET = instant store credit; BANK = queued for the owner.
+router.post("/referral/payout", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const method = req.body?.method === "WALLET" ? "WALLET" : req.body?.method === "BANK" ? "BANK" : null;
+    if (!method) throw new ValidationError("method must be BANK or WALLET");
+    const result = await withdrawReferralBalance(req.appUser!.id, method);
+    res.json({ success: true, data: result });
   } catch (e) {
     sendError(res, e);
   }

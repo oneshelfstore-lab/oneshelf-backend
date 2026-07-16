@@ -1071,6 +1071,7 @@ model ReferralPayout {
   periodMonth       String // the settled month, e.g. "2026-06"
   amount            Decimal  @db.Decimal(10, 2)
   status            String   @default("PENDING") // PENDING | PAID
+  method            String   @default("BANK") // BANK (owner settles by transfer) | WALLET (instant store credit)
   bankAccountName   String? // snapshotted at creation, same "snapshot at the time" convention as Order
   bankAccountNumber String?
   bankIfsc          String?

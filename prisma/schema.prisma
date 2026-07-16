@@ -714,9 +714,45 @@ model ProductVariant {
   purchaseBillLines PurchaseBillLine[]
   freeGiftAsTrigger FreeGiftOffer?  @relation("FreeGiftTrigger")
   freeGiftAsReward  FreeGiftOffer[] @relation("FreeGiftReward")
+  comboItems        ComboItem[]
 
   @@index([productId])
   @@index([barcode])
+}
+
+// ─── Combo (curated bundle — "Rakshabandhan kit", "Monthly ration") ───
+// Owner-curated list of {variant, defaultQty}. The customer opens it as a checklist (all items
+// pre-checked, editable qty), unchecks what they don't want, and taps "add selected" — the chosen
+// lines drop into the normal cart as ordinary items. No special bundle pricing (coupons/free-gifts
+// cover discounts); a combo sells on curation/convenience, not price. House-only in v1 (same
+// stock/payout reasoning as FreeGiftOffer). activeFrom/activeUntil drive the "ends in N days"
+// occasion window (both null ⇒ always live).
+model Combo {
+  id           String      @id @default(cuid())
+  name         String
+  nameHi       String?
+  imageUrl     String?
+  description  String?
+  isActive     Boolean     @default(true)
+  activeFrom   DateTime?
+  activeUntil  DateTime?
+  displayOrder Int         @default(0)
+  items        ComboItem[]
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+}
+
+model ComboItem {
+  id        String         @id @default(cuid())
+  comboId   String
+  combo     Combo          @relation(fields: [comboId], references: [id], onDelete: Cascade)
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  // Loose items: whole increments, same convention as CartItem.quantity.
+  quantity  Int            @default(1)
+
+  @@index([comboId])
+  @@index([variantId])
 }
 
 // ─── FreeGiftOffer ("buy N of X, get M of Y free" promotional bundle) ──

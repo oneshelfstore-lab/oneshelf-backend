@@ -56,6 +56,9 @@ import ownerSubscriptionRoutes from "./routes/ownerSubscriptions.js";
 import ownerMembershipRoutes from "./routes/ownerMembership.js";
 import { ownerFreeGiftRouter } from "./routes/ownerFreeGifts.js";
 import { sellerFreeGiftRouter } from "./routes/sellerFreeGifts.js";
+import { publicComboRouter } from "./routes/combos.js";
+import { ownerComboRouter } from "./routes/ownerCombos.js";
+import { sellerComboRouter } from "./routes/sellerCombos.js";
 import sellerSubscriptionRoutes from "./routes/sellerSubscriptions.js";
 import internalRoutes from "./routes/internal.js";
 import webhookRoutes from "./routes/webhooks.js";
@@ -286,6 +289,7 @@ app.use("/api/app/products", publicCatalogRouter);
 app.use("/api/app/banners", publicBannerRouter);
 app.use("/api/app/deal-collages", publicDealCollageRouter);
 app.use("/api/app/brands", publicBrandRouter);
+app.use("/api/app/combos", publicComboRouter);
 // Public — submitted from the login page, before the user has an account.
 app.use("/api/app/partner-applications", partnerApplicationRoutes);
 // Public — static onboarding consent/agreement copy (nothing sensitive; see the file's own note
@@ -326,10 +330,12 @@ app.use("/api/app/owner/reports", ownerReportsRoutes);
 app.use("/api/app/owner/subscriptions", ownerSubscriptionRoutes);
 app.use("/api/app/owner/membership", ownerMembershipRoutes);
 app.use("/api/app/owner/free-gifts", ownerFreeGiftRouter);
+app.use("/api/app/owner/combos", ownerComboRouter);
 // Owner review queue for the product-intake form (Firebase OWNER auth) — approve/reject/delete.
 app.use("/api/app/owner/product-intake", ownerProductIntakeRoutes);
 app.use("/api/app/seller/catalog", sellerCatalogRoutes);
 app.use("/api/app/seller/free-gifts", sellerFreeGiftRouter);
+app.use("/api/app/seller/combos", sellerComboRouter);
 app.use("/api/app/seller/brands", sellerBrandRouter);
 app.use("/api/app/seller/orders", sellerOrdersRoutes);
 app.use("/api/app/seller/subscriptions", sellerSubscriptionRoutes);

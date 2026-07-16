@@ -101,7 +101,7 @@ function toCadence(row: {
   };
 }
 
-function serialize(sub: any) {
+export function serialize(sub: any) {
   return {
     ...sub,
     quantity: Number(sub.quantity),
@@ -140,87 +140,147 @@ router.get("/statements", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
+// Core creation logic, extracted so it can be reused by the combo "subscribe to all" fan-out
+// (routes/combos.ts) without duplicating it. Throws the same AppError/ValidationError/NotFoundError
+// the route already surfaced — callers catch per their own needs.
+export type CreateSubscriptionInput = z.infer<typeof createSchema>;
+
+export async function createSubscriptionForUser(userId: string, d: CreateSubscriptionInput) {
+  assertCadence(d);
+
+  const config = await prisma.storeConfig.findFirst();
+  if (config && !config.subscriptionsEnabled) {
+    throw new AppError(403, "SUBSCRIPTIONS_DISABLED", "Subscriptions are not available right now.");
+  }
+
+  const variant = await prisma.productVariant.findUnique({
+    where: { id: d.variantId },
+    include: { product: { select: { name: true, productType: true, imageUrls: true, isSubscribable: true } } },
+  });
+  if (!variant || !variant.isActive) throw new NotFoundError("Product", d.variantId);
+  if (!variant.product.isSubscribable) {
+    throw new ValidationError("This product can't be subscribed to.");
+  }
+
+  const address = await prisma.address.findFirst({ where: { id: d.addressId, userId } });
+  if (!address) throw new NotFoundError("Address", d.addressId);
+
+  // Guard against duplicate standing subscriptions for the same product: without this, subscribing
+  // twice to the same variant (e.g. re-subscribing after forgetting an earlier one, or a double-tap)
+  // leaves two ACTIVE rows — cancelling one still leaves the other generating daily orders, which
+  // reads to the customer/owner as "I cancelled it but it keeps ordering." Editing an existing
+  // subscription already goes through PATCH, so a second create for the same live subscription is
+  // never intentional.
+  const duplicate = await prisma.subscription.findFirst({
+    where: { customerId: userId, variantId: d.variantId, status: { in: ["ACTIVE", "PAUSED"] } },
+  });
+  if (duplicate) {
+    throw new ValidationError(
+      "You already have a subscription for this product. Manage it from My Subscriptions instead of creating a new one.",
+    );
+  }
+
+  const isLoose = isLooseType(variant.product.productType);
+  const startDate = istMidnight(new Date(d.startDate));
+  const endDate = d.endDate ? istMidnight(new Date(d.endDate)) : null;
+  const cadence = toCadence({
+    frequency: d.frequency,
+    intervalDays: d.intervalDays ?? null,
+    daysOfWeek: d.daysOfWeek ?? [],
+    dayOfMonth: d.dayOfMonth ?? null,
+    startDate,
+    endDate,
+  });
+  // Seed the cursor: first valid delivery on/after max(today, startDate).
+  const today = istMidnight(new Date());
+  const seedFrom = startDate > today ? startDate : today;
+  const nextDeliveryDate = firstDeliveryOnOrAfter(cadence, seedFrom);
+
+  return prisma.subscription.create({
+    data: {
+      customerId: userId,
+      variantId: d.variantId,
+      productName: variant.product.name,
+      imageUrl: variant.product.imageUrls?.[0] ?? null,
+      quantity: d.quantity,
+      unitPriceSnapshot: variant.sellingPrice, // price at subscribe (display + "price changed" hint)
+      isLoose,
+      stepSize: isLoose ? variant.packageSize : null,
+      stepUnit: isLoose ? variant.packageUnit : null,
+      frequency: d.frequency,
+      intervalDays: d.intervalDays ?? null,
+      daysOfWeek: d.daysOfWeek ?? [],
+      dayOfMonth: d.dayOfMonth ?? null,
+      addressId: d.addressId,
+      billing: d.billing,
+      startDate,
+      endDate,
+      nextDeliveryDate,
+    },
+  });
+}
+
 // ─── POST /  — create a subscription ─────────────────────────────────
 router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
     const parsed = createSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid subscription", parsed.error.errors);
+    const sub = await createSubscriptionForUser(userId, parsed.data);
+    res.status(201).json({ success: true, data: serialize(sub) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /from-combo/:comboId  — "Get every month" fan-out (combos Phase 5) ──────────
+// One subscription PER checked combo line, sharing the same address/cadence/billing. No new
+// Subscription shape — just calls createSubscriptionForUser in a loop. A line that can't be
+// subscribed (not flagged isSubscribable, already has a live subscription, OOS…) is SKIPPED, not
+// fatal — the customer still gets every line that worked, same "best effort" spirit as free-gift/
+// substitution flows elsewhere in this app. The combo's own items aren't looked up here (the
+// customer may have unchecked/rescaled some in the checklist) — the client sends exactly what it
+// showed as selected.
+const comboSubscribeSchema = z.object({
+  addressId: z.string().min(1),
+  billing: z.enum(["COD", "WALLET", "AUTOPAY"]).default("WALLET"),
+  items: z
+    .array(z.object({ variantId: z.string().min(1), quantity: z.number().positive().max(50) }))
+    .min(1)
+    .max(50),
+  ...cadenceShape,
+});
+
+router.post("/from-combo/:comboId", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const parsed = comboSubscribeSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid subscription request", parsed.error.errors);
     const d = parsed.data;
     assertCadence(d);
 
-    const config = await prisma.storeConfig.findFirst();
-    if (config && !config.subscriptionsEnabled) {
-      throw new AppError(403, "SUBSCRIPTIONS_DISABLED", "Subscriptions are not available right now.");
+    const created: ReturnType<typeof serialize>[] = [];
+    const skipped: { variantId: string; reason: string }[] = [];
+    for (const item of d.items) {
+      try {
+        const sub = await createSubscriptionForUser(userId, {
+          variantId: item.variantId,
+          quantity: item.quantity,
+          addressId: d.addressId,
+          billing: d.billing,
+          frequency: d.frequency,
+          intervalDays: d.intervalDays,
+          daysOfWeek: d.daysOfWeek,
+          dayOfMonth: d.dayOfMonth,
+          startDate: d.startDate,
+          endDate: d.endDate,
+        });
+        created.push(serialize(sub));
+      } catch (e: any) {
+        skipped.push({ variantId: item.variantId, reason: e?.message ?? "Couldn't subscribe to this item." });
+      }
     }
-
-    const variant = await prisma.productVariant.findUnique({
-      where: { id: d.variantId },
-      include: { product: { select: { name: true, productType: true, imageUrls: true, isSubscribable: true } } },
-    });
-    if (!variant || !variant.isActive) throw new NotFoundError("Product", d.variantId);
-    if (!variant.product.isSubscribable) {
-      throw new ValidationError("This product can't be subscribed to.");
-    }
-
-    const address = await prisma.address.findFirst({ where: { id: d.addressId, userId } });
-    if (!address) throw new NotFoundError("Address", d.addressId);
-
-    // Guard against duplicate standing subscriptions for the same product: without this, subscribing
-    // twice to the same variant (e.g. re-subscribing after forgetting an earlier one, or a double-tap)
-    // leaves two ACTIVE rows — cancelling one still leaves the other generating daily orders, which
-    // reads to the customer/owner as "I cancelled it but it keeps ordering." Editing an existing
-    // subscription already goes through PATCH, so a second create for the same live subscription is
-    // never intentional.
-    const duplicate = await prisma.subscription.findFirst({
-      where: { customerId: userId, variantId: d.variantId, status: { in: ["ACTIVE", "PAUSED"] } },
-    });
-    if (duplicate) {
-      throw new ValidationError(
-        "You already have a subscription for this product. Manage it from My Subscriptions instead of creating a new one.",
-      );
-    }
-
-    const isLoose = isLooseType(variant.product.productType);
-    const startDate = istMidnight(new Date(d.startDate));
-    const endDate = d.endDate ? istMidnight(new Date(d.endDate)) : null;
-    const cadence = toCadence({
-      frequency: d.frequency,
-      intervalDays: d.intervalDays ?? null,
-      daysOfWeek: d.daysOfWeek ?? [],
-      dayOfMonth: d.dayOfMonth ?? null,
-      startDate,
-      endDate,
-    });
-    // Seed the cursor: first valid delivery on/after max(today, startDate).
-    const today = istMidnight(new Date());
-    const seedFrom = startDate > today ? startDate : today;
-    const nextDeliveryDate = firstDeliveryOnOrAfter(cadence, seedFrom);
-
-    const sub = await prisma.subscription.create({
-      data: {
-        customerId: userId,
-        variantId: d.variantId,
-        productName: variant.product.name,
-        imageUrl: variant.product.imageUrls?.[0] ?? null,
-        quantity: d.quantity,
-        unitPriceSnapshot: variant.sellingPrice, // price at subscribe (display + "price changed" hint)
-        isLoose,
-        stepSize: isLoose ? variant.packageSize : null,
-        stepUnit: isLoose ? variant.packageUnit : null,
-        frequency: d.frequency,
-        intervalDays: d.intervalDays ?? null,
-        daysOfWeek: d.daysOfWeek ?? [],
-        dayOfMonth: d.dayOfMonth ?? null,
-        addressId: d.addressId,
-        billing: d.billing,
-        startDate,
-        endDate,
-        nextDeliveryDate,
-      },
-    });
-
-    res.status(201).json({ success: true, data: serialize(sub) });
+    res.status(201).json({ success: true, data: { created, skipped } });
   } catch (e) {
     sendError(res, e);
   }

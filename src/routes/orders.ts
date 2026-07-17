@@ -15,7 +15,9 @@ import { rollScratchReward, getScratchForCelebration, revealScratchReward } from
 import { rollFreeSample, getFreeSampleReveal } from "../services/freeSample.js";
 import { getNextOrderNumber } from "../services/orderNumbering.js";
 import { createRazorpayOrder, verifyPaymentSignature, isRazorpayConfigured, refundPayment } from "../services/razorpay.js";
-import { notifyNewOrder, notifyOrderStatusChange, notifySubOrderNew } from "../services/fcmNotifier.js";
+import { notifyNewOrder, notifyOrderStatusChange, notifySubOrderNew, notifyOrderMessage } from "../services/fcmNotifier.js";
+import { shapeOrderMessage, sellerIdsForOrder, ownerUserIdsForSellers } from "../services/orderMessages.js";
+import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 import { generateOrderInvoice, syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { generateInvoicePdf } from "../services/pdfGenerator.js";
 import { refundWalletOnCancel } from "../services/referralRewards.js";
@@ -842,6 +844,50 @@ router.post("/:id/scratch", async (req: FirebaseAuthRequest, res: Response) => {
     const result = await revealScratchReward(order.id, userId);
     if (!result) throw new NotFoundError("ScratchReward", req.params.id!);
     res.json({ success: true, data: result });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── Order message thread (customer ↔ owner/whichever seller has a slice of this order) ───────
+// Reuses QuoteMessage's exact schema/preview helpers (appUser.ts) — same shape, different table
+// (see services/orderMessages.ts for why OrderMessage is its own model, not a widened QuoteMessage).
+
+router.get("/:id/messages", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const order = await prisma.order.findFirst({ where: { id: req.params.id, customerId: req.appUser!.id }, select: { id: true } });
+    if (!order) throw new NotFoundError("Order", req.params.id!);
+    const messages = await prisma.orderMessage.findMany({ where: { orderId: order.id }, orderBy: { createdAt: "asc" } });
+    res.json({ success: true, data: messages.map(shapeOrderMessage) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+router.post("/:id/messages", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = quoteMessageSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid message", parsed.error.errors);
+    const order = await prisma.order.findFirst({ where: { id: req.params.id, customerId: req.appUser!.id }, select: { id: true, orderNumber: true, customerId: true } });
+    if (!order) throw new NotFoundError("Order", req.params.id!);
+
+    const msg = await prisma.orderMessage.create({
+      data: {
+        orderId: order.id, sender: "CUSTOMER",
+        text: parsed.data.text?.trim() || null, voiceUrl: parsed.data.voiceUrl || null, imageUrls: parsed.data.imageUrls ?? [],
+      },
+    });
+    try {
+      const sellerOwnerUserIds = await ownerUserIdsForSellers(await sellerIdsForOrder(order.id));
+      await notifyOrderMessage({
+        orderId: order.id, orderNumber: order.orderNumber, fromSender: "CUSTOMER",
+        customerUserId: order.customerId, sellerOwnerUserIds, preview: quoteMessagePreview(parsed.data),
+      });
+    } catch (e) {
+      console.warn("notifyOrderMessage failed:", e);
+    }
+    const messages = await prisma.orderMessage.findMany({ where: { orderId: order.id }, orderBy: { createdAt: "asc" } });
+    res.status(201).json({ success: true, data: messages.map(shapeOrderMessage) });
   } catch (e) {
     sendError(res, e);
   }

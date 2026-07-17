@@ -726,7 +726,9 @@ router.post("/referral/apply", async (req: FirebaseAuthRequest, res: Response) =
 export function shapeComplaint(c: {
   id: string; subject: string; message: string; status: string;
   orderId: string | null; imageUrl?: string | null; createdAt: Date; resolvedAt: Date | null;
-  user?: { name: string; phone: string | null } | null;
+  returnRequested?: boolean; suggestedRefundAmount?: unknown; sellerNote?: string | null;
+  refundedAmount?: unknown; refundMode?: string | null; refundedAt?: Date | null;
+  user?: { name: string; phone: string | null; role?: string } | null;
 }) {
   return {
     id: c.id,
@@ -740,6 +742,16 @@ export function shapeComplaint(c: {
     resolvedAt: c.resolvedAt ? c.resolvedAt.getTime() : null,
     customerName: c.user?.name ?? null,
     customerPhone: c.user?.phone ?? null,
+    // Who filed this — lets the owner inbox tell a rider's "customer unreachable" report apart
+    // from an actual customer complaint at a glance, instead of both looking identical.
+    filedByRole: c.user?.role ?? null,
+    // Seller-flagged return / owner-approved refund (see sellerComplaints.ts + ownerComplaints.ts).
+    returnRequested: c.returnRequested ?? false,
+    suggestedRefundAmount: c.suggestedRefundAmount != null ? Number(c.suggestedRefundAmount) : null,
+    sellerNote: c.sellerNote ?? null,
+    refundedAmount: c.refundedAmount != null ? Number(c.refundedAmount) : null,
+    refundMode: c.refundMode ?? null,
+    refundedAt: c.refundedAt ? c.refundedAt.getTime() : null,
   };
 }
 

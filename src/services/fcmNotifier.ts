@@ -268,6 +268,31 @@ export async function notifyQuoteMessage(info: {
   }
 }
 
+// A message on a real order's thread (customer ↔ owner/whichever seller has a slice of it).
+// Mirrors notifyQuoteMessage's shape; sellerOwnerUserIds is resolved by the caller (a Seller isn't
+// a User, so it can't reuse getUserTokens directly — see services/orderMessages.ts).
+export async function notifyOrderMessage(info: {
+  orderId: string;
+  orderNumber: string;
+  fromSender: string; // "CUSTOMER" | "STORE"
+  customerUserId: string;
+  sellerOwnerUserIds: string[];
+  preview: string;
+}) {
+  const data = { type: "order_message", orderId: info.orderId, orderNumber: info.orderNumber };
+  if (info.fromSender === "CUSTOMER") {
+    await sendToTopic("owner_orders", { ...data, title: `New message on #${info.orderNumber}`, body: info.preview });
+    for (const uid of info.sellerOwnerUserIds) {
+      const tokens = await getUserTokens(uid);
+      if (tokens.length > 0) await sendToTokens(tokens, { ...data, title: `New message on #${info.orderNumber}`, body: info.preview });
+    }
+  } else {
+    const tokens = await getUserTokens(info.customerUserId);
+    if (tokens.length === 0) return;
+    await sendToTokens(tokens, { ...data, title: `Update on your order #${info.orderNumber}`, body: info.preview });
+  }
+}
+
 // Tells the customer their bulk-quote estimate is ready to review/approve.
 export async function notifyQuoteReady(
   userId: string,
@@ -306,14 +331,16 @@ export async function notifyBroadcast(
   await sendToTopic(topic, data);
 }
 
-export async function notifyTierUp(userId: string, tierName: string) {
+export async function notifyTierUp(userId: string, tierName: string, hamperGranted = false) {
   const tokens = await getUserTokens(userId);
   if (tokens.length === 0) return;
   await sendToTokens(tokens, {
     type: "tier_up",
     tierName,
     title: `You're a ${tierName} member now!`,
-    body: `Your membership perks just leveled up — check your new benefits from your next order.`,
+    body: hamperGranted
+      ? `Your membership perks just leveled up — plus a welcome hamper is on its way!`
+      : `Your membership perks just leveled up — check your new benefits from your next order.`,
   });
 }
 

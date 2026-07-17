@@ -8,7 +8,7 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { notifyOrderStatusChange, notifyDeliveryArrived } from "../services/fcmNotifier.js";
-import { accrueReferralCommission } from "../services/referralRewards.js";
+import { accrueReferralCommission, istMonthKey } from "../services/referralRewards.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { OTP_LOCK_SECONDS } from "../lib/otp.js";
 
@@ -192,7 +192,7 @@ function istTodayStartUtc(): Date {
 async function buildDeliveryProfile(userId: string) {
   const user = await prisma.user.findUnique({
     where: { id: userId },
-    select: { name: true, phone: true, isAvailableForDelivery: true },
+    select: { name: true, phone: true, isAvailableForDelivery: true, deliveryMonthlySalary: true },
   });
   if (!user) throw new NotFoundError("User", userId);
 
@@ -205,12 +205,25 @@ async function buildDeliveryProfile(userId: string) {
     .filter((o) => o.paymentMethod === "COD")
     .reduce((sum, o) => sum + Math.max(0, Number(o.totalAmount) - Number(o.amountPaid)), 0);
 
+  // Rider's own payroll view (read-only). What they're paid monthly, whether this month is settled,
+  // and a short history — so they can see it without asking the owner.
+  const currentMonth = istMonthKey(new Date());
+  const salaryPayments = await prisma.riderSalaryPayment.findMany({
+    where: { riderId: userId },
+    orderBy: { periodMonth: "desc" },
+    take: 12,
+    select: { periodMonth: true, amount: true, paidAt: true },
+  });
+
   return {
     name: user.name,
     phone: user.phone,
     isAvailableForDelivery: user.isAvailableForDelivery,
     todayDeliveredCount: delivered.length,
     todayCash,
+    monthlySalary: Number(user.deliveryMonthlySalary),
+    salaryPaidThisMonth: salaryPayments.some((p) => p.periodMonth === currentMonth),
+    salaryHistory: salaryPayments.map((p) => ({ periodMonth: p.periodMonth, amount: Number(p.amount) })),
   };
 }
 
@@ -543,13 +556,15 @@ router.post("/:id/collect/:subOrderId", async (req: FirebaseAuthRequest, res: Re
 
 const deliverSchema = z.object({
   code: z.string().length(6).optional(),
+  // Rider-captured proof-of-delivery photo (client uploads to Storage first, sends the public URL).
+  proofPhotoUrl: z.string().max(500).optional().nullable(),
 });
 
 router.post("/:id/deliver", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const parsed = deliverSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
-    const { code } = parsed.data;
+    const { code, proofPhotoUrl } = parsed.data;
 
     const userId = req.appUser!.id;
     const isOwner = req.appUser!.role === "OWNER";
@@ -613,6 +628,7 @@ router.post("/:id/deliver", async (req: FirebaseAuthRequest, res: Response) => {
             status: "DELIVERED",
             deliveredAt: new Date(),
             paymentStatus: order.paymentMethod === "COD" ? "PAID" : order.paymentStatus,
+            deliveryProofPhotoUrl: proofPhotoUrl ?? order.deliveryProofPhotoUrl,
           },
         }),
       ]);
@@ -624,6 +640,7 @@ router.post("/:id/deliver", async (req: FirebaseAuthRequest, res: Response) => {
           status: "DELIVERED",
           deliveredAt: new Date(),
           paymentStatus: order.paymentMethod === "COD" ? "PAID" : order.paymentStatus,
+          deliveryProofPhotoUrl: proofPhotoUrl ?? order.deliveryProofPhotoUrl,
         },
       });
     }

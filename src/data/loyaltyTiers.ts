@@ -9,7 +9,9 @@
  *   - discountPct:  standing member discount on the cart, applied in calculateCartTotals
  * Perk STRINGS are DERIVED from those two toggles (`derivePerks`), never free-typed — so the
  * customer-facing card can only ever promise what the server actually gives (honesty by construction).
- * (Tier-up hampers are a later phase — deliberately NOT a perk until they're a real fulfillment loop.)
+ * `hamper` (Phase 4) is a THIRD enforced toggle: reaching a tier with `hamper: true` creates a real
+ * `TierUpHamper` fulfillment row (see loyalty.ts's checkTierUpOnDelivery) — same "only promise what's
+ * backed" discipline, just fulfilled by the owner physically packing a box rather than by pricing math.
  */
 import { z } from "zod";
 
@@ -20,6 +22,7 @@ export interface LoyaltyTier {
   freeDelivery: boolean;
   discountPct: number;
   perks: string[];
+  hamper: boolean;
 }
 
 export interface LoyaltyConfig {
@@ -29,10 +32,10 @@ export interface LoyaltyConfig {
 }
 
 export const LOYALTY_TIERS: LoyaltyTier[] = [
-  { key: "bronze", name: "Bronze", minSpend: 0, freeDelivery: false, discountPct: 0, perks: ["You're earning rewards on every order"] },
-  { key: "silver", name: "Silver", minSpend: 2000, freeDelivery: true, discountPct: 0, perks: ["Free delivery on every order"] },
-  { key: "gold", name: "Gold", minSpend: 6000, freeDelivery: true, discountPct: 3, perks: ["Free delivery on every order", "3% member discount, always"] },
-  { key: "platinum", name: "Platinum", minSpend: 15000, freeDelivery: true, discountPct: 5, perks: ["Free delivery on every order", "5% member discount, always"] },
+  { key: "bronze", name: "Bronze", minSpend: 0, freeDelivery: false, discountPct: 0, perks: ["You're earning rewards on every order"], hamper: false },
+  { key: "silver", name: "Silver", minSpend: 2000, freeDelivery: true, discountPct: 0, perks: ["Free delivery on every order"], hamper: false },
+  { key: "gold", name: "Gold", minSpend: 6000, freeDelivery: true, discountPct: 3, perks: ["Free delivery on every order", "3% member discount, always"], hamper: false },
+  { key: "platinum", name: "Platinum", minSpend: 15000, freeDelivery: true, discountPct: 5, perks: ["Free delivery on every order", "5% member discount, always"], hamper: true },
 ];
 
 /** The default program used whenever no valid `StoreConfig.loyaltyConfig` is set. */
@@ -65,6 +68,7 @@ export const loyaltyTierInputSchema = z.object({
   discountPct: z.number().min(0).max(MAX_DISCOUNT_PCT),
   // Ignored on input — perks are always derived. Accepted so a full config round-trips cleanly.
   perks: z.array(z.string()).optional(),
+  hamper: z.boolean().default(false),
 });
 
 export const loyaltyConfigSchema = z
@@ -105,6 +109,7 @@ export function normalizeLoyaltyConfig(input: LoyaltyConfigInput): LoyaltyConfig
       freeDelivery: t.freeDelivery,
       discountPct: t.discountPct,
       perks: derivePerks(t),
+      hamper: t.hamper,
     })),
   };
 }

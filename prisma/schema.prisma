@@ -346,6 +346,12 @@ model User {
   // true so existing/pre-registered agents are assignable until they turn themselves off.
   isAvailableForDelivery Boolean @default(true)
 
+  // Rider payroll: the standing monthly salary the owner pays this delivery agent (0 until set).
+  // Delivery riders are salaried employees for now ("then partner" = a future per-delivery model).
+  // Lives on User (like isAvailableForDelivery) so it works for every rider whether or not they
+  // completed onboarding / have a DeliveryProfile. See RiderSalaryPayment for the paid-per-month ledger.
+  deliveryMonthlySalary Decimal @default(0) @db.Decimal(12, 2)
+
   // Abandoned-cart push throttling
   lastCartReminderAt DateTime?
   cartReminderCount  Int       @default(0)
@@ -375,6 +381,7 @@ model User {
   // instead of notifying, so an already-Gold customer doesn't get a false "you leveled up!" push).
   // Guarded-updateMany flip prevents a double push when two orders deliver concurrently.
   lastNotifiedTier String?
+  tierUpHampers    TierUpHamper[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -392,6 +399,7 @@ model User {
   sellerAccount          Seller?                 @relation("SellerOwner")
   deliveryProfile        DeliveryProfile?
   cashSettlements        CashSettlement[]
+  riderSalaryPayments    RiderSalaryPayment[]
   walletTxns             WalletTransaction[]
   walletTopups           WalletTopup[]
   referralsMade          Referral[]              @relation("Referrer")
@@ -571,6 +579,17 @@ model Complaint {
   createdAt  DateTime        @default(now())
   resolvedAt DateTime?
 
+  // ─── Seller-flagged return / owner-approved refund. Seller flags (only on a complaint tied to
+  // one of their own SubOrders — see sellerComplaints.ts), owner reviews + actually moves the
+  // money (ownerComplaints.ts POST /:id/refund) — same "owner does it by hand" precedent as
+  // SellerPayout/ReferralPayout everywhere else in this app; the seller never touches money. ──
+  returnRequested       Boolean   @default(false)
+  suggestedRefundAmount Decimal?  @db.Decimal(10, 2) // seller's recommended amount
+  sellerNote            String? // seller's reason for recommending a refund
+  refundedAmount        Decimal?  @db.Decimal(10, 2) // what the owner actually refunded (may differ)
+  refundMode            String? // "WALLET" (credited in-app) | "EXTERNAL" (owner paid outside the app)
+  refundedAt            DateTime?
+
   @@index([userId])
   @@index([status])
 }
@@ -629,6 +648,23 @@ model QuoteMessage {
   createdAt      DateTime     @default(now())
 
   @@index([quoteRequestId])
+}
+
+// Same shape as QuoteMessage, one thread per real Order — a customer with an order-specific
+// question, or the owner/whichever seller has a slice of it, both reply here. Kept as its own
+// model rather than widening QuoteMessage's FK (Prisma has no clean "exactly one of two optional
+// FKs" — a second same-shape model is less code than that workaround).
+model OrderMessage {
+  id        String   @id @default(cuid())
+  orderId   String
+  order     Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  sender    String // "CUSTOMER" | "OWNER" (owner or the seller who has a slice of this order — same convention as QuoteMessage.sender)
+  text      String?
+  voiceUrl  String?
+  imageUrls String[] @default([])
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
 }
 
 // One itemized line of an owner's quotation. `qty` is a free-text label ("5kg", "2 pkt")
@@ -1137,6 +1173,34 @@ model WalletTopup {
   @@index([userId, createdAt])
 }
 
+// ─── Tier-up hamper (Delight Phase 4) ─────────────────────────────────
+// One row per genuine tier-up crossing into a tier the owner has flagged `hamper: true` (see
+// data/loyaltyTiers.ts). Created in loyalty.ts's checkTierUpOnDelivery — the same idempotent
+// detection that already drives the tier-up push, so a hamper never double-fires for one crossing.
+// Fulfillment is manual (owner packs a physical gift box + ships/hands it over), mirroring the
+// free-sample "packed" gate and the referral-payout manual-ledger pattern — no automated shipping.
+
+enum HamperStatus {
+  PENDING
+  PACKED
+  SENT
+}
+
+model TierUpHamper {
+  id        String       @id @default(cuid())
+  userId    String
+  user      User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tierKey   String
+  tierName  String
+  status    HamperStatus @default(PENDING)
+  createdAt DateTime     @default(now())
+  packedAt  DateTime?
+  sentAt    DateTime?
+
+  @@index([userId])
+  @@index([status])
+}
+
 // ─── Scratch reward (Delight Phase 3A) ───────────────────────────────
 // One scratch card per order. Outcome is rolled server-side at placement (idempotent, keyed by
 // orderId) so re-opening the celebration screen can't re-roll. A win mints a single-use coupon
@@ -1347,6 +1411,10 @@ model Order {
   gatePhotoUrl   String?
   // Optional customer-recorded voice note (delivery clarification), played by the delivery agent.
   voiceNoteUrl   String?
+  // Proof-of-delivery photo captured by the rider at handover (e.g. item at the doorstep). Set once,
+  // at /deliver — never overwritten. Distinct from gatePhotoUrl (that's the CUSTOMER's own gate photo,
+  // uploaded at checkout to help the rider find the address).
+  deliveryProofPhotoUrl String?
 
   // Subscriptions — set when this order was auto-generated from a standing Subscription.
   // subscriptionDate is the IST-midnight date this delivery is FOR; the composite unique below is
@@ -1365,6 +1433,7 @@ model Order {
   rating        OrderRating?
   scratchReward ScratchReward?
   subOrders     SubOrder[]
+  messages      OrderMessage[]
 
   // The engine can never create two orders for the same subscription on the same date.
   @@unique([subscriptionId, subscriptionDate])
@@ -1794,6 +1863,23 @@ model CashSettlement {
   settledAt     DateTime @default(now())
 
   @@index([deliveryBoyId])
+}
+
+// One salary payment to a delivery rider for one calendar month (IST). @@unique([riderId, periodMonth])
+// makes "is this month paid?" a single lookup and keeps the owner's "Mark paid" idempotent. No real
+// money moves through the backend — this is the owner's record that they've paid the salary (same
+// self-reported trust level as CashSettlement / SellerPayout).
+model RiderSalaryPayment {
+  id          String   @id @default(cuid())
+  riderId     String
+  rider       User     @relation(fields: [riderId], references: [id])
+  periodMonth String // "YYYY-MM" in IST
+  amount      Decimal  @db.Decimal(12, 2)
+  note        String?
+  paidAt      DateTime @default(now())
+
+  @@unique([riderId, periodMonth])
+  @@index([riderId])
 }
 
 // ─── Existing billing models (unchanged) ─────────────────────────────

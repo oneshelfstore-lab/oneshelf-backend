@@ -32,7 +32,10 @@ export function auditLoggerMiddleware(req: AuthRequest, res: Response, next: Nex
 
   res.json = function (body: any) {
     const statusCode = res.statusCode;
-    if (statusCode >= 200 && statusCode < 300) {
+    // Some routes (invoices, payments) log their own richer entry — e.g. distinguishing
+    // Invoice/CreditNote/DebitNote or a CANCEL action that this URL-derived logger can't infer.
+    // They set res.locals.auditLogged before responding so we don't double-write.
+    if (statusCode >= 200 && statusCode < 300 && !res.locals.auditLogged) {
       const { entityType, entityId } = extractEntityInfo(req.originalUrl);
       const resolvedId = entityId || body?.data?.id || body?.id || "unknown";
       const action = actionFromMethod(req.method);

@@ -7,12 +7,14 @@ import {
   requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
-import { notifyOrderStatusChange, notifyDeliveryAssignment } from "../services/fcmNotifier.js";
+import { notifyOrderStatusChange, notifyDeliveryAssignment, notifyOrderMessage } from "../services/fcmNotifier.js";
 import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orderInvoice.js";
 import { markSamplePacked } from "../services/freeSample.js";
 import { accrueReferralCommission, refundWalletOnCancel } from "../services/referralRewards.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { restoreConsumption } from "../services/stockBatches.js";
+import { shapeOrderMessage } from "../services/orderMessages.js";
+import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -325,6 +327,46 @@ router.post("/:orderId/items/:itemId/substitute", async (req: FirebaseAuthReques
         priceDelta,
       },
     });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── Order message thread — owner replies as the store on any order ────────────────────────────
+router.get("/:id/messages", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const order = await prisma.order.findUnique({ where: { id: req.params.id }, select: { id: true } });
+    if (!order) throw new NotFoundError("Order", req.params.id!);
+    const messages = await prisma.orderMessage.findMany({ where: { orderId: order.id }, orderBy: { createdAt: "asc" } });
+    res.json({ success: true, data: messages.map(shapeOrderMessage) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+router.post("/:id/messages", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = quoteMessageSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid message", parsed.error.errors);
+    const order = await prisma.order.findUnique({ where: { id: req.params.id }, select: { id: true, orderNumber: true, customerId: true } });
+    if (!order) throw new NotFoundError("Order", req.params.id!);
+
+    await prisma.orderMessage.create({
+      data: {
+        orderId: order.id, sender: "OWNER",
+        text: parsed.data.text?.trim() || null, voiceUrl: parsed.data.voiceUrl || null, imageUrls: parsed.data.imageUrls ?? [],
+      },
+    });
+    try {
+      await notifyOrderMessage({
+        orderId: order.id, orderNumber: order.orderNumber, fromSender: "OWNER",
+        customerUserId: order.customerId, sellerOwnerUserIds: [], preview: quoteMessagePreview(parsed.data),
+      });
+    } catch (e) {
+      console.warn("notifyOrderMessage failed:", e);
+    }
+    const messages = await prisma.orderMessage.findMany({ where: { orderId: order.id }, orderBy: { createdAt: "asc" } });
+    res.status(201).json({ success: true, data: messages.map(shapeOrderMessage) });
   } catch (e) {
     sendError(res, e);
   }

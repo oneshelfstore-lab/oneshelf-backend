@@ -4,12 +4,14 @@ import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
-import { notifyOrderStatusChange, notifyNewDeliveryAvailable, notifyNewComplaint, notifySubOrderPacked } from "../services/fcmNotifier.js";
+import { notifyOrderStatusChange, notifyNewDeliveryAvailable, notifyNewComplaint, notifySubOrderPacked, notifyOrderMessage } from "../services/fcmNotifier.js";
 import { bustUserSpend } from "../services/loyalty.js";
 import { refundPayment } from "../services/razorpay.js";
 import { syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { refundWalletOnCancel } from "../services/referralRewards.js";
 import { restoreConsumption } from "../services/stockBatches.js";
+import { shapeOrderMessage } from "../services/orderMessages.js";
+import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 
 // Fixed, translatable reason set the co-manager/seller picks from when rejecting an order — mirrors
 // the shape of the customer-facing "Need help" reason chips (see OrderHelpSheet) so both surfaces feel
@@ -310,6 +312,55 @@ router.post("/:id/flag-unavailable", async (req: SellerRequest, res: Response) =
     }).catch(() => {});
 
     res.status(201).json({ success: true, data: { complaintId: complaint.id } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── Order message thread — this seller replies as the store, only on an order they have a
+// slice of (any seller, not house-only — unlike the Bulk Express quote thread above). ─────────
+async function ownsOrder(sellerId: string, orderId: string): Promise<boolean> {
+  const hit = await prisma.subOrder.findFirst({ where: { orderId, sellerId }, select: { id: true } });
+  return hit != null;
+}
+
+router.get("/:id/messages", async (req: SellerRequest, res: Response) => {
+  try {
+    const orderId = String(req.params.id ?? "");
+    if (!(await ownsOrder(req.sellerId!, orderId))) throw new NotFoundError("Order", orderId);
+    const messages = await prisma.orderMessage.findMany({ where: { orderId }, orderBy: { createdAt: "asc" } });
+    res.json({ success: true, data: messages.map(shapeOrderMessage) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+router.post("/:id/messages", async (req: SellerRequest, res: Response) => {
+  try {
+    const orderId = String(req.params.id ?? "");
+    const parsed = quoteMessageSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid message", parsed.error.errors);
+    if (!(await ownsOrder(req.sellerId!, orderId))) throw new NotFoundError("Order", orderId);
+
+    const order = await prisma.order.findUnique({ where: { id: orderId }, select: { orderNumber: true, customerId: true } });
+    if (!order) throw new NotFoundError("Order", orderId);
+
+    await prisma.orderMessage.create({
+      data: {
+        orderId, sender: "OWNER",
+        text: parsed.data.text?.trim() || null, voiceUrl: parsed.data.voiceUrl || null, imageUrls: parsed.data.imageUrls ?? [],
+      },
+    });
+    try {
+      await notifyOrderMessage({
+        orderId, orderNumber: order.orderNumber, fromSender: "OWNER",
+        customerUserId: order.customerId, sellerOwnerUserIds: [], preview: quoteMessagePreview(parsed.data),
+      });
+    } catch (e) {
+      console.warn("notifyOrderMessage failed:", e);
+    }
+    const messages = await prisma.orderMessage.findMany({ where: { orderId }, orderBy: { createdAt: "asc" } });
+    res.status(201).json({ success: true, data: messages.map(shapeOrderMessage) });
   } catch (e) {
     sendError(res, e);
   }

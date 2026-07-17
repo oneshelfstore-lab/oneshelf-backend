@@ -806,7 +806,7 @@ interface PeakHourRow {
 async function buildOperations(range: string) {
   const since = rangeSince(range);
 
-  const [deliveredOrders, peakRows, subOrders] = await Promise.all([
+  const [deliveredOrders, peakRows, subOrders, ratedOrders] = await Promise.all([
     prisma.order.findMany({
       where: {
         status: "DELIVERED",
@@ -830,6 +830,13 @@ async function buildOperations(range: string) {
       where: { createdAt: { gte: since } },
       select: { sellerId: true, status: true, subtotal: true, packedAt: true, createdAt: true },
     }),
+    // Customer ratings, joined to the delivering rider — a delivery-quality signal alongside SLA.
+    // Rates the ORDER, not the rider specifically, but for a single-store app a delivered order's
+    // rating is a reasonable proxy for that rider's handover experience.
+    prisma.orderRating.findMany({
+      where: { createdAt: { gte: since }, order: { deliveryBoyId: { not: null } } },
+      select: { stars: true, order: { select: { deliveryBoyId: true } } },
+    }),
   ]);
 
   // Delivery SLA — placed→delivered, per agent. Ranked slowest-first (like Dead Stock/Restock
@@ -849,17 +856,32 @@ async function buildOperations(range: string) {
     ? await prisma.user.findMany({ where: { id: { in: agentIds } }, select: { id: true, name: true } })
     : [];
   const agentNameById = new Map(agents.map((a) => [a.id, a.name]));
+
+  // Average customer rating per rider, from orders they delivered in this range.
+  const ratingByAgent = new Map<string, { sum: number; count: number }>();
+  for (const r of ratedOrders) {
+    const agentId = r.order.deliveryBoyId as string;
+    const cur = ratingByAgent.get(agentId) ?? { sum: 0, count: 0 };
+    cur.sum += r.stars;
+    cur.count += 1;
+    ratingByAgent.set(agentId, cur);
+  }
+
   const deliveryAgents: RankedRow[] = [...byAgent.entries()]
     .map(([id, v]) => ({ id, avgMinutes: v.totalMinutes / v.count, count: v.count }))
     .sort((a, b) => b.avgMinutes - a.avgMinutes)
     .slice(0, 10)
-    .map((a) => ({
-      id: a.id,
-      label: agentNameById.get(a.id) ?? "—",
-      value: Math.round(a.avgMinutes),
-      displayValue: `${Math.round(a.avgMinutes)} min avg`,
-      sublabel: `${a.count} delivered`,
-    }));
+    .map((a) => {
+      const rating = ratingByAgent.get(a.id);
+      const ratingLabel = rating ? ` · ★${(rating.sum / rating.count).toFixed(1)} (${rating.count})` : "";
+      return {
+        id: a.id,
+        label: agentNameById.get(a.id) ?? "—",
+        value: Math.round(a.avgMinutes),
+        displayValue: `${Math.round(a.avgMinutes)} min avg`,
+        sublabel: `${a.count} delivered${ratingLabel}`,
+      };
+    });
   const overallAvgDeliveryMinutes = deliveredOrders.length > 0 ? overallTotalMinutes / deliveredOrders.length : 0;
 
   // Peak-hour demand grid — 7 weekdays × 8 three-hour blocks.

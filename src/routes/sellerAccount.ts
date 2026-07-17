@@ -48,6 +48,10 @@ function shapeProfile(s: any, agreementCurrent: boolean) {
     gstin: s.gstin,
     pan: s.pan,
     bankDetails: s.bankDetails ?? null,
+    // Settlement bank account for payouts (§ PUT /bank-details below). Masked here — the raw
+    // account number only ever needs to be entered once, not re-displayed on every profile load.
+    hasBankDetails: Boolean((s.bankDetails as any)?.accountNumber),
+    bankLast4: (s.bankDetails as any)?.accountNumber ? String((s.bankDetails as any).accountNumber).slice(-4) : null,
     commissionPct: Number(s.commissionPct),
     outstandingBalance: Number(s.outstandingBalance),
     status: s.status,
@@ -141,6 +145,31 @@ router.put("/", async (req: SellerRequest, res: Response) => {
         // the seller has to re-submit once they're done changing things.
         ...(current.onboardingStatus === "PENDING_REVIEW" ? { onboardingStatus: "IN_PROGRESS" as const } : {}),
       },
+    });
+    res.json({ success: true, data: shapeProfile(updated, await isAgreementCurrent(updated.id)) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// PUT /api/app/seller/me/bank-details { accountName, accountNumber, ifsc } → the account this
+// seller's monthly payout is settled to. Its own small validated route (not the generic PUT / above,
+// whose `bankDetails: z.any()` accepts anything) — mirrors appUser.ts's identical referral-payout
+// bank-details route so both money-settlement flows validate the same way.
+const bankDetailsSchema = z.object({
+  accountName: z.string().trim().min(2).max(100),
+  accountNumber: z.string().regex(/^\d{9,18}$/, "Invalid account number"),
+  ifsc: z.string().trim().toUpperCase().regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, "Invalid IFSC code"),
+});
+
+router.put("/bank-details", async (req: SellerRequest, res: Response) => {
+  try {
+    const parsed = bankDetailsSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid bank details", parsed.error.errors);
+    const { accountName, accountNumber, ifsc } = parsed.data;
+    const updated = await prisma.seller.update({
+      where: { id: req.sellerId },
+      data: { bankDetails: { accountName, accountNumber, ifsc } },
     });
     res.json({ success: true, data: shapeProfile(updated, await isAgreementCurrent(updated.id)) });
   } catch (e) {

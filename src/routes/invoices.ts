@@ -96,6 +96,7 @@ const debitNoteSchema = z.object({
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 async function logAudit(
+  res: Response,
   userId: string,
   action: "CREATE" | "UPDATE" | "DELETE" | "APPROVE" | "CANCEL" | "EXPORT" | "LOGIN",
   entityType: string,
@@ -103,6 +104,10 @@ async function logAudit(
   oldValues?: unknown,
   newValues?: unknown,
 ) {
+  // Tell the global auditLoggerMiddleware to skip its own generic write for this request —
+  // this entry is more specific (e.g. CreditNote/DebitNote instead of a generic "Invoice", or
+  // a CANCEL action the URL-derived logger can't infer from a plain POST).
+  res.locals.auditLogged = true;
   await prisma.auditLog.create({
     data: {
       userId,
@@ -356,7 +361,7 @@ router.post("/", async (req: Request, res: Response) => {
     });
 
     // 12. Audit log (outside transaction — non-critical)
-    await logAudit(currentUser, "CREATE", "Invoice", invoice.id, null, {
+    await logAudit(res, currentUser, "CREATE", "Invoice", invoice.id, null, {
       invoiceNumber,
       totalAmount: totals.totalAmount,
       customerId: customer.id,
@@ -529,7 +534,7 @@ router.post("/:id/cancel", async (req: Request, res: Response) => {
       },
     });
 
-    await logAudit(getUserId(req), "CANCEL", "Invoice", invoice.id, { status: invoice.status }, {
+    await logAudit(res, getUserId(req), "CANCEL", "Invoice", invoice.id, { status: invoice.status }, {
       status: "CANCELLED",
       cancellationReason,
     });
@@ -696,7 +701,7 @@ router.post("/credit-note", async (req: Request, res: Response) => {
       return cn;
     });
 
-    await logAudit(getUserId(req), "CREATE", "CreditNote", creditNote.id, null, {
+    await logAudit(res, getUserId(req), "CREATE", "CreditNote", creditNote.id, null, {
       creditNoteNumber: cnNumber,
       originalInvoiceNumber: originalInvoice.invoiceNumber,
       totalAmount: totals.totalAmount,
@@ -822,7 +827,7 @@ router.post("/debit-note", async (req: Request, res: Response) => {
       return dn;
     });
 
-    await logAudit(getUserId(req), "CREATE", "DebitNote", debitNote.id, null, {
+    await logAudit(res, getUserId(req), "CREATE", "DebitNote", debitNote.id, null, {
       debitNoteNumber: dnNumber,
       originalInvoiceNumber: originalInvoice.invoiceNumber,
       totalAmount: totals.totalAmount,

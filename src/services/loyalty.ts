@@ -96,6 +96,9 @@ export interface LoyaltyInfo {
   // about to roll off that the customer would drop below their current tier's floor. No push
   // notification for this (loss-aversion pushes read as spammy) — surfaced on-screen only.
   slipWarning: string | null;
+  // Fulfillment status of the customer's most recent tier-up hamper (Phase 4), or null if they've
+  // never crossed into a hamper-eligible tier. PENDING = owner hasn't packed it yet.
+  hamperStatus: "PENDING" | "PACKED" | "SENT" | null;
 }
 
 const SLIP_WARNING_HORIZON_DAYS = 30;
@@ -145,6 +148,12 @@ export async function computeUserLoyalty(userId: string): Promise<LoyaltyInfo> {
     }
   }
 
+  const latestHamper = await prisma.tierUpHamper.findFirst({
+    where: { userId },
+    orderBy: { createdAt: "desc" },
+    select: { status: true },
+  });
+
   return {
     enabled: cfg.enabled,
     tierKey: tier.key,
@@ -158,6 +167,7 @@ export async function computeUserLoyalty(userId: string): Promise<LoyaltyInfo> {
     progress,
     allTiers: cfg.tiers.map((t) => ({ key: t.key, name: t.name, minSpend: t.minSpend })),
     slipWarning,
+    hamperStatus: latestHamper?.status ?? null,
   };
 }
 
@@ -203,5 +213,13 @@ export async function checkTierUpOnDelivery(orderId: string): Promise<void> {
   const newRank = cfg.tiers.findIndex((t) => t.key === tier.key);
   if (newRank <= previousRank) return; // a drop (or unknown tier) — never push for going down
 
-  await notifyTierUp(order.customerId, tier.name).catch(() => {});
+  // A hamper-eligible tier gets a real fulfillment row alongside the push (best-effort — a hiccup
+  // here must never fail the delivery transaction this is called from).
+  if (tier.hamper) {
+    await prisma.tierUpHamper
+      .create({ data: { userId: order.customerId, tierKey: tier.key, tierName: tier.name } })
+      .catch(() => {});
+  }
+
+  await notifyTierUp(order.customerId, tier.name, tier.hamper).catch(() => {});
 }

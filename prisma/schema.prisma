@@ -393,6 +393,7 @@ model User {
   fcmTokens              FcmToken[]
   couponRedemptions      CouponRedemption[]
   favorites              Favorite[]
+  stockAlerts            StockAlert[]
   orderRatings           OrderRating[]
   complaints             Complaint[]
   quoteRequests          QuoteRequest[]
@@ -547,6 +548,23 @@ model Favorite {
 
   @@unique([userId, productId])
   @@index([userId])
+}
+
+// ─── StockAlert ("notify me when back in stock") ─────────────────────
+// One row per (user, variant) — a customer taps "Notify me" on an out-of-stock SKU.
+// notified flips true (and stays true) once we've pinged them for THIS restock; a fresh
+// subscribe (e.g. tapping Notify again after we already notified once) resets it via upsert.
+model StockAlert {
+  id        String         @id @default(cuid())
+  userId    String
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  notified  Boolean        @default(false)
+  createdAt DateTime       @default(now())
+
+  @@unique([userId, variantId])
+  @@index([variantId, notified])
 }
 
 // ─── OrderRating (post-delivery feedback, one per order) ─────────────
@@ -751,6 +769,7 @@ model ProductVariant {
   freeGiftAsTrigger FreeGiftOffer?  @relation("FreeGiftTrigger")
   freeGiftAsReward  FreeGiftOffer[] @relation("FreeGiftReward")
   comboItems        ComboItem[]
+  stockAlerts       StockAlert[]
 
   @@index([productId])
   @@index([barcode])

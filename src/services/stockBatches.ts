@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { AppError } from "../lib/errors.js";
+import { notifyStockAlerts } from "./stockAlerts.js";
 
 // ─── FIFO batch costing engine ───────────────────────────────────────
 //
@@ -67,6 +68,9 @@ export async function receiveBatch(
   if (qty <= 0) throw new AppError(400, "VALIDATION_ERROR", "Restock quantity must be greater than 0");
   if (unitCost < 0) throw new AppError(400, "VALIDATION_ERROR", "Unit cost cannot be negative");
 
+  const before = await tx.productVariant.findUnique({ where: { id: variantId }, select: { stock: true } });
+  const crossedIntoStock = before != null && Number(before.stock) <= 0;
+
   const batch = await tx.stockBatch.create({
     data: {
       variantId,
@@ -79,6 +83,14 @@ export async function receiveBatch(
   });
   await tx.productVariant.update({ where: { id: variantId }, data: { stock: { increment: qty } } });
   await recomputeRollupCost(tx, variantId);
+
+  if (crossedIntoStock) {
+    // ponytail: fired outside this transaction's atomicity (best-effort, like every other FCM
+    // send in this codebase) — a since-rolled-back restock could in theory still ping a
+    // subscriber. Low-probability edge for a single-store app; revisit with an outbox if it matters.
+    notifyStockAlerts(variantId).catch((e) => console.error("stock alert notify failed:", e));
+  }
+
   return { batchId: batch.id };
 }
 

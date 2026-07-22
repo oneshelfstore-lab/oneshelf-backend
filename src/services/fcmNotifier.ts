@@ -397,6 +397,17 @@ export async function notifySubscriptionLowBalance(userId: string, productName: 
   });
 }
 
+// A customer tapped "Notify me" on an out-of-stock item and it's just been restocked.
+export async function notifyBackInStock(userId: string, productName: string) {
+  const tokens = await getUserTokens(userId);
+  if (tokens.length === 0) return;
+  await sendToTokens(tokens, {
+    type: "back_in_stock",
+    title: "Back in stock!",
+    body: `${productName} is available again. Grab it before it runs out.`,
+  });
+}
+
 // Monthly khata bill is ready (consolidated statement). For COD it's "please pay"; for wallet it's
 // "auto-paid from your store credit".
 export async function notifySubscriptionStatement(

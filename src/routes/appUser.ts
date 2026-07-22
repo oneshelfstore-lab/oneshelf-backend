@@ -374,6 +374,34 @@ router.delete("/favorites/:productId", async (req: FirebaseAuthRequest, res: Res
 });
 
 // ═══════════════════════════════════════════════════════════════════════
+// Stock alerts ("notify me when back in stock")
+// ═══════════════════════════════════════════════════════════════════════
+
+const stockAlertSchema = z.object({ variantId: z.string().min(1) });
+
+// POST /api/app/me/stock-alerts { variantId } → idempotent subscribe. Resubscribing (e.g. the
+// customer taps Notify again after already being notified once) resets notified=false.
+router.post("/stock-alerts", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const parsed = stockAlertSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid stock alert", parsed.error.errors);
+
+    const variant = await prisma.productVariant.findUnique({ where: { id: parsed.data.variantId } });
+    if (!variant) throw new NotFoundError("Product variant", parsed.data.variantId);
+
+    await prisma.stockAlert.upsert({
+      where: { userId_variantId: { userId, variantId: parsed.data.variantId } },
+      create: { userId, variantId: parsed.data.variantId },
+      update: { notified: false },
+    });
+    res.status(201).json({ success: true, message: "We'll notify you when it's back in stock" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
 // Referral program (refer & earn)
 // ═══════════════════════════════════════════════════════════════════════
 

@@ -1595,6 +1595,9 @@ model StoreConfig {
   // flat `deliveryCharge` otherwise, so this is safe to leave unset.
   storeLat                             Decimal? @db.Decimal(10, 7)
   storeLng                             Decimal? @db.Decimal(10, 7)
+  // Owner-curated list of 6-digit pincodes we deliver to. Empty = unenforced (deliver anywhere),
+  // so this is safe to leave alone — nothing is blocked until the owner adds at least one entry.
+  allowedPincodes                      String[] @default([])
   // Distance-based delivery pricing (slabs), owner-tunable JSON, validated on write AND read:
   //   [{ uptoKm: 2, charge: 20 }, { uptoKm: 5, charge: 30 }, { uptoKm: 8, charge: 50 }]
   // A distance beyond the last slab is charged at that slab's rate (a ceiling), NOT blocked — only

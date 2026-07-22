@@ -123,6 +123,14 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       throw new ValidationError("This address is outside our delivery area.");
     }
 
+    // Owner-curated pincode allowlist (StoreConfig.allowedPincodes). Empty = unenforced.
+    if (fulfillmentType === "DELIVERY" && address) {
+      const pincodeCfg = await prisma.storeConfig.findFirst({ select: { allowedPincodes: true } });
+      if (pincodeCfg?.allowedPincodes.length && !pincodeCfg.allowedPincodes.includes(address.pincode)) {
+        throw new ValidationError(`We don't deliver to pincode ${address.pincode} yet.`);
+      }
+    }
+
     // Determine payment status. Every order starts PENDING; online orders flip to
     // PAID only after Razorpay verification in /:id/pay (which also arms the OTP).
     // Exception: if store credit covers the WHOLE bill (₹0 due) on an online order, there's nothing

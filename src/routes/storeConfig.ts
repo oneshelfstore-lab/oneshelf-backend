@@ -38,6 +38,8 @@ const updateSchema = z.object({
   // delivery pricing stays inactive (flat deliveryCharge fallback).
   storeLat: z.number().min(-90).max(90).optional().nullable(),
   storeLng: z.number().min(-180).max(180).optional().nullable(),
+  // Owner-curated delivery pincode allowlist. [] (or omit) = deliver anywhere (unenforced).
+  allowedPincodes: z.array(z.string().regex(/^\d{6}$/, "Pincode must be 6 digits")).max(1000).optional(),
   // Distance-based delivery pricing slabs (validated same as the loyalty config — hard rails even
   // through the API). Omit/null to keep the current value; send [] is invalid (min 1 slab) — send
   // null explicitly to fall back to DEFAULT_DELIVERY_SLABS.

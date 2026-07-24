@@ -149,7 +149,7 @@ export async function consumeFifo(
     }
   }
 
-  if (remaining > 0) {
+  if (remaining > 1e-9) {
     throw new AppError(400, "INSUFFICIENT_STOCK", "Insufficient stock");
   }
 

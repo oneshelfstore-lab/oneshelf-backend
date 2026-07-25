@@ -193,7 +193,7 @@ router.post("/statements/:id/mark-paid", async (req: FirebaseAuthRequest, res: R
       amount: Number(statement.totalAmount),
       periodLabel: `${statement.periodMonth}/${statement.periodYear}`,
       autoPaid: true,
-    }).catch(() => {});
+    }).catch((e: unknown) => console.error("[background task failed]", e));
 
     res.json({ success: true, data: { id: statement.id, status: "PAID" } });
   } catch (e) {

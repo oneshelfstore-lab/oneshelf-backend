@@ -247,7 +247,7 @@ export async function materializeQuoteOrder(quoteId: string): Promise<Materializ
     orderNumber: order.orderNumber,
     totalAmount: order.totalAmount,
     customerId: order.customerId,
-  }).catch(() => {});
+  }).catch((e: unknown) => console.error("[background task failed]", e));
 
   return { orderId: order.id, created: true, warnings };
 }

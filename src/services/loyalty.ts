@@ -218,8 +218,8 @@ export async function checkTierUpOnDelivery(orderId: string): Promise<void> {
   if (tier.hamper) {
     await prisma.tierUpHamper
       .create({ data: { userId: order.customerId, tierKey: tier.key, tierName: tier.name } })
-      .catch(() => {});
+      .catch((e: unknown) => console.error("[background task failed]", e));
   }
 
-  await notifyTierUp(order.customerId, tier.name, tier.hamper).catch(() => {});
+  await notifyTierUp(order.customerId, tier.name, tier.hamper).catch((e: unknown) => console.error("[background task failed]", e));
 }

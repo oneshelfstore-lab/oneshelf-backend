@@ -189,7 +189,7 @@ publicCatalogRouter.get("/", cacheControl(CATALOG_LIST_TTL), async (req: Request
     // pause-in-typing, not per keystroke. Only real text searches, not plain category browsing.
     const term = q?.trim().toLowerCase();
     if (term) {
-      prisma.searchQuery.create({ data: { term, resultCount: total } }).catch(() => {});
+      prisma.searchQuery.create({ data: { term, resultCount: total } }).catch((e: unknown) => console.error("[background task failed]", e));
     }
   } catch (e) {
     sendError(res, e);

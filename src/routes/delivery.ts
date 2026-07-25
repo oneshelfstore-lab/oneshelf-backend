@@ -366,7 +366,7 @@ router.post("/subscription-run/deliver-all", async (req: FirebaseAuthRequest, re
         });
         if (r.count > 0) {
           delivered++;
-          notifyOrderStatusChange({ ...o, status: "DELIVERED" }).catch(() => {});
+          notifyOrderStatusChange({ ...o, status: "DELIVERED" }).catch((e: unknown) => console.error("[background task failed]", e));
         }
       } catch (e) {
         console.error("subscription deliver-all: order failed", o.id, e);
@@ -454,7 +454,7 @@ router.post("/:id/accept", async (req: FirebaseAuthRequest, res: Response) => {
       data: { status: "OUT_FOR_DELIVERY" },
     });
 
-    notifyOrderStatusChange({ ...order, status: "OUT_FOR_DELIVERY" }).catch(() => {});
+    notifyOrderStatusChange({ ...order, status: "OUT_FOR_DELIVERY" }).catch((e: unknown) => console.error("[background task failed]", e));
 
     res.json({ success: true, data: { orderId: order.id, status: "OUT_FOR_DELIVERY" } });
   } catch (e) {
@@ -530,7 +530,7 @@ router.post("/:id/collect/:subOrderId", async (req: FirebaseAuthRequest, res: Re
     if (allDone) {
       await prisma.order.update({ where: { id: orderId }, data: { status: "OUT_FOR_DELIVERY" } });
       orderStatus = "OUT_FOR_DELIVERY";
-      notifyOrderStatusChange({ ...order, status: "OUT_FOR_DELIVERY" }).catch(() => {});
+      notifyOrderStatusChange({ ...order, status: "OUT_FOR_DELIVERY" }).catch((e: unknown) => console.error("[background task failed]", e));
     }
 
     const pickupStops = all.filter((s) => !s.seller.isHouse);
@@ -645,7 +645,7 @@ router.post("/:id/deliver", async (req: FirebaseAuthRequest, res: Response) => {
       });
     }
 
-    notifyOrderStatusChange({ ...order, status: "DELIVERED" }).catch(() => {});
+    notifyOrderStatusChange({ ...order, status: "DELIVERED" }).catch((e: unknown) => console.error("[background task failed]", e));
     // Referral commission: accrue the referrer's ongoing % on this order (idempotent + best-effort —
     // never blocks the delivery response).
     accrueReferralCommission(order.id).catch((e) => console.error("referral commission accrual failed:", e));
@@ -670,7 +670,7 @@ router.post("/:id/arrived", async (req: FirebaseAuthRequest, res: Response) => {
       throw new AppError(403, "FORBIDDEN", "Not assigned to you");
     }
 
-    notifyDeliveryArrived(order).catch(() => {});
+    notifyDeliveryArrived(order).catch((e: unknown) => console.error("[background task failed]", e));
     res.json({ success: true, data: { orderId: order.id } });
   } catch (e) {
     sendError(res, e);

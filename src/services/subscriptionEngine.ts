@@ -334,7 +334,7 @@ async function generateOrderFor(
 
   // Product gone/inactive — skip + notify (treat like OOS; never throw).
   if (!variant || !variant.isActive) {
-    await notifySubscriptionSkipped(sub.customerId, sub.productName).catch(() => {});
+    await notifySubscriptionSkipped(sub.customerId, sub.productName).catch((e: unknown) => console.error("[background task failed]", e));
     return "skipped_oos";
   }
 
@@ -365,7 +365,7 @@ async function generateOrderFor(
     // UPI mandate charge (inert until a live Razorpay merchant + mandate exist → skip + notify).
     const charged = sub.mandateId ? await chargeSubscriptionMandate(sub.mandateId, total) : null;
     if (!charged) {
-      await notifySubscriptionLowBalance(sub.customerId, sub.productName).catch(() => {});
+      await notifySubscriptionLowBalance(sub.customerId, sub.productName).catch((e: unknown) => console.error("[background task failed]", e));
       return "skipped_lowbalance";
     }
     paymentMethod = "UPI";
@@ -522,11 +522,11 @@ async function generateOrderFor(
     });
   } catch (e) {
     if (e instanceof OosSkip) {
-      await notifySubscriptionSkipped(sub.customerId, sub.productName).catch(() => {});
+      await notifySubscriptionSkipped(sub.customerId, sub.productName).catch((e: unknown) => console.error("[background task failed]", e));
       return "skipped_oos";
     }
     if (e instanceof WalletSkip) {
-      await notifySubscriptionLowBalance(sub.customerId, sub.productName).catch(() => {});
+      await notifySubscriptionLowBalance(sub.customerId, sub.productName).catch((e: unknown) => console.error("[background task failed]", e));
       return "skipped_lowbalance";
     }
     // Already generated for this (subscription, day) — the @@unique guard. No-op.
@@ -536,8 +536,8 @@ async function generateOrderFor(
 
   if (createdOrder) {
     // Each delivery is its own paid order → its own GST invoice (replaces the consolidated statement).
-    generateOrderInvoice(createdOrder.id).catch(() => {});
-    notifyNewOrder(createdOrder).catch(() => {});
+    generateOrderInvoice(createdOrder.id).catch((e: unknown) => console.error("[background task failed]", e));
+    notifyNewOrder(createdOrder).catch((e: unknown) => console.error("[background task failed]", e));
   }
   return "generated";
 }
@@ -617,7 +617,7 @@ export async function notifyEndingSoonSubscriptions(): Promise<{ notified: numbe
   });
 
   for (const sub of ending) {
-    await notifySubscriptionEndingSoon(sub.customerId, sub.productName, dayLabel(sub.endDate!)).catch(() => {});
+    await notifySubscriptionEndingSoon(sub.customerId, sub.productName, dayLabel(sub.endDate!)).catch((e: unknown) => console.error("[background task failed]", e));
   }
   return { notified: ending.length };
 }
@@ -686,18 +686,18 @@ async function settleWallet(
 
   if (result === "paid") {
     // Mark the consolidated invoice PAID + record store revenue (wallet → bank-transfer mode).
-    await markStatementInvoicePaid(statementId, "BANK_TRANSFER").catch(() => {});
+    await markStatementInvoicePaid(statementId, "BANK_TRANSFER").catch((e: unknown) => console.error("[background task failed]", e));
     await notifySubscriptionStatement(customerId, {
       amount,
       periodLabel: monthLabel(periodYear, periodMonth),
       autoPaid: true,
-    }).catch(() => {});
+    }).catch((e: unknown) => console.error("[background task failed]", e));
   } else if (result === "insufficient") {
     await notifySubscriptionStatement(customerId, {
       amount,
       periodLabel: monthLabel(periodYear, periodMonth),
       autoPaid: false,
-    }).catch(() => {});
+    }).catch((e: unknown) => console.error("[background task failed]", e));
   }
 }
 
@@ -756,7 +756,7 @@ async function settleStatement(g: StatementGroup, periodYear: number, periodMont
       amount: Number(statement.totalAmount),
       periodLabel: monthLabel(periodYear, periodMonth),
       autoPaid: false,
-    }).catch(() => {});
+    }).catch((e: unknown) => console.error("[background task failed]", e));
   }
 }
 

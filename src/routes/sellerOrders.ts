@@ -55,10 +55,10 @@ async function maybeAdvanceParentOrder(orderId: string) {
   const newStatus = order.fulfillmentType === "PICKUP" ? "READY_FOR_PICKUP" : "PACKED";
   await prisma.order.update({ where: { id: orderId }, data: { status: newStatus } });
 
-  notifyOrderStatusChange({ ...order, status: newStatus }).catch(() => {});
+  notifyOrderStatusChange({ ...order, status: newStatus }).catch((e: unknown) => console.error("[background task failed]", e));
   // Unassigned delivery order → it's now in the shared pool; ping available agents.
   if (newStatus === "PACKED" && !order.deliveryBoyId) {
-    notifyNewDeliveryAvailable({ id: order.id, orderNumber: order.orderNumber }).catch(() => {});
+    notifyNewDeliveryAvailable({ id: order.id, orderNumber: order.orderNumber }).catch((e: unknown) => console.error("[background task failed]", e));
   }
 }
 
@@ -158,7 +158,7 @@ router.patch("/:id/status", async (req: SellerRequest, res: Response) => {
           prisma.order.findUnique({ where: { id: sub.orderId }, select: { id: true, orderNumber: true, deliveryBoyId: true } }),
         ]);
         if (seller && order) {
-          notifySubOrderPacked({ id: order.id, orderNumber: order.orderNumber }, seller.name, order.deliveryBoyId).catch(() => {});
+          notifySubOrderPacked({ id: order.id, orderNumber: order.orderNumber }, seller.name, order.deliveryBoyId).catch((e: unknown) => console.error("[background task failed]", e));
         }
       } catch (e) {
         console.error("notifySubOrderPacked lookup failed:", e);
@@ -238,7 +238,7 @@ router.post("/:id/reject", async (req: SellerRequest, res: Response) => {
       id: complaint.id,
       subject: complaint.subject,
       customerName: sub.order.shippingName || req.appUser!.name,
-    }).catch(() => {});
+    }).catch((e: unknown) => console.error("[background task failed]", e));
 
     if (isLastActiveSeller && (sub.order.status === "PLACED" || sub.order.status === "CONFIRMED")) {
       // Whole order is now cancelled — same refund/notify path as a customer-initiated cancel.
@@ -252,7 +252,7 @@ router.post("/:id/reject", async (req: SellerRequest, res: Response) => {
           console.error("Refund failed for order", sub.order.id, refundErr);
         }
       }
-      notifyOrderStatusChange({ id: sub.order.id, orderNumber: sub.order.orderNumber, status: "CANCELLED", customerId: sub.order.customerId }).catch(() => {});
+      notifyOrderStatusChange({ id: sub.order.id, orderNumber: sub.order.orderNumber, status: "CANCELLED", customerId: sub.order.customerId }).catch((e: unknown) => console.error("[background task failed]", e));
       syncInvoicePaymentStatus(sub.order.id).catch((e) => console.error("Invoice sync failed:", e));
       refundWalletOnCancel(sub.order.id).catch((e) => console.error("wallet refund failed:", e));
     }
@@ -309,7 +309,7 @@ router.post("/:id/flag-unavailable", async (req: SellerRequest, res: Response) =
       id: complaint.id,
       subject: complaint.subject,
       customerName: req.appUser!.name,
-    }).catch(() => {});
+    }).catch((e: unknown) => console.error("[background task failed]", e));
 
     res.status(201).json({ success: true, data: { complaintId: complaint.id } });
   } catch (e) {

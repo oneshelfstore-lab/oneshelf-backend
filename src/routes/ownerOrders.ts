@@ -187,7 +187,7 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
       generateOrderInvoice(order.id).catch((e) => console.error("Invoice generation failed:", e));
     }
 
-    notifyOrderStatusChange({ ...order, status: newStatus }).catch(() => {});
+    notifyOrderStatusChange({ ...order, status: newStatus }).catch((e: unknown) => console.error("[background task failed]", e));
     // Referral hooks (idempotent + best-effort). Accrue the referrer's ongoing commission on every
     // delivery; refund any store credit if the order is cancelled.
     if (newStatus === "DELIVERED") {
@@ -233,7 +233,7 @@ router.post("/:id/assign", async (req: FirebaseAuthRequest, res: Response) => {
       data: { deliveryBoyId },
     });
 
-    notifyDeliveryAssignment(order, deliveryBoyId).catch(() => {});
+    notifyDeliveryAssignment(order, deliveryBoyId).catch((e: unknown) => console.error("[background task failed]", e));
 
     res.json({ success: true, data: { orderId: order.id, deliveryBoyId } });
   } catch (e) {
@@ -315,7 +315,7 @@ router.post("/:orderId/items/:itemId/substitute", async (req: FirebaseAuthReques
       originalItem: item.productName,
       substituteItem: subVariant.product.name,
       priceDelta,
-    }).catch(() => {});
+    }).catch((e: unknown) => console.error("[background task failed]", e));
 
     res.json({
       success: true,

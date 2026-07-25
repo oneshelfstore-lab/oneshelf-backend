@@ -89,6 +89,7 @@ const variantSchema = z.object({
   id: z.string().optional(),
   sku: z.string().min(1).max(50),
   barcode: z.string().max(50).optional().nullable(),
+  imageUrl: z.string().max(500).optional().nullable(),
   packageSize: z.number().positive(),
   packageUnit: PackageUnitEnum,
   mrp: z.number().positive(),
@@ -225,7 +226,7 @@ router.post("/", async (req: SellerRequest, res: Response) => {
     const convertedVariants = variants.map((v) => {
       const c = fromAppFormat({ mrp: v.mrp, sellingPrice: v.sellingPrice, costPrice: v.costPrice, saleFloor: v.saleFloor, stock: v.stock, bulkPrice: v.bulkPrice, packageSize: v.packageSize }, isLoose);
       return {
-        sku: v.sku, barcode: v.barcode, packageSize: v.packageSize, packageUnit: v.packageUnit,
+        sku: v.sku, barcode: v.barcode, imageUrl: v.imageUrl, packageSize: v.packageSize, packageUnit: v.packageUnit,
         mrp: c.mrp, sellingPrice: c.sellingPrice, saleFloor: c.saleFloor, stock: 0,
         initialStock: c.stock, initialCost: c.costPrice ?? 0,
         lowStockThreshold: v.lowStockThreshold, bulkMinQty: v.bulkMinQty, bulkPrice: c.bulkPrice, gstRateOverride: v.gstRateOverride,

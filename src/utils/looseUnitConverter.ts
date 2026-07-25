@@ -130,7 +130,7 @@ export function assertVariantFloors(
  * Applies loose conversion and adds computed display fields.
  */
 export function formatVariantForApp(
-  variant: VariantLike & { id: string; sku: string; barcode?: string | null; packageUnit: string; lowStockThreshold: number; bulkMinQty: number; gstRateOverride?: Decimal | number | null; isActive: boolean },
+  variant: VariantLike & { id: string; sku: string; barcode?: string | null; imageUrl?: string | null; packageUnit: string; lowStockThreshold: number; bulkMinQty: number; gstRateOverride?: Decimal | number | null; isActive: boolean },
   isLoose: boolean,
 ) {
   const converted = toAppFormat(variant, isLoose);
@@ -138,6 +138,7 @@ export function formatVariantForApp(
     id: variant.id,
     sku: variant.sku,
     barcode: variant.barcode ?? null,
+    imageUrl: variant.imageUrl ?? null,
     packageSize: toNum(variant.packageSize),
     packageUnit: variant.packageUnit,
     mrp: converted.mrp,

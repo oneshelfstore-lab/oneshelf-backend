@@ -735,6 +735,9 @@ model ProductVariant {
   product           CatalogProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
   sku               String         @unique
   barcode           String?
+  // Per-variant photo. Null ⇒ the app falls back to the parent product's cover image, so every
+  // pre-existing variant renders exactly as before.
+  imageUrl          String?
   packageSize       Decimal        @db.Decimal(10, 3)
   packageUnit       PackageUnit
   mrp               Decimal        @db.Decimal(10, 2)

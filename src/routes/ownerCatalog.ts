@@ -103,6 +103,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
 const variantCreateSchema = z.object({
   sku: z.string().min(1).max(50),
   barcode: z.string().max(50).optional().nullable(),
+  imageUrl: z.string().max(500).optional().nullable(),
   packageSize: z.number().positive(),
   packageUnit: PackageUnitEnum,
   mrp: z.number().positive(),
@@ -199,6 +200,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       return {
         sku: v.sku,
         barcode: v.barcode,
+        imageUrl: v.imageUrl,
         packageSize: v.packageSize,
         packageUnit: v.packageUnit,
         mrp: converted.mrp,

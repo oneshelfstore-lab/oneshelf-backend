@@ -295,6 +295,14 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
       const updateData: any = { ...productFields };
       if (categoryId) updateData.categoryId = categoryId;
       delete updateData.categorySlug;
+      // NEVER re-write the handle on update. Create (above) auto-suffixes a colliding handle, but the
+      // app can't know that — it recomputes `slugify(name)` and sends it on every save, so a product
+      // that was suffixed at creation sends the ORIGINAL handle here, collides with whichever product
+      // owns it, and throws P2002. Nothing catches that, so it surfaced as a generic 500 and left the
+      // product PERMANENTLY uneditable. The handle is app-derived, never shown to the seller, and not
+      // read by the client (it's in the DTO but absent from the Product model), so the create-time
+      // value is simply canonical.
+      delete updateData.handle;
       // Third-party sellers can't self-activate or set merchandising flags (owner moderation only).
       // The house manager can — it's the store's own catalog.
       if (req.sellerIsHouse !== true) {
@@ -314,22 +322,27 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
         if (toRemove.length > 0) {
           await tx.productVariant.updateMany({ where: { id: { in: toRemove } }, data: { isActive: false } });
         }
-        // Make SKUs of NEWLY-ADDED variants unique (vs existing DB rows, kept variants, and each
-        // other) so adding a second size can't hit the unique constraint.
-        const newOnes = variantUpdates.filter((v: any) => !v.id);
-        if (newOnes.length > 0) {
-          const dbSkus = new Set(
-            (await tx.productVariant.findMany({ where: { sku: { in: newOnes.map((v: any) => v.sku) } }, select: { sku: true } }))
-              .map((s) => s.sku)
-          );
-          const usedSkus = new Set<string>(variantUpdates.filter((v: any) => v.id).map((v: any) => v.sku));
-          newOnes.forEach((v: any, i: number) => {
-            let sku = v.sku;
-            if (!sku || dbSkus.has(sku) || usedSkus.has(sku)) sku = `${sku || "SKU"}-${Date.now().toString(36)}${i}`;
-            v.sku = sku;
-            usedSkus.add(sku);
-          });
-        }
+        // Make every incoming SKU unique — vs other products' rows, and vs each other.
+        // This used to cover NEWLY-ADDED variants only, so an EXISTING variant's SKU was written
+        // through unchanged and could collide: the client regenerates a blank SKU via generateSku(),
+        // which is deterministic on brand+category+size, so every no-brand staples 1kg variant in the
+        // catalog produces the identical "GEN-STA-1KG". That threw the same uncaught P2002 as the
+        // handle above and surfaced as the same generic 500.
+        // `id: { notIn: incomingIds }` excludes THIS product's kept variants, so a variant holding on
+        // to its own SKU can't be mistaken for a collision with itself.
+        const dbSkus = new Set(
+          (await tx.productVariant.findMany({
+            where: { sku: { in: variantUpdates.map((v: any) => v.sku).filter(Boolean) }, id: { notIn: incomingIds } },
+            select: { sku: true },
+          })).map((s) => s.sku)
+        );
+        const usedSkus = new Set<string>();
+        variantUpdates.forEach((v: any, i: number) => {
+          let sku = v.sku;
+          if (!sku || dbSkus.has(sku) || usedSkus.has(sku)) sku = `${sku || "SKU"}-${Date.now().toString(36)}${i}`;
+          v.sku = sku;
+          usedSkus.add(sku);
+        });
         const isHouseUpd = req.sellerIsHouse === true;
         for (const v of variantUpdates) {
           const floorErr = assertVariantFloors(

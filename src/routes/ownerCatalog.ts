@@ -289,6 +289,10 @@ router.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
       const updateData: any = { ...productFields };
       if (categoryId) updateData.categoryId = categoryId;
       delete updateData.categorySlug;
+      // See the identical guard in sellerCatalog.ts's PUT: create auto-suffixes a colliding handle,
+      // the app re-derives `slugify(name)` on every save and can't know about the suffix, so writing
+      // it back here throws an uncaught P2002 and makes the product permanently uneditable.
+      delete updateData.handle;
 
       if (Object.keys(updateData).length > 0) {
         await tx.catalogProduct.update({ where: { id: productId }, data: updateData });

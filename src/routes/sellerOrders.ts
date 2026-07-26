@@ -1,5 +1,6 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
+import type { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
@@ -107,6 +108,16 @@ function shape(so: any) {
   };
 }
 
+// An ONLINE/UPI order is created PLACED/PENDING *before* Razorpay confirms the payment (the SubOrder
+// has to exist at placement for the commission ledger), and the expiry sweeper cancels it ~20 min
+// later if the customer never pays. So an unpaid online order must not reach the seller at all —
+// otherwise they pack goods for an order that quietly vanishes. Spread into EVERY seller-facing
+// sub-order lookup; the matching push is deferred to markOrderPaid(). COD / MONTHLY / WALLET /
+// ADVANCE_PAID are unaffected (COD is collected at the door, the rest are already settled).
+const PAYMENT_SETTLED: Prisma.SubOrderWhereInput = {
+  order: { is: { NOT: { paymentMethod: { in: ["ONLINE", "UPI"] }, paymentStatus: "PENDING" } } },
+};
+
 const ORDER_INCLUDE = {
   order: { select: { orderNumber: true, status: true, fulfillmentType: true, shippingName: true, shippingPhone: true, notes: true, voiceNoteUrl: true, subscriptionId: true } },
   items: { select: { id: true, productName: true, variantSku: true, imageUrl: true, quantity: true, unitPrice: true, lineTotal: true, isLoose: true, stepSize: true, stepUnit: true } },
@@ -117,7 +128,7 @@ router.get("/", async (req: SellerRequest, res: Response) => {
   try {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
     const subOrders = await prisma.subOrder.findMany({
-      where: { sellerId: req.sellerId },
+      where: { sellerId: req.sellerId, ...PAYMENT_SETTLED },
       orderBy: { createdAt: "desc" },
       take: limit,
       include: ORDER_INCLUDE,
@@ -136,7 +147,7 @@ router.patch("/:id/status", async (req: SellerRequest, res: Response) => {
     if (!parsed.success) throw new ValidationError("status must be ACCEPTED or PACKED");
     const { status } = parsed.data;
 
-    const sub = await prisma.subOrder.findFirst({ where: { id, sellerId: req.sellerId } });
+    const sub = await prisma.subOrder.findFirst({ where: { id, sellerId: req.sellerId, ...PAYMENT_SETTLED } });
     if (!sub) throw new NotFoundError("SubOrder", id);
 
     const data: any = { status };
@@ -196,7 +207,7 @@ router.post("/:id/reject", async (req: SellerRequest, res: Response) => {
     const { reason, note } = parsed.data;
 
     const sub = await prisma.subOrder.findFirst({
-      where: { id, sellerId: req.sellerId },
+      where: { id, sellerId: req.sellerId, ...PAYMENT_SETTLED },
       include: {
         items: { select: { id: true, variantId: true, quantity: true, isLoose: true, stepSize: true } },
         order: { select: { id: true, orderNumber: true, status: true, paymentStatus: true, paymentMethod: true, razorpayPaymentId: true, totalAmount: true, customerId: true, shippingName: true } },
@@ -320,7 +331,7 @@ router.post("/:id/flag-unavailable", async (req: SellerRequest, res: Response) =
 // ─── Order message thread — this seller replies as the store, only on an order they have a
 // slice of (any seller, not house-only — unlike the Bulk Express quote thread above). ─────────
 async function ownsOrder(sellerId: string, orderId: string): Promise<boolean> {
-  const hit = await prisma.subOrder.findFirst({ where: { orderId, sellerId }, select: { id: true } });
+  const hit = await prisma.subOrder.findFirst({ where: { orderId, sellerId, ...PAYMENT_SETTLED }, select: { id: true } });
   return hit != null;
 }
 

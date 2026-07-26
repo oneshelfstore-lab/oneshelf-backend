@@ -1,6 +1,7 @@
 import prisma from "../lib/prisma.js";
 import { generateOrderInvoice } from "./orderInvoice.js";
 import { generateOtp } from "../lib/otp.js";
+import { notifyNewOrder, notifySubOrderNew } from "./fcmNotifier.js";
 
 /**
  * The single, idempotent "this order's online payment is confirmed" routine. ALL THREE confirmation
@@ -62,6 +63,41 @@ export async function markOrderPaid(orderId: string, razorpayPaymentId: string):
   if (flipped) {
     // Invoice now that payment is confirmed (best-effort; must never block confirmation).
     generateOrderInvoice(orderId).catch((e) => console.error("Invoice generation failed:", e));
+    // THIS is when a prepaid order becomes real for the store. Placement deliberately doesn't ping
+    // anyone (see routes/orders.ts) — an unpaid ONLINE/UPI order is hidden from the owner board and
+    // the seller list by PAYMENT_SETTLED, and the expiry sweeper cancels it, so packing it wastes goods.
+    notifyOrderPaid(orderId).catch((e) => console.error("[background task failed]", e));
   }
   return flipped;
+}
+
+/** The "new order" pushes for a prepaid order: owner topic + one per seller with a slice of it. */
+async function notifyOrderPaid(orderId: string) {
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    select: {
+      id: true,
+      orderNumber: true,
+      totalAmount: true,
+      customerId: true,
+      subOrders: {
+        where: { status: { not: "CANCELLED" } },
+        select: {
+          subtotal: true,
+          seller: { select: { ownerUserId: true } },
+          _count: { select: { items: true } },
+        },
+      },
+    },
+  });
+  if (!order) return;
+  await notifyNewOrder(order).catch((e: unknown) => console.error("[background task failed]", e));
+  for (const so of order.subOrders) {
+    if (!so.seller?.ownerUserId) continue;
+    await notifySubOrderNew(so.seller.ownerUserId, {
+      orderNumber: order.orderNumber,
+      itemCount: so._count.items,
+      subtotal: Number(so.subtotal),
+    }).catch((e: unknown) => console.error("[background task failed]", e));
+  }
 }

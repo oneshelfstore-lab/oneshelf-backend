@@ -1,5 +1,6 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
+import type { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError, AppError } from "../lib/errors.js";
 import {
@@ -19,6 +20,23 @@ import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
 router.use(requireAppRole("OWNER") as any);
+
+// An ONLINE/UPI order is created PLACED/PENDING *before* Razorpay confirms it, and the expiry sweeper
+// cancels it if the customer never pays. Keep it off the dispatch board and un-actionable until the
+// payment lands, so nobody packs goods for an order that vanishes 20 min later. Mirrors
+// PAYMENT_SETTLED in sellerOrders.ts. markOrderPaid() bumps updatedAt, so the board's `since` poll
+// picks the order up the moment it's confirmed.
+// Deliberately NOT gated: GET /:id detail and the message thread — reading an order and asking the
+// customer "did your payment go through?" are exactly what you want while it's pending.
+const PAYMENT_SETTLED: Prisma.OrderWhereInput = {
+  NOT: { paymentMethod: { in: ["ONLINE", "UPI"] }, paymentStatus: "PENDING" },
+};
+
+function assertPaymentSettled(order: { paymentMethod: string; paymentStatus: string }) {
+  if ((order.paymentMethod === "ONLINE" || order.paymentMethod === "UPI") && order.paymentStatus === "PENDING") {
+    throw new ValidationError("This order's online payment hasn't been confirmed yet — it'll appear on the board once the customer's payment goes through.");
+  }
+}
 
 // Valid status transitions
 const VALID_TRANSITIONS: Record<string, string[]> = {
@@ -44,6 +62,9 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     // to the single subscription runner, and the owner plans them via the subscription "tomorrow totals"
     // view. Keeps the board to real one-off customer orders. (subscriptionId is null for normal orders.)
     where.subscriptionId = null;
+
+    // Hide online orders still awaiting payment confirmation (see PAYMENT_SETTLED above).
+    Object.assign(where, PAYMENT_SETTLED);
 
     if (since) {
       const sinceDate = new Date(since);
@@ -81,6 +102,9 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
       prisma.order.count({ where }),
       prisma.order.groupBy({
         by: ["status"],
+        // Same board scope as the list (minus the status/since filters, which would collapse the
+        // per-status counts) — otherwise the tab badges count orders the board deliberately hides.
+        where: { subscriptionId: null, ...PAYMENT_SETTLED },
         _count: true,
       }),
     ]);
@@ -150,6 +174,7 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
       include: { items: true },
     });
     if (!order) throw new NotFoundError("Order", req.params.id!);
+    assertPaymentSettled(order);
 
     const allowed = VALID_TRANSITIONS[order.status];
     if (!allowed || !allowed.includes(newStatus)) {
@@ -218,6 +243,7 @@ router.post("/:id/assign", async (req: FirebaseAuthRequest, res: Response) => {
 
     const order = await prisma.order.findUnique({ where: { id: req.params.id } });
     if (!order) throw new NotFoundError("Order", req.params.id!);
+    assertPaymentSettled(order);
 
     if (order.fulfillmentType !== "DELIVERY") {
       throw new ValidationError("Can only assign delivery agents to delivery orders");
@@ -259,6 +285,7 @@ router.post("/:orderId/items/:itemId/substitute", async (req: FirebaseAuthReques
       include: { items: true },
     });
     if (!order) throw new NotFoundError("Order", req.params.orderId as string);
+    assertPaymentSettled(order);
 
     // Only allow substitutions on orders being packed (CONFIRMED or PACKED).
     if (!["CONFIRMED", "PACKED"].includes(order.status)) {

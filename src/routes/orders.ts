@@ -485,11 +485,17 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       generateOrderInvoice(order.id).catch((e) => console.error("Invoice generation failed:", e));
     }
 
-    // FCM notification to owner (fire and forget)
-    notifyNewOrder(order).catch(() => {});
-    // FCM notification to each non-house seller whose slice is in this order (fire and forget).
-    for (const sn of sellerNotifications) {
-      notifySubOrderNew(sn.ownerUserId, { orderNumber: order.orderNumber, itemCount: sn.itemCount, subtotal: sn.subtotal }).catch(() => {});
+    // FCM to the owner + to each seller with a slice in this order (fire and forget) — but ONLY for
+    // orders that are actually settled. An ONLINE/UPI order sitting at PENDING isn't a real order yet
+    // (the sweeper cancels it if the customer never pays), and it's hidden from both the owner board
+    // and the seller list until confirmed (PAYMENT_SETTLED in ownerOrders.ts / sellerOrders.ts) — so
+    // pushing here would announce an order nobody can open. markOrderPaid() sends both instead, at the
+    // moment payment lands.
+    if (paymentMethod === "COD" || fullyWalletPaid) {
+      notifyNewOrder(order).catch((e: unknown) => console.error("[background task failed]", e));
+      for (const sn of sellerNotifications) {
+        notifySubOrderNew(sn.ownerUserId, { orderNumber: order.orderNumber, itemCount: sn.itemCount, subtotal: sn.subtotal }).catch((e: unknown) => console.error("[background task failed]", e));
+      }
     }
 
     res.status(201).json({

@@ -529,7 +529,13 @@ router.post("/:id/pay", async (req: FirebaseAuthRequest, res: Response) => {
     });
     if (!order) throw new NotFoundError("Order", req.params.id!);
     if (!order.razorpayOrderId) throw new ValidationError("This order does not have a pending online payment");
-    if (order.paymentStatus === "PAID") throw new ValidationError("Order is already paid");
+    // Already confirmed — most likely the webhook won the race and flipped it first. The customer's
+    // payment genuinely succeeded, so this must read as success, not an error (was previously a hard
+    // throw here, which surfaced "Order is already paid" as a payment FAILURE on a real successful charge).
+    if (order.paymentStatus === "PAID") {
+      res.json({ success: true, message: "Payment verified", data: { orderId: order.id, paymentStatus: "PAID" } });
+      return;
+    }
 
     const isValid = verifyPaymentSignature(order.razorpayOrderId, razorpayPaymentId, razorpaySignature);
     if (!isValid) throw new AppError(400, "PAYMENT_INVALID", "Payment signature verification failed");

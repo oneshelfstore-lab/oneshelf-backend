@@ -12,7 +12,7 @@ import { computeUserSavings } from "../services/savings.js";
 import { computeUserLoyalty } from "../services/loyalty.js";
 import { notifyNewComplaint, notifyNewQuoteRequest, notifyQuoteMessage } from "../services/fcmNotifier.js";
 import { mintReferralWelcomeCoupon, istMonthKey, maskName, getAvailableReferralBalance, withdrawReferralBalance } from "../services/referralRewards.js";
-import { createTopup, creditTopup } from "../services/walletTopup.js";
+import { createTopup, creditTopup, reconcileUserTopups } from "../services/walletTopup.js";
 import { verifyPaymentSignature, createRazorpayOrder, isRazorpayConfigured } from "../services/razorpay.js";
 import {
   markQuotePaid,
@@ -669,6 +669,19 @@ router.post("/wallet/topup/:id/pay", async (req: FirebaseAuthRequest, res: Respo
       message: "Top-up added",
       data: { topupId: topup.id, balance: Number(user?.walletBalance ?? 0) },
     });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// POST /api/app/me/wallet/reconcile → ask Razorpay whether any of this user's unfinished top-ups were
+// actually paid, and credit the ones that were. The recovery net for "money left my account but my
+// balance didn't move" when both /pay and the webhook missed it. Idempotent and safe to call on every
+// wallet open; takes no id so the client tracks nothing.
+router.post("/wallet/reconcile", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const result = await reconcileUserTopups(req.appUser!.id);
+    res.json({ success: true, data: result });
   } catch (e) {
     sendError(res, e);
   }

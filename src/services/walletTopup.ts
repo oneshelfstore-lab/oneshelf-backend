@@ -1,5 +1,5 @@
 import prisma from "../lib/prisma.js";
-import { createRazorpayOrder, isRazorpayConfigured } from "./razorpay.js";
+import { createRazorpayOrder, isRazorpayConfigured, fetchCapturedPaymentForOrder } from "./razorpay.js";
 import { AppError } from "../lib/errors.js";
 
 export interface CreateTopupResult {
@@ -73,6 +73,45 @@ export async function creditTopup(topupId: string, razorpayPaymentId: string): P
     });
     return true;
   });
+}
+
+/**
+ * Reconciles this user's unfinished top-ups against Razorpay's API — the third recovery layer, mirroring
+ * reconcileOrderPayment for orders. Until this existed the Razorpay webhook was the ONLY thing that could
+ * credit a top-up whose /pay confirmation never landed (app killed right after paying, network dropped),
+ * so a single missed webhook meant money captured at Razorpay and a balance that never moved, with
+ * nothing anywhere retrying.
+ *
+ * Scoped to the caller's own recent PENDING top-ups rather than taking an id, so the client needs to
+ * track nothing — it just asks "did any of my payments actually go through?" on wallet open / app launch.
+ * Credit itself goes through the idempotent creditTopup, so racing this with the webhook is safe.
+ */
+export async function reconcileUserTopups(userId: string): Promise<{ credited: number; balance: number }> {
+  let credited = 0;
+
+  if (isRazorpayConfigured()) {
+    const pending = await prisma.walletTopup.findMany({
+      // razorpayOrderId null ⇒ Razorpay never saw it (creation failed) ⇒ no money to recover.
+      where: { userId, status: "PENDING", razorpayOrderId: { not: null } },
+      orderBy: { createdAt: "desc" },
+      take: 5, // ponytail: bounded scan; a user never has a meaningful backlog of unpaid top-ups.
+      select: { id: true, razorpayOrderId: true },
+    });
+
+    for (const t of pending) {
+      try {
+        const captured = await fetchCapturedPaymentForOrder(t.razorpayOrderId!);
+        if (captured && (await creditTopup(t.id, captured.id))) credited++;
+      } catch (e) {
+        // Transient Razorpay/network failure — leave it PENDING so the next call (or the webhook)
+        // retries. Never throw: this runs on screen-open and must not break the wallet.
+        console.error(JSON.stringify({ level: "error", msg: "topup reconcile failed", topupId: t.id, err: String(e) }));
+      }
+    }
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { walletBalance: true } });
+  return { credited, balance: Number(user?.walletBalance ?? 0) };
 }
 
 /** Webhook/reconcile entry: credit a top-up identified by its Razorpay order id. No-op if unknown. */

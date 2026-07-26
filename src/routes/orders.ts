@@ -761,7 +761,9 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         skip: (page - 1) * limit,
         take: limit,
         include: {
-          items: { select: { productName: true, quantity: true, unitPrice: true, mrp: true, lineTotal: true, imageUrl: true, isLoose: true, stepSize: true, stepUnit: true, packageUnit: true, hsnCode: true, gstRate: true, variantId: true, isFreeGift: true } },
+          // variant.productId lets the app link a thumbnail straight to its product page —
+          // OrderItem itself has no productId column, only variantId (same fix as GET /:id).
+          items: { select: { productName: true, quantity: true, unitPrice: true, mrp: true, lineTotal: true, imageUrl: true, isLoose: true, stepSize: true, stepUnit: true, packageUnit: true, hsnCode: true, gstRate: true, variantId: true, isFreeGift: true, variant: { select: { productId: true } } } },
         },
       }),
       prisma.order.count({ where: listWhere }),
@@ -780,7 +782,11 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         })
       : [];
     const otpByOrder = new Map(secrets.map((s) => [s.orderId, s.otp]));
-    const data = orders.map((o) => ({ ...o, deliveryOtp: otpByOrder.get(o.id) ?? null }));
+    const data = orders.map((o) => ({
+      ...o,
+      deliveryOtp: otpByOrder.get(o.id) ?? null,
+      items: o.items.map((it) => ({ ...it, productId: it.variant?.productId ?? null })),
+    }));
 
     res.json({
       success: true,
@@ -911,8 +917,14 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
       where: { id: req.params.id, customerId: userId },
       include: {
         // Each item carries its seller (via the sub-order) so the app can show "Sold by <shop>"
-        // and group the order by seller.
-        items: { include: { subOrder: { include: { seller: { select: { id: true, name: true, isHouse: true } } } } } },
+        // and group the order by seller. Also its variant, so we can flatten the real productId
+        // onto the item below — OrderItem has no productId column of its own, only variantId.
+        items: {
+          include: {
+            subOrder: { include: { seller: { select: { id: true, name: true, isHouse: true } } } },
+            variant: { select: { productId: true } },
+          },
+        },
         address: true,
       },
     });
@@ -938,6 +950,7 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
       ...it,
       sellerName: it.subOrder?.seller?.name ?? null,
       sellerIsHouse: it.subOrder?.seller?.isHouse ?? null,
+      productId: it.variant?.productId ?? null,
     }));
 
     // Per-seller tax invoices for this order (Phase 6 — one per seller). The customer can view/

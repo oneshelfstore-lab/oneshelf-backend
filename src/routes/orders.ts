@@ -133,9 +133,11 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
 
     // Determine payment status. Every order starts PENDING; online orders flip to
     // PAID only after Razorpay verification in /:id/pay (which also arms the OTP).
-    // Exception: if store credit covers the WHOLE bill (₹0 due) on an online order, there's nothing
-    // to charge via Razorpay → settle it as PAID right at placement.
-    const fullyWalletPaid = paymentMethod !== "COD" && totals.totalAmount === 0 && totals.walletApplied > 0;
+    // Exception: if store credit covers the WHOLE bill (₹0 due) there is nothing left to collect —
+    // not via Razorpay, and not at the door either — so settle it as PAID right at placement.
+    // Deliberately NOT gated on paymentMethod any more: a COD order with ₹0 due used to stay
+    // PENDING and hand the delivery agent a "collect ₹0" job that could never be closed out.
+    const fullyWalletPaid = totals.totalAmount === 0 && totals.walletApplied > 0;
     const initialPaymentStatus = fullyWalletPaid ? "PAID" : "PENDING";
     const needsOtp = orderRequiresOtp(initialPaymentStatus, totals.totalAmount);
 

@@ -75,6 +75,7 @@ function formatProductForApp(product: any) {
     imageUrls: product.imageUrls,
     searchKeywords: product.searchKeywords,
     isActive: product.isActive,
+    createdAt: product.createdAt,
     variants: product.variants?.map((v: any) => {
       const base = formatVariantForApp(v, isLoose);
       // Private merchant fields — exposed ONLY on this seller-scoped serializer (never the customer one)

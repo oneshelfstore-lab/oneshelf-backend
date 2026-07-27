@@ -18,8 +18,11 @@ function gstinChecksumValid(gstin: string): boolean {
   return GSTIN_CHARS[checkIdx] === gstin[14];
 }
 
-// GSTIN: 2-digit state + 10-char PAN + 1 entity + 1Z + 1 checksum
-const GSTIN_FORMAT = /^\d{2}[A-Z]{5}\d{4}[A-Z]\d[Z][A-Z\d]$/;
+// GSTIN: 2-digit state + 10-char PAN + 1 entity + 1 Z + 1 checksum.
+// ⚠️ The entity char is [1-9A-Z], NOT \d. It counts registrations under the same PAN in the same
+// state and rolls over to letters after 9, so the old `\d` here rejected the genuine GSTIN of any
+// business with 10+ registrations in one state. (0 is excluded — numbering starts at 1.)
+const GSTIN_FORMAT = /^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z][Z][A-Z\d]$/;
 
 export function isValidGstin(gstin: string): { valid: boolean; error?: string } {
   if (gstin.length !== 15) return { valid: false, error: "GSTIN must be exactly 15 characters" };

@@ -368,6 +368,75 @@ router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
+// ─── POST /:id/revert-to-customer — undo a seller conversion ──────
+// Mirrors ownerStaff.ts's delivery-agent demote, but a seller needs more unwinding than a rider.
+//
+// WHY THIS EXISTS: provisioning a seller flips `User.role` on the person's EXISTING row (their old
+// customer account) — it never creates a second login. Get that wrong (approved the wrong
+// application, they changed their mind) and the person is stuck on the partner side of the app with
+// their real customer data unreachable. This is the way back.
+//
+// The Seller row is KEPT, never deleted — SubOrders, invoices, payouts and the commission/TCS/TDS
+// ledger all reference it, and orphaning those would corrupt the books. It's deactivated instead.
+router.post("/:id/revert-to-customer", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const seller = await prisma.seller.findUnique({
+      where: { id },
+      select: { id: true, name: true, isHouse: true, ownerUserId: true, outstandingBalance: true },
+    });
+    if (!seller) throw new NotFoundError("Seller", id);
+
+    // The house store IS the shop. Reverting it would demote the co-manager and hide the store's own
+    // catalog from every customer.
+    if (seller.isHouse) {
+      throw new ValidationError("The house store can't be reverted — manage it in Store Settings.");
+    }
+
+    // Refuse while anything is still owed or in flight. Reverting mid-order would leave a live order
+    // nobody can pack, and reverting with a balance would strand money the store still owes them.
+    if (Number(seller.outstandingBalance) > 0) {
+      throw new ValidationError(
+        `${seller.name} is still owed Rs.${Number(seller.outstandingBalance).toFixed(2)} — pay them out first.`,
+      );
+    }
+    const inFlight = await prisma.subOrder.count({
+      where: { sellerId: id, status: { notIn: ["COLLECTED", "CANCELLED"] } },
+    });
+    if (inFlight > 0) {
+      throw new ValidationError(
+        `${seller.name} has ${inFlight} order${inFlight === 1 ? "" : "s"} still being fulfilled — finish or cancel those first.`,
+      );
+    }
+
+    const deactivatedProducts = await prisma.$transaction(async (tx) => {
+      // ⚠️ Load-bearing: the customer catalog filters on CatalogProduct.isActive and NEVER on seller
+      // status (verified in catalog.ts — every query is `isActive: true` with the seller merely
+      // `include`d). Deactivating the Seller alone would leave their listings on sale with nobody
+      // able to fulfil them, so the products have to be taken down explicitly.
+      const { count } = await tx.catalogProduct.updateMany({
+        where: { sellerId: id, isActive: true },
+        data: { isActive: false },
+      });
+      await tx.seller.update({
+        where: { id },
+        data: { isActive: false, status: "SUSPENDED" },
+      });
+      if (seller.ownerUserId) {
+        await tx.user.update({ where: { id: seller.ownerUserId }, data: { role: "CUSTOMER" } });
+      }
+      return count;
+    });
+
+    res.json({
+      success: true,
+      data: { id: seller.id, deactivatedProducts, demotedUser: seller.ownerUserId != null },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // ─── POST /:id/payout — settle the seller's unsettled sub-orders ──
 // Sums every unsettled SubOrder, creates a SellerPayout covering them, marks them settled, and
 // decrements the running balance. This is the manual-ledger settlement (no Razorpay Route yet).

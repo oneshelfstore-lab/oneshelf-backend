@@ -324,15 +324,32 @@ export async function applyStockEdit(
       }
       throw e;
     }
-  } else if (newCostPrice != null && variant.costPrice != null && Math.abs(newCostPrice - Number(variant.costPrice)) > EPS) {
-    const oldest = await tx.stockBatch.findFirst({
-      where: { variantId, qtyRemaining: { gt: 0 } },
-      orderBy: { receivedAt: "asc" },
-      select: { id: true },
-    });
-    if (oldest) {
-      await tx.stockBatch.update({ where: { id: oldest.id }, data: { unitCost: newCostPrice } });
-      await recomputeRollupCost(tx, variantId);
+  } else if (newCostPrice != null) {
+    // Cost-only edit (stock unchanged). Two traps used to make this a SILENT NO-OP, which is why an
+    // owner editing a cost price watched it "revert" to the old value on the next read:
+    //   1. the branch also required `variant.costPrice != null`, so a cost could never be set on a
+    //      variant that had none yet;
+    //   2. it only ever wrote through a StockBatch, and `recomputeRollupCost` early-returns when
+    //      there are no batches — so every pre-FIFO variant (a rollup with zero batches behind it,
+    //      i.e. most of the catalogue until backfillStockBatches.ts is finally run) dropped the edit.
+    const current = variant.costPrice != null ? Number(variant.costPrice) : null;
+    if (current == null || Math.abs(newCostPrice - current) > EPS) {
+      const oldest = await tx.stockBatch.findFirst({
+        where: { variantId, qtyRemaining: { gt: 0 } },
+        orderBy: { receivedAt: "asc" },
+        select: { id: true },
+      });
+      if (oldest) {
+        await tx.stockBatch.update({ where: { id: oldest.id }, data: { unitCost: newCostPrice } });
+        // ⚠️ The rollup is the weighted average across ALL remaining batches, so with several
+        // batches on hand the saved figure legitimately differs from the number typed — this
+        // reprices the oldest batch, it does not rewrite purchase history.
+        await recomputeRollupCost(tx, variantId);
+      } else {
+        // No batch to attach the cost to ⇒ the rollup column is the only record there is, so
+        // writing it directly IS the truth here, not a bypass of the batch engine.
+        await tx.productVariant.update({ where: { id: variantId }, data: { costPrice: newCostPrice } });
+      }
     }
   }
 }

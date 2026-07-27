@@ -55,6 +55,8 @@ function shape(s: any) {
     // The owner transfers payouts by hand, so they need the account to pay INTO — it was collected
     // at onboarding and then returned by nothing, leaving the manual payout with no destination.
     bankDetails: s.bankDetails ?? null,
+    // True while this seller is waiting on a kyc-change-request/approve|reject decision above.
+    kycChangeRequested: Boolean(s.kycChangeRequested),
     productCount: s._count?.products ?? 0,
     ownerUserId: s.ownerUserId,
     ownerName: s.ownerUser?.name ?? null,
@@ -435,6 +437,42 @@ router.post("/:id/revert-to-customer", async (req: FirebaseAuthRequest, res: Res
       success: true,
       data: { id: seller.id, deactivatedProducts, demotedUser: seller.ownerUserId != null },
     });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /:id/kyc-change-request/approve|reject — the owner's yes/no on a locked seller's "let me
+// edit my tax/bank details" ask (sellerAccount.ts's isKycLocked()). Approving grants ONE write,
+// consumed the moment the seller's next PUT actually changes a sensitive field — it does not itself
+// change any seller data. ──
+router.post("/:id/kyc-change-request/approve", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const seller = await prisma.seller.findUnique({ where: { id }, select: { id: true } });
+    if (!seller) throw new NotFoundError("Seller", id);
+    const updated = await prisma.seller.update({
+      where: { id },
+      data: { kycChangeRequested: false, kycEditUnlocked: true },
+      include: INCLUDE,
+    });
+    res.json({ success: true, data: shape(updated) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+router.post("/:id/kyc-change-request/reject", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const seller = await prisma.seller.findUnique({ where: { id }, select: { id: true } });
+    if (!seller) throw new NotFoundError("Seller", id);
+    const updated = await prisma.seller.update({
+      where: { id },
+      data: { kycChangeRequested: false, kycEditUnlocked: false },
+      include: INCLUDE,
+    });
+    res.json({ success: true, data: shape(updated) });
   } catch (e) {
     sendError(res, e);
   }

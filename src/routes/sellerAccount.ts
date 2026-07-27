@@ -73,6 +73,10 @@ function shapeProfile(s: any, agreementCurrent: boolean) {
     grievanceOfficerEmail: s.grievanceOfficerEmail,
     onboardingStatus: s.onboardingStatus,
     onboardingRejectionReason: s.onboardingRejectionReason,
+    // ─── KYC edit lock (see the schema comment on Seller.everApproved) ──
+    everApproved: Boolean(s.everApproved),
+    kycChangeRequested: Boolean(s.kycChangeRequested),
+    kycEditUnlocked: Boolean(s.kycEditUnlocked),
     // ─── Consent-version re-prompt (Phase 2) ──
     // True once this seller's LATEST granted partner-agreement consent matches the current
     // PARTNER_AGREEMENT_VERSION. False after a legal-text version bump — the app re-gates an
@@ -133,23 +137,61 @@ const updateSchema = z.object({
 
 // Fields that determine WHO the seller legally is or WHERE their payout money goes — the exact
 // things the owner reviewed to approve them. Silently letting these change post-approval defeats
-// the point of the review (see the sensitiveFieldChanged() call below).
+// the point of the review (see overwritesVerifiedField() below).
 const KYC_SENSITIVE_FIELDS = [
   "gstin", "pan", "fssaiNumber", "fssaiExpiry",
   "gstinDocUrl", "panDocUrl", "fssaiDocUrl", "bankProofUrl", "bankDetails",
 ] as const;
 
-/** True if any KYC-sensitive field actually PRESENT in this request differs from what's stored. */
-function sensitiveFieldChanged(parsedData: Record<string, unknown>, current: Record<string, unknown>): boolean {
+function isPresent(v: unknown): boolean {
+  return v !== null && v !== undefined && !(typeof v === "string" && v.trim() === "");
+}
+
+/**
+ * True if a KYC-sensitive field PRESENT in this request OVERWRITES a value the owner already
+ * verified. Filling in a field that was genuinely blank isn't "changing" anything — there's nothing
+ * verified there to protect — so a first-time fill doesn't need a change-request/unlock cycle; only
+ * a real swap (or a clear-then-refill, since clearing itself trips this the same way) does.
+ */
+export function overwritesVerifiedField(parsedData: Record<string, unknown>, current: Record<string, unknown>): boolean {
   return KYC_SENSITIVE_FIELDS.some((field) => {
     const next = parsedData[field];
     if (next === undefined) return false; // not part of this request — this is a partial save
     const prev = current[field];
+    if (!isPresent(prev)) return false; // nothing verified here yet
     const a = next instanceof Date ? next.getTime() : JSON.stringify(next ?? null);
     const b = prev instanceof Date ? prev.getTime() : JSON.stringify(prev ?? null);
     return a !== b;
   });
 }
+
+// True once this seller has EVER been approved (persists through a later change-request review
+// window, unlike `onboardingStatus` which moves back to PENDING_REVIEW during one) OR is a legacy/
+// direct-created row whose onboardingStatus already defaults to APPROVED. Either way, their KYC data
+// is locked unless explicitly unlocked below.
+export function isKycLocked(current: { onboardingStatus: string; everApproved: boolean }): boolean {
+  return current.onboardingStatus === "APPROVED" || current.everApproved;
+}
+
+// POST /kyc-change-request — a locked seller's "please let me edit" ask. Sets kycChangeRequested so
+// the owner sees it on the seller's card; owner accept/reject lives in ownerSellers.ts (they don't
+// call their own seller-scoped router). Idempotent no-op when not locked (nothing to unlock — the
+// normal onboarding form is already freely editable) or already unlocked (nothing to ask for).
+router.post("/kyc-change-request", async (req: SellerRequest, res: Response) => {
+  try {
+    const current = await prisma.seller.findUnique({
+      where: { id: req.sellerId },
+      select: { onboardingStatus: true, everApproved: true, kycEditUnlocked: true },
+    });
+    if (!current) throw new NotFoundError("Seller", req.sellerId ?? "");
+    const seller = isKycLocked(current) && !current.kycEditUnlocked
+      ? await prisma.seller.update({ where: { id: req.sellerId }, data: { kycChangeRequested: true } })
+      : await prisma.seller.findUniqueOrThrow({ where: { id: req.sellerId } });
+    res.json({ success: true, data: shapeProfile(seller, await isAgreementCurrent(seller.id)) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
 
 router.put("/", async (req: SellerRequest, res: Response) => {
   try {
@@ -159,19 +201,39 @@ router.put("/", async (req: SellerRequest, res: Response) => {
     const current = await prisma.seller.findUnique({
       where: { id: req.sellerId },
       select: {
-        onboardingStatus: true,
+        onboardingStatus: true, everApproved: true, kycEditUnlocked: true,
         gstin: true, pan: true, fssaiNumber: true, fssaiExpiry: true,
         gstinDocUrl: true, panDocUrl: true, fssaiDocUrl: true, bankProofUrl: true, bankDetails: true,
       },
     });
     if (!current) throw new NotFoundError("Seller", req.sellerId ?? "");
 
-    // An APPROVED seller changing GSTIN/PAN/FSSAI/bank/documents re-enters review with the NEW
-    // values — this does NOT suspend them (resolveSeller only blocks SUSPENDED/!isActive, never
-    // onboardingStatus, same as every other non-terminal status), it just puts the row back in
-    // front of the owner instead of quietly overwriting what was already verified.
-    const needsReReview = current.onboardingStatus === "APPROVED" &&
-      sensitiveFieldChanged(parsed.data as Record<string, unknown>, current as Record<string, unknown>);
+    // GSTIN embeds its holder's PAN at characters 3-12 — checked whenever this request touches
+    // EITHER field, against the EFFECTIVE post-write pair (a partial save might send only one).
+    // /onboarding/submit runs the same check at the end of first-time onboarding; this catches it on
+    // every save, locked or not — including a "first-time fill" below that's exempt from the lock
+    // itself but must still agree with whichever of the two was already verified.
+    if (parsed.data.gstin !== undefined || parsed.data.pan !== undefined) {
+      const nextGstin = (parsed.data.gstin ?? current.gstin) as string | null;
+      const nextPan = (parsed.data.pan ?? current.pan) as string | null;
+      if (nextGstin && nextPan && extractPanFromGstin(nextGstin) !== nextPan) {
+        throw new ValidationError(
+          `Your PAN (${nextPan}) doesn't match the PAN inside your GSTIN (${extractPanFromGstin(nextGstin)}). Check both.`,
+        );
+      }
+    }
+
+    const overwritesVerified = overwritesVerifiedField(parsed.data as Record<string, unknown>, current as Record<string, unknown>);
+    const locked = isKycLocked(current);
+
+    // A locked seller gets exactly ONE write once the owner unlocks them — enforced here, at the
+    // one place both entry points (SellerProfileTab's day-to-day save, SellerOnboardingScreen's
+    // "Edit application" for a seller mid a change-request review) actually land.
+    if (overwritesVerified && locked && !current.kycEditUnlocked) {
+      throw new ValidationError(
+        'Your tax and bank details are locked because your account is already approved. Tap "Request a data change" and wait for the owner to unlock editing before changing them.',
+      );
+    }
 
     const updated = await prisma.seller.update({
       where: { id: req.sellerId },
@@ -179,8 +241,13 @@ router.put("/", async (req: SellerRequest, res: Response) => {
         ...parsed.data,
         // Editing after submission means the owner would be reviewing stale data — un-submit so
         // the seller has to re-submit once they're done changing things.
-        ...(current.onboardingStatus === "PENDING_REVIEW" ? { onboardingStatus: "IN_PROGRESS" as const }
-          : needsReReview ? { onboardingStatus: "PENDING_REVIEW" as const }
+        ...(current.onboardingStatus === "PENDING_REVIEW" ? { onboardingStatus: "IN_PROGRESS" as const } : {}),
+        // Consuming the one-time unlock IS the re-review trigger — a locked seller can only reach
+        // this line right after the owner unlocked them, so this doubles as the moment we learn
+        // (or re-confirm) they've been approved at least once — `everApproved` persists that fact
+        // through the PENDING_REVIEW window this write is about to open.
+        ...(overwritesVerified && locked
+          ? { onboardingStatus: "PENDING_REVIEW" as const, everApproved: true, kycEditUnlocked: false }
           : {}),
       },
     });
@@ -208,20 +275,32 @@ router.put("/bank-details", async (req: SellerRequest, res: Response) => {
 
     const current = await prisma.seller.findUnique({
       where: { id: req.sellerId },
-      select: { onboardingStatus: true, bankDetails: true },
+      select: { onboardingStatus: true, everApproved: true, kycEditUnlocked: true, bankDetails: true },
     });
     if (!current) throw new NotFoundError("Seller", req.sellerId ?? "");
 
     const nextBank = { accountName, accountNumber, ifsc };
-    // Same re-review rule as PUT / above, applied to this route's own write path — this endpoint
-    // exists precisely so a post-approval seller can update their payout account, which is exactly
-    // the write that most needs a human to notice before real money starts moving to it.
-    const changed = JSON.stringify(current.bankDetails ?? null) !== JSON.stringify(nextBank);
+    // Only an OVERWRITE of an existing account is locked — adding a payout account for the first
+    // time isn't "changing" a verified value, there's nothing verified there yet.
+    const overwritesExisting = current.bankDetails != null && JSON.stringify(current.bankDetails) !== JSON.stringify(nextBank);
+    const locked = isKycLocked(current);
+
+    // Same one-time-unlock rule as PUT / above, applied to this route's own write path — this
+    // endpoint exists precisely so a post-approval seller can update their payout account, which is
+    // exactly the write that most needs a human to notice before real money starts moving to it.
+    if (overwritesExisting && locked && !current.kycEditUnlocked) {
+      throw new ValidationError(
+        'Your payout account is locked because your account is already approved. Tap "Request a data change" and wait for the owner to unlock editing before changing it.',
+      );
+    }
+
     const updated = await prisma.seller.update({
       where: { id: req.sellerId },
       data: {
         bankDetails: nextBank,
-        ...(current.onboardingStatus === "APPROVED" && changed ? { onboardingStatus: "PENDING_REVIEW" as const } : {}),
+        ...(overwritesExisting && locked
+          ? { onboardingStatus: "PENDING_REVIEW" as const, everApproved: true, kycEditUnlocked: false }
+          : {}),
       },
     });
     res.json({ success: true, data: shapeProfile(updated, await isAgreementCurrent(updated.id)) });

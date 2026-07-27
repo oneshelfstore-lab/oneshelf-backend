@@ -1748,6 +1748,15 @@ model Seller {
   onboardingStatus          OnboardingStatus @default(APPROVED)
   onboardingRejectionReason String?
   agreementVersion          String?
+  // Locks GSTIN/PAN/FSSAI/documents/bank details once approved — the owner vetted those values, so
+  // a seller can't silently swap them post-approval. `everApproved` persists the "was approved"
+  // fact even while `onboardingStatus` is temporarily away from APPROVED (mid a change-request
+  // review), so the lock survives that window instead of quietly lifting. `kycChangeRequested` is
+  // the seller's "please let me edit" ask; `kycEditUnlocked` is the owner's one-time yes, consumed
+  // by the seller's next sensitive-field write (routes/sellerAccount.ts).
+  everApproved       Boolean @default(false)
+  kycChangeRequested Boolean @default(false)
+  kycEditUnlocked    Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

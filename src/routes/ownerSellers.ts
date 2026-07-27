@@ -300,7 +300,16 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           name,
           phone,
           ownerUserId: userId,
-          status: "APPROVED",
+          // A hand-added seller goes through the SAME KYC gate as one who applied via "Partner with
+          // us" (ownerPartnerApplications.ts provisions this exact shape) — otherwise the owner can
+          // create a live marketplace seller with no GSTIN/PAN/FSSAI/grievance-officer on file,
+          // which is the compliance hole the onboarding queue exists to close.
+          // They can still sign in (resolveSeller only blocks SUSPENDED); NavGraph routes them to
+          // the onboarding form, and auto-payout skips them until status flips to APPROVED.
+          // Escape hatch: "Approve without KYC" in the Onboarding queue = the old behaviour, but as
+          // a deliberate tap instead of a silent default.
+          status: "PENDING",
+          onboardingStatus: "NOT_STARTED",
           commissionPct: parsed.data.commissionPct ?? 5,
           city: parsed.data.city ?? null,
           gstin: parsed.data.gstin ?? null,

@@ -52,6 +52,9 @@ function shape(s: any) {
     pan: s.pan,
     entityType: s.entityType,
     city: s.city,
+    // The owner transfers payouts by hand, so they need the account to pay INTO — it was collected
+    // at onboarding and then returned by nothing, leaving the manual payout with no destination.
+    bankDetails: s.bankDetails ?? null,
     productCount: s._count?.products ?? 0,
     ownerUserId: s.ownerUserId,
     ownerName: s.ownerUser?.name ?? null,
@@ -253,7 +256,7 @@ const createSchema = z.object({
   // under a malformed GSTIN (COMPLIANCE_PLAN.md P2-3).
   gstin: z.string().optional().refine(
     (v) => !v || isValidGstin(v).valid,
-    { message: "Invalid GSTIN — check the 15-character format and checksum" },
+    (v) => ({ message: v ? isValidGstin(v).error ?? "Invalid GSTIN" : "Invalid GSTIN" }),
   ),
 });
 

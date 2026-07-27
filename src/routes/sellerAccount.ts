@@ -10,9 +10,11 @@ import { PARTNER_AGREEMENT_VERSION } from "../data/onboardingAgreements.js";
 
 // A GSTIN is optional (a seller may be unregistered) but, when present, must be well-formed +
 // checksum-valid so invoices are never issued under a malformed GSTIN (COMPLIANCE_PLAN.md P2-3).
+// The message is a function so the seller is told WHICH rule failed (wrong length / wrong shape /
+// bad check digit) instead of a vague catch-all — isValidGstin already knows.
 const optionalGstin = z.string().max(15).optional().nullable().refine(
   (v) => v == null || v === "" || isValidGstin(v).valid,
-  { message: "Invalid GSTIN — check the 15-character format and checksum" },
+  (v) => ({ message: v ? isValidGstin(v).error ?? "Invalid GSTIN" : "Invalid GSTIN" }),
 );
 
 // FSSAI license/registration numbers are always exactly 14 digits (Phase 2,

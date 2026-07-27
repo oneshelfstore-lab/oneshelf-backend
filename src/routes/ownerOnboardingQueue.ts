@@ -38,7 +38,7 @@ const STATUS_RANK: Record<OnboardingStatus, number> = {
 async function shapeSellerRow(s: {
   id: string; slug: string; name: string; phone: string | null; gstin: string | null; pan: string | null;
   fssaiNumber: string | null; fssaiExpiry: Date | null; fssaiDocUrl: string | null; gstinDocUrl: string | null;
-  panDocUrl: string | null; bankProofUrl: string | null; grievanceOfficerName: string | null;
+  panDocUrl: string | null; bankProofUrl: string | null; bankDetails: unknown; grievanceOfficerName: string | null;
   grievanceOfficerPhone: string | null; grievanceOfficerEmail: string | null; shopAddress: string | null;
   city: string | null; onboardingStatus: string; onboardingRejectionReason: string | null;
   createdAt: Date; ownerUser: { name: string; phone: string | null } | null;
@@ -60,6 +60,8 @@ async function shapeSellerRow(s: {
     fssaiExpiry: s.fssaiExpiry,
     shopAddress: s.shopAddress,
     city: s.city,
+    // Part of the KYC check: the typed account must match the bank-proof photo below.
+    bankDetails: s.bankDetails ?? null,
     grievanceOfficerName: s.grievanceOfficerName,
     grievanceOfficerPhone: s.grievanceOfficerPhone,
     grievanceOfficerEmail: s.grievanceOfficerEmail,
@@ -81,6 +83,7 @@ async function shapeDeliveryRow(p: {
   selfieUrl: string | null; vehicleType: string | null; dlNumber: string | null; dlDocUrl: string | null;
   rcNumber: string | null; rcDocUrl: string | null; insuranceExpiry: Date | null; insuranceDocUrl: string | null;
   emergencyContactName: string | null; emergencyContactPhone: string | null; policeVerificationDocUrl: string | null;
+  bankDetails: unknown;
   onboardingStatus: string; rejectionReason: string | null; createdAt: Date;
   user: { name: string; phone: string | null };
 }) {
@@ -103,6 +106,7 @@ async function shapeDeliveryRow(p: {
     insuranceExpiry: p.insuranceExpiry,
     emergencyContactName: p.emergencyContactName,
     emergencyContactPhone: p.emergencyContactPhone,
+    bankDetails: p.bankDetails ?? null,
     documents: {
       idDocUrl: p.idDocUrl,
       selfieUrl: p.selfieUrl,

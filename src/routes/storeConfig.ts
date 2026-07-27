@@ -1,5 +1,6 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
+import { optionalPanSchema } from "../validators/index.js";
 import prisma from "../lib/prisma.js";
 import { sendError } from "../lib/errors.js";
 import {
@@ -25,11 +26,13 @@ const updateSchema = z.object({
   storePhone: z.string().max(15).optional().nullable(),
   storeEmail: z.string().email().optional().nullable(),
   gstin: z.string().length(15).optional().nullable(),
-  pan: z.string().length(10).optional().nullable(),
+  pan: optionalPanSchema,
   stateCode: z.string().length(2).optional(),
   legalName: z.string().max(200).optional().nullable(),
   deliveryDateLabel: z.string().max(50).optional(),
   freeDeliveryAbove: z.number().min(0).optional(),
+  // Minimum cart subtotal to place an order. 0 = unenforced.
+  minOrderValue: z.number().min(0).optional(),
   isOrderingAllowed: z.boolean().optional(),
   operatingHoursStart: z.string().max(10).optional().nullable(),
   operatingHoursEnd: z.string().max(10).optional().nullable(),

@@ -1,5 +1,6 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
+import { optionalPanSchema } from "../validators/index.js";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import {
@@ -94,7 +95,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
 
 // ─── PUT / — progressive save. Document fields are Firebase Storage URLs, uploaded client-side ──
 const updateSchema = z.object({
-  panNumber: z.string().max(10).optional().nullable(),
+  panNumber: optionalPanSchema,
   idDocType: z.enum(["AADHAAR", "VOTER_ID", "DL"]).optional().nullable(),
   idDocUrl: z.string().max(500).optional().nullable(),
   selfieUrl: z.string().max(500).optional().nullable(),

@@ -5,7 +5,7 @@ import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { memoCache } from "../lib/httpCache.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
-import { isValidGstin } from "../validators/index.js";
+import { isValidGstin, optionalPanSchema, extractPanFromGstin } from "../validators/index.js";
 import { PARTNER_AGREEMENT_VERSION } from "../data/onboardingAgreements.js";
 
 // A GSTIN is optional (a seller may be unregistered) but, when present, must be well-formed +
@@ -114,7 +114,7 @@ const updateSchema = z.object({
   lng: z.number().optional().nullable(),
   phone: z.string().max(15).optional().nullable(),
   gstin: optionalGstin,
-  pan: z.string().max(10).optional().nullable(),
+  pan: optionalPanSchema,
   bankDetails: z.any().optional().nullable(),
   // Onboarding KYC (Phase 1) — document fields are Firebase Storage URLs, uploaded client-side
   // (same convention as every other photo field in this app; see util/ImageUploadUtil.kt).
@@ -207,6 +207,16 @@ router.post("/onboarding/submit", async (req: SellerRequest, res: Response) => {
     // unconditional on those).
     if (missing.length > 0) {
       throw new ValidationError(`Please complete: ${missing.join(", ")}`, missing);
+    }
+
+    // A GSTIN embeds its holder's PAN at characters 3-12, so if both are on file and disagree, one
+    // of them is wrong. Free cross-check, and it catches the common case of someone entering a
+    // personal PAN against a firm's GSTIN. Checked at submit (not in the field schemas) because the
+    // PUT is a progressive partial save — either field can legitimately arrive on its own.
+    if (seller.gstin && seller.pan && extractPanFromGstin(seller.gstin) !== seller.pan) {
+      throw new ValidationError(
+        `Your PAN (${seller.pan}) doesn't match the PAN inside your GSTIN (${extractPanFromGstin(seller.gstin)}). Check both.`,
+      );
     }
 
     const [hasAgreementConsent, hasSensitiveConsent] = await Promise.all([

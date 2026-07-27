@@ -45,6 +45,7 @@ export function extractPanFromGstin(gstin: string): string {
   return gstin.substring(2, 12);
 }
 
+
 // GSTIN zod schema
 export const gstinSchema = z.string().length(15).refine(
   (v) => isValidGstin(v).valid,
@@ -56,11 +57,22 @@ export const upGstinSchema = z.string().length(15).refine(
   (v) => ({ message: isUpGstin(v).error || "Invalid GSTIN" }),
 );
 
-// PAN: 5 letters + 4 digits + 1 letter
+// PAN: 5 letters + 4 digits + 1 letter. No public check digit exists, so format is all we can
+// verify. Character 4 encodes holder type (P individual, C company, H HUF, F firm…) — deliberately
+// NOT enforced: the published set varies by source, and falsely rejecting a legitimate PAN is worse
+// than accepting an odd one.
 export const panSchema = z.string().regex(
   /^[A-Z]{5}\d{4}[A-Z]$/,
   "Invalid PAN format (expected: 10 chars, e.g. AAACR5055K)",
 );
+
+/**
+ * PAN on an optional field: absent/null/blank clears it, anything present must be well-formed.
+ *
+ * Every KYC route used to declare `z.string().max(10)` here, which accepted arbitrary junk on a
+ * Rule-6 compliance field — `panSchema` existed the whole time and simply wasn't wired in.
+ */
+export const optionalPanSchema = z.union([z.literal(""), panSchema]).optional().nullable();
 
 // Indian phone: 10 digits starting with 6-9
 export const phoneSchema = z.string().regex(

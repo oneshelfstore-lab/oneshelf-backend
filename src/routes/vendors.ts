@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError, sendError } from "../lib/errors.js";
-import { isUpGstin } from "../validators/index.js";
+import { isUpGstin, optionalPanSchema } from "../validators/index.js";
 
 const router = Router();
 
@@ -12,7 +12,7 @@ const vendorBaseSchema = z.object({
   name: z.string().min(1).max(200),
   gstin: z.string().max(15).optional().nullable(),
   vendorType: z.enum(["REGISTERED", "UNREGISTERED", "COMPOSITION"]).default("REGISTERED"),
-  pan: z.string().max(10).optional().nullable(),
+  pan: optionalPanSchema,
   phone: z.string().regex(/^[6-9]\d{9}$/, "Invalid Indian phone number"),
   email: z.string().email().optional().or(z.literal("")).nullable(),
   address: z.any().optional().nullable(),

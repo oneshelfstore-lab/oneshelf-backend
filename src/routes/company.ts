@@ -3,7 +3,7 @@ import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { sendError, NotFoundError } from "../lib/errors.js";
 import { requireRole, type AuthRequest } from "../middleware/auth.js";
-import { isUpGstin } from "../validators/index.js";
+import { isUpGstin, panSchema } from "../validators/index.js";
 import { bustStoreState } from "../lib/stateCodes.js";
 
 const router = Router();
@@ -11,7 +11,8 @@ const router = Router();
 const companySchema = z.object({
   legalName: z.string().min(1).max(200),
   tradeName: z.string().min(1).max(200),
-  pan: z.string().regex(/^[A-Z]{5}\d{4}[A-Z]$/, "Invalid PAN format"),
+  pan: panSchema, // was a duplicate of PAN_FORMAT inline; now shares validators/index.ts
+
   gstin: z.string().length(15).refine(
     (v) => isUpGstin(v).valid,
     (v) => ({ message: isUpGstin(v).error || "Invalid GSTIN" }),

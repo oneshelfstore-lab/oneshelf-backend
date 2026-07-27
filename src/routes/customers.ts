@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError, sendError } from "../lib/errors.js";
-import { isUpGstin, extractPanFromGstin } from "../validators/index.js";
+import { isUpGstin, extractPanFromGstin, optionalPanSchema } from "../validators/index.js";
 
 const router = Router();
 
@@ -18,7 +18,7 @@ const customerBaseSchema = z.object({
   email: z.string().email().optional().or(z.literal("")),
   gstin: z.string().max(15).optional().nullable(),
   customerType: z.enum(["B2B", "B2C"]).default("B2C"),
-  panNumber: z.string().max(10).optional().nullable(),
+  panNumber: optionalPanSchema,
   billingAddress: z.any().optional().nullable(),
   shippingAddress: z.any().optional().nullable(),
   creditLimit: z.number().min(0).optional().nullable(),

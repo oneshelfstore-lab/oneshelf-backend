@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isValidGstin, extractPanFromGstin } from "../index.js";
+import { isValidGstin, extractPanFromGstin, panSchema, optionalPanSchema } from "../index.js";
 
 /**
  * Pins the GSTIN format + checksum rules. The regression that prompted these: the entity character
@@ -57,5 +57,41 @@ describe("isValidGstin", () => {
 
   it("extracts the PAN from positions 3-12", () => {
     expect(extractPanFromGstin(withCheck("09ABCDE1234F2Z"))).toBe("ABCDE1234F");
+  });
+});
+
+/**
+ * PAN inputs on every KYC route used to be `z.string().max(10)`, which accepted arbitrary junk on a
+ * Rule-6 compliance field (a real submission arrived as "t8xtz744ss84x8t5d"). `panSchema` already
+ * existed and simply wasn't wired in; these pin the shape it enforces.
+ */
+describe("panSchema", () => {
+  it("accepts a well-formed PAN", () => {
+    expect(panSchema.safeParse("ABCDE1234F").success).toBe(true);
+    expect(panSchema.safeParse("AAACR5055K").success).toBe(true);
+  });
+
+  it("rejects the junk shapes the old max(10) rule let through", () => {
+    expect(panSchema.safeParse("t8xtz744ss").success).toBe(false); // lower case + digits mixed in
+    expect(panSchema.safeParse("ABCDE1234").success).toBe(false);  // 9 chars
+    expect(panSchema.safeParse("ABCD12345F").success).toBe(false); // only 4 leading letters
+    expect(panSchema.safeParse("ABCDE12345").success).toBe(false); // missing trailing letter
+    expect(panSchema.safeParse("abcde1234f").success).toBe(false); // lower case
+  });
+
+  it("treats blank/absent as cleared on the optional variant", () => {
+    expect(optionalPanSchema.safeParse("").success).toBe(true);
+    expect(optionalPanSchema.safeParse(null).success).toBe(true);
+    expect(optionalPanSchema.safeParse(undefined).success).toBe(true);
+    // …but a value that IS present still has to be well-formed.
+    expect(optionalPanSchema.safeParse("nonsense").success).toBe(false);
+  });
+
+  it("a GSTIN's embedded PAN round-trips against panSchema (the submit cross-check)", () => {
+    const gstin = withCheck("09ABCDE1234F2Z");
+    const embedded = extractPanFromGstin(gstin);
+    expect(panSchema.safeParse(embedded).success).toBe(true);
+    expect(embedded).toBe("ABCDE1234F");
+    expect(embedded).not.toBe("ZZZZZ9999Z"); // a mismatched PAN is what submit now rejects
   });
 });

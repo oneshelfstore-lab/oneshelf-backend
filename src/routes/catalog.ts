@@ -77,6 +77,27 @@ const SELLER_SELECT = {
   select: { id: true, name: true, isHouse: true, grievanceOfficerName: true, grievanceOfficerPhone: true },
 } as const;
 
+/**
+ * Spread into EVERY customer-facing product query: a listing is only publicly visible while its
+ * seller is actually trading.
+ *
+ * Suspending a seller used to leave their products on sale with nobody able to fulfil them — the
+ * catalog filtered `CatalogProduct.isActive` and never looked at seller status, so "suspend" was a
+ * label, not a kill switch.
+ *
+ * Deliberately a READ-TIME filter, not a write. Deactivating each product on suspend would keep no
+ * record of which ones were live beforehand, so resuming the seller would leave the whole catalogue
+ * hidden and the owner re-activating listings by hand. This way resume restores the storefront exactly.
+ *
+ * A null seller means the house store (see the schema note on `CatalogProduct.sellerId`), which is
+ * why this is phrased as a `NOT` over the relation — a positive `seller: { isActive: true }` filter
+ * would silently drop every legacy/house row. The OR sits INSIDE the `NOT` so spreading this can
+ * never clobber a query's own top-level `OR` (the search query has one).
+ */
+const SELLER_TRADING = {
+  NOT: { seller: { OR: [{ isActive: false }, { status: "SUSPENDED" as const }] } },
+};
+
 // ─── Free-gift promo badge ("buy N, get M free") ─────────────────────
 // A tiny secondary lookup so the product list/detail can advertise an active offer on its trigger
 // variant — cached alongside the other discovery data (small dataset, bust-on-write from the owner
@@ -146,7 +167,7 @@ publicCatalogRouter.get("/", cacheControl(CATALOG_LIST_TTL), async (req: Request
     if (!parsed.success) throw new ValidationError("Invalid query", parsed.error.errors);
     const { q, category, page, limit } = parsed.data;
 
-    const where: any = { isActive: true };
+    const where: any = { isActive: true, ...SELLER_TRADING };
 
     if (q) {
       where.OR = [
@@ -234,6 +255,7 @@ publicCatalogRouter.get("/suggest", cacheControl(CATALOG_LIST_TTL), async (req: 
     const products: any[] = await prisma.catalogProduct.findMany({
       where: {
         isActive: true,
+        ...SELLER_TRADING,
         OR: [
           { name: { contains: q, mode: "insensitive" } },
           { brand: { contains: q, mode: "insensitive" } },
@@ -258,7 +280,7 @@ publicCatalogRouter.get("/suggest", cacheControl(CATALOG_LIST_TTL), async (req: 
         const missingIds = rows.map((r) => r.id).filter((id) => !known.has(id));
         if (missingIds.length > 0) {
           const fuzzy = await prisma.catalogProduct.findMany({
-            where: { id: { in: missingIds }, isActive: true },
+            where: { id: { in: missingIds }, isActive: true, ...SELLER_TRADING },
             select: suggestSelect,
           });
           products.push(...fuzzy);
@@ -296,7 +318,7 @@ publicCatalogRouter.get("/trending", cacheControl(DISCOVERY_TTL_SECONDS), async 
       const productIds = [...new Set(variants.map((v) => v.productId))].slice(0, 10);
 
       const products = await prisma.catalogProduct.findMany({
-        where: { id: { in: productIds }, isActive: true },
+        where: { id: { in: productIds }, isActive: true, ...SELLER_TRADING },
         select: suggestSelect,
       });
       return products.map(toSuggestion);
@@ -344,7 +366,7 @@ publicCatalogRouter.get("/trending-products", cacheControl(DISCOVERY_TTL_SECONDS
     if (topProductIds.length === 0) return [];
 
     const products = await prisma.catalogProduct.findMany({
-      where: { id: { in: topProductIds }, isActive: true },
+      where: { id: { in: topProductIds }, isActive: true, ...SELLER_TRADING },
       include: {
         variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
         category: { select: { slug: true, name: true } },
@@ -371,7 +393,7 @@ publicCatalogRouter.get("/deal-today", cacheControl(DISCOVERY_TTL_SECONDS), asyn
   try {
     const data = await memoCache.get("products:deal-today", DISCOVERY_TTL_MS, async () => {
       const products = await prisma.catalogProduct.findMany({
-        where: { isActive: true, variants: { some: { isActive: true, stock: { gt: 0 } } } },
+        where: { isActive: true, ...SELLER_TRADING, variants: { some: { isActive: true, stock: { gt: 0 } } } },
         include: {
           variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
           category: { select: { slug: true, name: true } },
@@ -418,6 +440,7 @@ publicCatalogRouter.get("/under-99", cacheControl(CATALOG_LIST_TTL), async (_req
     const products = await prisma.catalogProduct.findMany({
       where: {
         isActive: true,
+        ...SELLER_TRADING,
         featuredIn99Store: true,
         variants: { some: { isActive: true, stock: { gt: 0 }, sellingPrice: { lte: 99 } } },
       },
@@ -456,7 +479,12 @@ publicCatalogRouter.post("/stock-check", async (req: Request, res: Response) => 
         packageSize: true,
         productId: true,
         product: {
-          select: { id: true, name: true, categoryId: true, isActive: true, productType: true },
+          select: {
+            id: true, name: true, categoryId: true, isActive: true, productType: true,
+            // Internal only — the response below is built from explicit fields, so selecting this
+            // doesn't change the wire shape. Used to zero out a suspended seller's stock.
+            seller: { select: { isActive: true, status: true } },
+          },
         },
       },
     });
@@ -479,6 +507,7 @@ publicCatalogRouter.post("/stock-check", async (req: Request, res: Response) => 
         where: {
           categoryId: { in: categoryIds },
           isActive: true,
+          ...SELLER_TRADING,
           id: { notIn: [...oosProducts.keys()] },
           variants: { some: { isActive: true, stock: { gt: 0 } } },
         },
@@ -511,7 +540,11 @@ publicCatalogRouter.post("/stock-check", async (req: Request, res: Response) => 
       // cart stepper's ceiling and checkout's quantity check compare like with like. A de-listed
       // variant/product reads as 0 rather than as its leftover stock.
       const packageSize = Number(v.packageSize) || 1;
-      const stock = !v.isActive || !v.product.isActive
+      // A suspended seller's item reads 0 too, so the cart stepper caps at 0 and checkout's
+      // quantity re-check blocks it — same treatment as a de-listed product.
+      const sellerHalted = v.product.seller != null
+        && (!v.product.seller.isActive || v.product.seller.status === "SUSPENDED");
+      const stock = !v.isActive || !v.product.isActive || sellerHalted
         ? 0
         : isLooseType(v.product.productType)
           ? Math.round(Number(v.stock) / packageSize)
@@ -549,6 +582,7 @@ publicCatalogRouter.get("/:id/alternatives", cacheControl(CATALOG_LIST_TTL), asy
       where: {
         categoryId: product.categoryId,
         isActive: true,
+        ...SELLER_TRADING,
         id: { not: product.id },
         variants: { some: { isActive: true, stock: { gt: 0 } } },
       },
@@ -570,8 +604,12 @@ publicCatalogRouter.get("/:id/alternatives", cacheControl(CATALOG_LIST_TTL), asy
 // GET /api/app/products/:id
 publicCatalogRouter.get("/:id", cacheControl(CATALOG_LIST_TTL), async (req: Request, res: Response) => {
   try {
-    const product = await prisma.catalogProduct.findUnique({
-      where: { id: req.params.id },
+    // findFirst, not findUnique: only findFirst accepts a relation filter, and a suspended seller's
+    // product must 404 rather than render an un-buyable page. `id` is unique so this costs the same.
+    const product = await prisma.catalogProduct.findFirst({
+      // String(): req.params is typed `string | string[]` project-wide (the systemic tsc-baseline
+      // wart) — findFirst's typed `where` surfaces it, so pin it here rather than inherit it.
+      where: { id: String(req.params.id ?? ""), ...SELLER_TRADING },
       include: {
         variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
         category: { select: { slug: true, name: true } },

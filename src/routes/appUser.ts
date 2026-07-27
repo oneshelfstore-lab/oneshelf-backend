@@ -130,7 +130,14 @@ router.get("/essentials", async (req: FirebaseAuthRequest, res: Response) => {
     if (candidates.length === 0) return res.json({ success: true, data: [] });
 
     const products = await prisma.catalogProduct.findMany({
-      where: { id: { in: candidates.map((c) => c.pid) }, isActive: true },
+      // Mirrors catalog.ts's SELLER_TRADING — a suspended seller's products leave the storefront,
+      // this rail included. Inlined rather than exported, the same way this file already duplicates
+      // SELLER_SELECT's shape just below.
+      where: {
+        id: { in: candidates.map((c) => c.pid) },
+        isActive: true,
+        NOT: { seller: { OR: [{ isActive: false }, { status: "SUSPENDED" as const }] } },
+      },
       include: {
         variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
         category: { select: { slug: true, name: true } },
@@ -314,7 +321,12 @@ router.get("/favorites", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
     const favorites = await prisma.favorite.findMany({
-      where: { userId },
+      // Drop favourites whose seller is suspended (mirrors catalog.ts's SELLER_TRADING). The row is
+      // kept — the heart comes back on its own when the seller resumes.
+      where: {
+        userId,
+        product: { NOT: { seller: { OR: [{ isActive: false }, { status: "SUSPENDED" as const }] } } },
+      },
       orderBy: { createdAt: "desc" },
       include: {
         product: {

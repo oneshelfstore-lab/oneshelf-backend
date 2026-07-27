@@ -8,6 +8,7 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { shapePartnerApplication } from "./partnerApplications.js";
+import { notifyPartnerApproved } from "../services/fcmNotifier.js";
 
 // Owner inbox for "Partner with us" applications. Mounted at
 // /api/app/owner/partner-applications (Firebase-auth + OWNER, mirrors ownerQuotes).
@@ -42,19 +43,21 @@ async function uniqueSlug(base: string): Promise<string> {
 // only to grandfather rows that pre-date this feature). If a Seller is already linked to this phone
 // (e.g. the owner manually onboarded them before this lead was reviewed), skip provisioning —
 // nothing to create, just triage the lead.
-async function provisionSeller(app: { businessName: string; contactName: string; phone: string; gstin: string | null; category: string | null }) {
+// Returns the provisioned user's id so the caller can notify them, or null when nothing was
+// provisioned (bad phone / already a seller) — in which case there is nothing to announce.
+async function provisionSeller(app: { businessName: string; contactName: string; phone: string; gstin: string | null; category: string | null }): Promise<string | null> {
   const phone = normalizePhone(app.phone);
-  if (phone.length !== 10) return; // shouldn't happen (already validated at submission), be defensive
+  if (phone.length !== 10) return null; // shouldn't happen (already validated at submission), be defensive
 
   const existingUser = await prisma.user.findFirst({
     where: { phone: { in: [phone, `+91${phone}`, `91${phone}`] } },
     orderBy: { createdAt: "asc" },
     include: { sellerAccount: { select: { id: true } } },
   });
-  if (existingUser?.sellerAccount) return; // already a seller — nothing to provision
+  if (existingUser?.sellerAccount) return null; // already a seller — nothing to provision
 
   const slug = await uniqueSlug(slugify(app.businessName || app.contactName));
-  await prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx) => {
     let userId: string;
     if (existingUser) {
       const keepName = existingUser.name && existingUser.name !== "App User" ? existingUser.name : app.contactName;
@@ -77,15 +80,17 @@ async function provisionSeller(app: { businessName: string; contactName: string;
         gstin: app.gstin ?? null,
       },
     });
+    return userId;
   });
 }
 
 // Approving a DELIVERY lead provisions the login (User, role=DELIVERY, matched/created by phone —
 // same resolution ownerStaff.ts POST / uses) and a stub DeliveryProfile. If a profile already
 // exists for this user, skip — nothing to create.
-async function provisionDeliveryRider(app: { contactName: string; phone: string }) {
+// Returns the provisioned user's id (see provisionSeller), or null when nothing was provisioned.
+async function provisionDeliveryRider(app: { contactName: string; phone: string }): Promise<string | null> {
   const phone = normalizePhone(app.phone);
-  if (phone.length !== 10) return;
+  if (phone.length !== 10) return null;
 
   const existing = await prisma.user.findFirst({
     where: { phone: { in: [phone, `+91${phone}`, `91${phone}`] } },
@@ -93,18 +98,19 @@ async function provisionDeliveryRider(app: { contactName: string; phone: string 
     include: { deliveryProfile: { select: { id: true } } },
   });
 
-  await prisma.$transaction(async (tx) => {
+  return prisma.$transaction(async (tx) => {
     let userId: string;
     if (existing) {
       const keepName = existing.name && existing.name !== "App User" ? existing.name : app.contactName;
       const u = await tx.user.update({ where: { id: existing.id }, data: { role: "DELIVERY", phone, name: keepName } });
       userId = u.id;
-      if (existing.deliveryProfile) return; // already has a profile — nothing more to do
+      if (existing.deliveryProfile) return null; // already has a profile — nothing more to do
     } else {
       const u = await tx.user.create({ data: { name: app.contactName, phone, role: "DELIVERY", phoneVerified: false } });
       userId = u.id;
     }
     await tx.deliveryProfile.create({ data: { userId, onboardingStatus: "NOT_STARTED" } });
+    return userId;
   });
 }
 
@@ -149,16 +155,21 @@ async function review(
       // lead. If this throws, the lead still gets marked approved; the owner can create the
       // seller/agent manually via the existing ownerSellers/ownerStaff screens as a fallback.
       try {
-        if (existing.kind === "DELIVERY") {
-          await provisionDeliveryRider({ contactName: existing.contactName, phone: existing.phone });
-        } else {
-          await provisionSeller({
+        const kind = existing.kind === "DELIVERY" ? "DELIVERY" : "SELLER";
+        const provisionedUserId = kind === "DELIVERY"
+          ? await provisionDeliveryRider({ contactName: existing.contactName, phone: existing.phone })
+          : await provisionSeller({
             businessName: existing.businessName,
             contactName: existing.contactName,
             phone: existing.phone,
             gstin: existing.gstin,
             category: existing.category,
           });
+        // Fire-and-forget: a push must never fail the approval (same convention as every other
+        // notify* call here). Reaches them only if they already have the app — see the notifier.
+        if (provisionedUserId) {
+          notifyPartnerApproved(provisionedUserId, kind, "PROVISIONED")
+            .catch((e: unknown) => console.error("[background task failed]", e));
         }
       } catch (provisionErr) {
         console.error("Partner application approval — provisioning failed:", provisionErr);

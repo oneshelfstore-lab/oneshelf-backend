@@ -344,6 +344,36 @@ export async function notifyTierUp(userId: string, tierName: string, hamperGrant
   });
 }
 
+/**
+ * Partner onboarding approvals — both stages of it:
+ *  - "PROVISIONED" = their "Partner with us" lead was accepted, so a login + stub account now exist
+ *    and they need to sign in and submit KYC documents.
+ *  - "VERIFIED"    = the owner approved those documents; the dashboard is open for business.
+ *
+ * ⚠️ Best-effort by nature: a brand-new applicant who has never opened the app has no FCM token, so
+ * PROVISIONED silently reaches nobody. It DOES land when the applicant is already a customer
+ * (common — they applied from inside the app), which is the case worth catching. The store still
+ * has to phone a genuinely new applicant; this is not a delivery guarantee.
+ */
+export async function notifyPartnerApproved(
+  userId: string,
+  kind: "SELLER" | "DELIVERY",
+  stage: "PROVISIONED" | "VERIFIED",
+) {
+  const tokens = await getUserTokens(userId);
+  if (tokens.length === 0) return;
+  const role = kind === "DELIVERY" ? "delivery partner" : "seller";
+  await sendToTokens(tokens, {
+    type: "partner_approved",
+    kind,
+    stage,
+    title: stage === "PROVISIONED" ? "Your application was approved!" : "You're verified — you're live!",
+    body: stage === "PROVISIONED"
+      ? `Welcome aboard. Sign in with this number to finish your ${role} verification.`
+      : `Your ${role} account is approved. Sign in to get started.`,
+  });
+}
+
 export async function notifyReferralReward(userId: string, amount: number) {
   const tokens = await getUserTokens(userId);
   if (tokens.length === 0) return;

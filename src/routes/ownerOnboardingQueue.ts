@@ -7,6 +7,7 @@ import {
   requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
+import { notifyPartnerApproved } from "../services/fcmNotifier.js";
 
 // Owner's onboarding review queue (Phase 1, SELLER_DELIVERY_ONBOARDING_PLAN.md). Mounted at
 // /api/app/owner/onboarding-queue (Firebase auth + OWNER, mirrors ownerPartnerApplications).
@@ -168,7 +169,7 @@ router.post("/:type/:id/approve", async (req: FirebaseAuthRequest, res: Response
     const id = String(req.params.id ?? "");
 
     if (type === "seller") {
-      const seller = await prisma.seller.findUnique({ where: { id }, select: { id: true, status: true } });
+      const seller = await prisma.seller.findUnique({ where: { id }, select: { id: true, status: true, ownerUserId: true } });
       if (!seller) throw new NotFoundError("Seller", id);
       const updated = await prisma.seller.update({
         where: { id },
@@ -180,6 +181,13 @@ router.post("/:type/:id/approve", async (req: FirebaseAuthRequest, res: Response
           ...(seller.status === "PENDING" ? { status: "APPROVED" as const } : {}),
         },
       });
+      // Fire-and-forget — a push must never fail the approval. Unlike the lead-approval push, this
+      // one reliably lands: they can only reach PENDING_REVIEW by using the app, so a token exists.
+      // ownerUserId is nullable (a Seller row can exist with no linked login) — nobody to tell then.
+      if (seller.ownerUserId) {
+        notifyPartnerApproved(seller.ownerUserId, "SELLER", "VERIFIED")
+          .catch((e: unknown) => console.error("[background task failed]", e));
+      }
       return res.json({ success: true, data: { id: updated.id, onboardingStatus: updated.onboardingStatus, status: updated.status } });
     }
 
@@ -190,6 +198,8 @@ router.post("/:type/:id/approve", async (req: FirebaseAuthRequest, res: Response
         where: { id },
         data: { onboardingStatus: "APPROVED", rejectionReason: null },
       });
+      notifyPartnerApproved(profile.userId, "DELIVERY", "VERIFIED")
+        .catch((e: unknown) => console.error("[background task failed]", e));
       return res.json({ success: true, data: { id: updated.id, onboardingStatus: updated.onboardingStatus } });
     }
 

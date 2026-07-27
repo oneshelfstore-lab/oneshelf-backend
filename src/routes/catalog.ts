@@ -452,9 +452,11 @@ publicCatalogRouter.post("/stock-check", async (req: Request, res: Response) => 
       select: {
         id: true,
         stock: true,
+        isActive: true,
+        packageSize: true,
         productId: true,
         product: {
-          select: { id: true, name: true, categoryId: true, isActive: true },
+          select: { id: true, name: true, categoryId: true, isActive: true, productType: true },
         },
       },
     });
@@ -504,7 +506,16 @@ publicCatalogRouter.post("/stock-check", async (req: Request, res: Response) => 
     const items = variantIds.map((vid: string) => {
       const v = variantMap.get(vid);
       if (!v) return { variantId: vid, found: false, stock: 0, productId: null, productName: null, alternatives: [] };
-      const stock = Number(v.stock);
+      // App-format stock: loose is sold in INCREMENTS (what CartItem.quantity counts), the column
+      // holds BASE units — same conversion formatVariantForApp does for every catalog read, so the
+      // cart stepper's ceiling and checkout's quantity check compare like with like. A de-listed
+      // variant/product reads as 0 rather than as its leftover stock.
+      const packageSize = Number(v.packageSize) || 1;
+      const stock = !v.isActive || !v.product.isActive
+        ? 0
+        : isLooseType(v.product.productType)
+          ? Math.round(Number(v.stock) / packageSize)
+          : Number(v.stock);
       const alts = stock <= 0 ? (altsByProduct.get(v.product.id) ?? []) : [];
       return {
         variantId: v.id,

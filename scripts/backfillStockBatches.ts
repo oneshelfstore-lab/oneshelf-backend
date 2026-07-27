@@ -1,7 +1,12 @@
 import "dotenv/config";
 import { PrismaClient } from "@prisma/client";
 
-const prisma = new PrismaClient();
+// `railway run` injects the INTERNAL DATABASE_URL (postgres.railway.internal), which only resolves
+// from inside Railway's network — prefer the public proxy URL so this is runnable from a laptop.
+// Falls back to DATABASE_URL when running inside Railway (or against a local .env).
+const prisma = new PrismaClient({
+  datasourceUrl: process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL,
+});
 
 /**
  * One-time backfill: give every existing ProductVariant with stock > 0 a single StockBatch so its
@@ -11,8 +16,12 @@ const prisma = new PrismaClient();
  * hasFullCostData flag). receivedAt is backdated to the variant's own createdAt so the batch
  * doesn't look like it just arrived today.
  *
- * Safe to re-run: skips any variant that already has at least one StockBatch, so a partial or
- * repeated run never double-seeds a variant.
+ * Safe to re-run: seeds only the SHORTFALL between the ProductVariant.stock rollup (what the app
+ * shows, gates the stepper on, and validates the cart against) and the sum of qtyRemaining across
+ * that variant's batches (what order placement actually draws down). A variant already fully backed
+ * by batches has shortfall 0 and is skipped, so repeated runs never double-seed. Any variant with a
+ * shortfall is currently UNBUYABLE above the batch total — the app shows it in stock and only fails
+ * at Place Order with "Insufficient stock for X".
  *
  * Run with: npx tsx scripts/backfillStockBatches.ts
  * (Not run by the agent — this touches the live database; run it yourself once, right after the
@@ -29,12 +38,15 @@ async function main() {
   let skipped = 0;
 
   for (const v of variants) {
-    const existing = await prisma.stockBatch.findFirst({ where: { variantId: v.id }, select: { id: true } });
-    if (existing) {
+    const backed = await prisma.stockBatch.aggregate({
+      where: { variantId: v.id },
+      _sum: { qtyRemaining: true },
+    });
+    const qty = Number(v.stock) - Number(backed._sum.qtyRemaining ?? 0);
+    if (qty <= 1e-9) {
       skipped++;
       continue;
     }
-    const qty = Number(v.stock);
     const unitCost = v.costPrice != null ? Number(v.costPrice) : 0;
     await prisma.stockBatch.create({
       data: {
@@ -43,13 +55,13 @@ async function main() {
         qtyReceived: qty,
         qtyRemaining: qty,
         receivedAt: v.createdAt,
-        note: "Backfilled from pre-batch stock",
+        note: "Backfilled from pre-batch stock (shortfall vs rollup)",
       },
     });
     seeded++;
   }
 
-  console.log(`Backfill complete: ${seeded} variant(s) seeded, ${skipped} already had batch data.`);
+  console.log(`Backfill complete: ${seeded} variant(s) seeded, ${skipped} already fully batch-backed.`);
 }
 
 main()

@@ -131,13 +131,47 @@ const updateSchema = z.object({
   grievanceOfficerEmail: z.string().email().max(160).optional().nullable(),
 });
 
+// Fields that determine WHO the seller legally is or WHERE their payout money goes — the exact
+// things the owner reviewed to approve them. Silently letting these change post-approval defeats
+// the point of the review (see the sensitiveFieldChanged() call below).
+const KYC_SENSITIVE_FIELDS = [
+  "gstin", "pan", "fssaiNumber", "fssaiExpiry",
+  "gstinDocUrl", "panDocUrl", "fssaiDocUrl", "bankProofUrl", "bankDetails",
+] as const;
+
+/** True if any KYC-sensitive field actually PRESENT in this request differs from what's stored. */
+function sensitiveFieldChanged(parsedData: Record<string, unknown>, current: Record<string, unknown>): boolean {
+  return KYC_SENSITIVE_FIELDS.some((field) => {
+    const next = parsedData[field];
+    if (next === undefined) return false; // not part of this request — this is a partial save
+    const prev = current[field];
+    const a = next instanceof Date ? next.getTime() : JSON.stringify(next ?? null);
+    const b = prev instanceof Date ? prev.getTime() : JSON.stringify(prev ?? null);
+    return a !== b;
+  });
+}
+
 router.put("/", async (req: SellerRequest, res: Response) => {
   try {
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid profile data", parsed.error.errors);
 
-    const current = await prisma.seller.findUnique({ where: { id: req.sellerId }, select: { onboardingStatus: true } });
+    const current = await prisma.seller.findUnique({
+      where: { id: req.sellerId },
+      select: {
+        onboardingStatus: true,
+        gstin: true, pan: true, fssaiNumber: true, fssaiExpiry: true,
+        gstinDocUrl: true, panDocUrl: true, fssaiDocUrl: true, bankProofUrl: true, bankDetails: true,
+      },
+    });
     if (!current) throw new NotFoundError("Seller", req.sellerId ?? "");
+
+    // An APPROVED seller changing GSTIN/PAN/FSSAI/bank/documents re-enters review with the NEW
+    // values — this does NOT suspend them (resolveSeller only blocks SUSPENDED/!isActive, never
+    // onboardingStatus, same as every other non-terminal status), it just puts the row back in
+    // front of the owner instead of quietly overwriting what was already verified.
+    const needsReReview = current.onboardingStatus === "APPROVED" &&
+      sensitiveFieldChanged(parsed.data as Record<string, unknown>, current as Record<string, unknown>);
 
     const updated = await prisma.seller.update({
       where: { id: req.sellerId },
@@ -145,7 +179,9 @@ router.put("/", async (req: SellerRequest, res: Response) => {
         ...parsed.data,
         // Editing after submission means the owner would be reviewing stale data — un-submit so
         // the seller has to re-submit once they're done changing things.
-        ...(current.onboardingStatus === "PENDING_REVIEW" ? { onboardingStatus: "IN_PROGRESS" as const } : {}),
+        ...(current.onboardingStatus === "PENDING_REVIEW" ? { onboardingStatus: "IN_PROGRESS" as const }
+          : needsReReview ? { onboardingStatus: "PENDING_REVIEW" as const }
+          : {}),
       },
     });
     res.json({ success: true, data: shapeProfile(updated, await isAgreementCurrent(updated.id)) });
@@ -169,9 +205,24 @@ router.put("/bank-details", async (req: SellerRequest, res: Response) => {
     const parsed = bankDetailsSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid bank details", parsed.error.errors);
     const { accountName, accountNumber, ifsc } = parsed.data;
+
+    const current = await prisma.seller.findUnique({
+      where: { id: req.sellerId },
+      select: { onboardingStatus: true, bankDetails: true },
+    });
+    if (!current) throw new NotFoundError("Seller", req.sellerId ?? "");
+
+    const nextBank = { accountName, accountNumber, ifsc };
+    // Same re-review rule as PUT / above, applied to this route's own write path — this endpoint
+    // exists precisely so a post-approval seller can update their payout account, which is exactly
+    // the write that most needs a human to notice before real money starts moving to it.
+    const changed = JSON.stringify(current.bankDetails ?? null) !== JSON.stringify(nextBank);
     const updated = await prisma.seller.update({
       where: { id: req.sellerId },
-      data: { bankDetails: { accountName, accountNumber, ifsc } },
+      data: {
+        bankDetails: nextBank,
+        ...(current.onboardingStatus === "APPROVED" && changed ? { onboardingStatus: "PENDING_REVIEW" as const } : {}),
+      },
     });
     res.json({ success: true, data: shapeProfile(updated, await isAgreementCurrent(updated.id)) });
   } catch (e) {

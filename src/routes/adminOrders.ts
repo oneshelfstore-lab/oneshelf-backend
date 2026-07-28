@@ -8,6 +8,7 @@ import { accrueReferralCommission, refundWalletOnCancel } from "../services/refe
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { restoreConsumption } from "../services/stockBatches.js";
 import { assertSellersPacked, reverseSellerLedgerOnCancel } from "../services/subOrderFulfillment.js";
+import { signOrderMedia, signOrderMediaList } from "../lib/storageUrls.js";
 
 /**
  * Admin order management for the React dashboard (JWT auth).
@@ -53,7 +54,7 @@ router.get("/", async (req: Request, res: Response) => {
 
     res.json({
       success: true,
-      data: orders,
+      data: await signOrderMediaList(orders),
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
       statusCounts: counts,
     });
@@ -75,7 +76,7 @@ router.get("/:id", async (req: Request, res: Response) => {
       },
     });
     if (!order) throw new NotFoundError("Order", req.params.id!);
-    res.json({ success: true, data: order });
+    res.json({ success: true, data: await signOrderMedia(order) });
   } catch (e) {
     sendError(res, e);
   }

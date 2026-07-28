@@ -11,6 +11,7 @@ import { notifyOrderStatusChange, notifyDeliveryArrived } from "../services/fcmN
 import { accrueReferralCommission, istMonthKey } from "../services/referralRewards.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { OTP_LOCK_SECONDS } from "../lib/otp.js";
+import { signOrderMedia, signOrderMediaList } from "../lib/storageUrls.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -80,7 +81,8 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
 
     res.json({
       success: true,
-      data: orders,
+      // gatePhotoUrl / voiceNoteUrl are stored Storage paths — sign them for the agent's card.
+      data: await signOrderMediaList(orders),
       serverTimestamp: new Date().toISOString(),
     });
   } catch (e) {
@@ -413,7 +415,7 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     }
 
     // Never expose OTP to delivery agent — only customer sees it
-    res.json({ success: true, data: order });
+    res.json({ success: true, data: await signOrderMedia(order) });
   } catch (e) {
     sendError(res, e);
   }

@@ -14,6 +14,7 @@ import { restoreConsumption } from "../services/stockBatches.js";
 import { shapeOrderMessage } from "../services/orderMessages.js";
 import { cancelSubOrderAndRefund, reverseSellerLedgerOnCancel } from "../services/subOrderFulfillment.js";
 import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
+import { signStoragePath } from "../lib/storageUrls.js";
 
 // Fixed, translatable reason set the co-manager/seller picks from when rejecting an order — mirrors
 // the shape of the customer-facing "Need help" reason chips (see OrderHelpSheet) so both surfaces feel
@@ -72,7 +73,8 @@ router.use(firebaseAuthMiddleware as any);
 router.use(requireAppRole("SELLER") as any);
 router.use(resolveSeller as any);
 
-function shape(so: any) {
+// async because voiceNoteUrl is a stored Storage path that must be signed before it goes out.
+async function shape(so: any) {
   return {
     id: so.id,
     orderId: so.orderId,
@@ -93,7 +95,7 @@ function shape(so: any) {
     // Customer's special request (text) + recorded voice note — the co-manager packing these
     // items needs them too (clarifies item names STT mangles), not just the delivery agent.
     notes: so.order?.notes ?? null,
-    voiceNoteUrl: so.order?.voiceNoteUrl ?? null,
+    voiceNoteUrl: await signStoragePath(so.order?.voiceNoteUrl),
     items: (so.items ?? []).map((it: any) => ({
       id: it.id,
       productName: it.productName,
@@ -134,7 +136,7 @@ router.get("/", async (req: SellerRequest, res: Response) => {
       take: limit,
       include: ORDER_INCLUDE,
     });
-    res.json({ success: true, data: subOrders.map(shape) });
+    res.json({ success: true, data: await Promise.all(subOrders.map(shape)) });
   } catch (e) {
     sendError(res, e);
   }
@@ -181,7 +183,7 @@ router.patch("/:id/status", async (req: SellerRequest, res: Response) => {
       );
     }
 
-    res.json({ success: true, data: shape(updated) });
+    res.json({ success: true, data: await shape(updated) });
   } catch (e) {
     sendError(res, e);
   }

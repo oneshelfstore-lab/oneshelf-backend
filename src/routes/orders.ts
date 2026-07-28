@@ -17,6 +17,7 @@ import { getNextOrderNumber } from "../services/orderNumbering.js";
 import { createRazorpayOrder, verifyPaymentSignature, isRazorpayConfigured, refundPayment } from "../services/razorpay.js";
 import { notifyNewOrder, notifyOrderStatusChange, notifySubOrderNew, notifyOrderMessage } from "../services/fcmNotifier.js";
 import { shapeOrderMessage, sellerIdsForOrder, ownerUserIdsForSellers } from "../services/orderMessages.js";
+import { signOrderMedia, signOrderMediaList } from "../lib/storageUrls.js";
 import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 import { generateOrderInvoice, syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { generateInvoicePdf } from "../services/pdfGenerator.js";
@@ -806,11 +807,14 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         })
       : [];
     const otpByOrder = new Map(secrets.map((s) => [s.orderId, s.otp]));
-    const data = orders.map((o) => ({
-      ...o,
-      deliveryOtp: otpByOrder.get(o.id) ?? null,
-      items: o.items.map((it) => ({ ...it, productId: it.variant?.productId ?? null })),
-    }));
+    // Media fields hold Storage object PATHS — swap each for a 6h signed URL before it leaves.
+    const data = await signOrderMediaList(
+      orders.map((o) => ({
+        ...o,
+        deliveryOtp: otpByOrder.get(o.id) ?? null,
+        items: o.items.map((it) => ({ ...it, productId: it.variant?.productId ?? null })),
+      })),
+    );
 
     res.json({
       success: true,
@@ -995,7 +999,9 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
 
     res.json({
       success: true,
-      data: { ...order, items, freeSampleName: sampleName, freeSampleImageUrl: sampleImage, deliveryOtp, invoices },
+      data: await signOrderMedia({
+        ...order, items, freeSampleName: sampleName, freeSampleImageUrl: sampleImage, deliveryOtp, invoices,
+      }),
     });
   } catch (e) {
     sendError(res, e);

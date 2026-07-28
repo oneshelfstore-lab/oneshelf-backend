@@ -17,6 +17,7 @@ import { restoreConsumption } from "../services/stockBatches.js";
 import { shapeOrderMessage } from "../services/orderMessages.js";
 import { assertSellersPacked, markSubOrderPackedByOwner, reverseSellerLedgerOnCancel } from "../services/subOrderFulfillment.js";
 import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
+import { signOrderMedia } from "../lib/storageUrls.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -139,7 +140,7 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     });
     if (!order) throw new NotFoundError("Order", req.params.id!);
 
-    res.json({ success: true, data: order });
+    res.json({ success: true, data: await signOrderMedia(order) });
   } catch (e) {
     sendError(res, e);
   }

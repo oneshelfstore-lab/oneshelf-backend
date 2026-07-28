@@ -20,7 +20,19 @@ export async function payoutSeller(
 
   return prisma.$transaction(async (tx) => {
     const unsettled = await tx.subOrder.findMany({
-      where: { sellerId, settled: false },
+      // Never pay for goods that were never delivered. Two filters, deliberately:
+      //   - the slice itself CANCELLED (seller rejected it),
+      //   - the parent ORDER cancelled, which also catches orders cancelled BEFORE the ledger
+      //     reversal existed — their slices were left active, so filtering on slice status alone
+      //     would keep paying them out and would need a data-repair pass instead.
+      // reverseSellerLedgerOnCancel / cancelSubOrderAndRefund back the accrual out of
+      // outstandingBalance at cancel time; this is what keeps the payout itself honest.
+      where: {
+        sellerId,
+        settled: false,
+        status: { not: "CANCELLED" },
+        order: { status: { not: "CANCELLED" } },
+      },
       select: { id: true, subtotal: true, commissionAmount: true, tcsAmount: true, tdsAmount: true, netPayable: true },
     });
     if (unsettled.length === 0) throw new ValidationError("Nothing to pay out — no unsettled orders.");

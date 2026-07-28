@@ -12,6 +12,7 @@ import { syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { refundWalletOnCancel } from "../services/referralRewards.js";
 import { restoreConsumption } from "../services/stockBatches.js";
 import { shapeOrderMessage } from "../services/orderMessages.js";
+import { cancelSubOrderAndRefund, reverseSellerLedgerOnCancel } from "../services/subOrderFulfillment.js";
 import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 
 // Fixed, translatable reason set the co-manager/seller picks from when rejecting an order — mirrors
@@ -223,26 +224,54 @@ router.post("/:id/reject", async (req: SellerRequest, res: Response) => {
     });
     const isLastActiveSeller = otherActiveSubs === 0;
 
+    // Nothing left to fulfil AND the order can still be cancelled ⇒ kill the whole order and refund in
+    // full. Otherwise the order lives on (other sellers are still delivering, or it's too far along to
+    // cancel) and only this slice is unwound.
+    const cancelWholeOrder =
+      isLastActiveSeller && (sub.order.status === "PLACED" || sub.order.status === "CONFIRMED");
+
+    // Stock first — restoreConsumption needs the item rows, and it's the same either way.
     await prisma.$transaction(async (tx) => {
       for (const item of sub.items) {
         if (!item.variantId) continue;
         await restoreConsumption(tx, { orderItemId: item.id });
       }
-
-      await tx.subOrder.update({ where: { id: sub.id }, data: { status: "CANCELLED" } });
-
-      if (isLastActiveSeller && (sub.order.status === "PLACED" || sub.order.status === "CONFIRMED")) {
+      if (cancelWholeOrder) {
+        // ⚠️ Cancel the ORDER only, never the slice here: reverseSellerLedgerOnCancel (below) reverses
+        // exactly the slices it finds still active, so pre-cancelling this one would make it skip the
+        // rejecting seller and leave them accrued for the order they just refused.
         await tx.order.update({ where: { id: sub.order.id }, data: { status: "CANCELLED" } });
       }
     });
 
+    // Order survives ⇒ unwind just this slice: mark it CANCELLED, back its accrual out of the seller's
+    // balance, refund the customer its share and drop the order's total by that much.
+    let partial: Awaited<ReturnType<typeof cancelSubOrderAndRefund>> | null = null;
+    if (!cancelWholeOrder) {
+      partial = await cancelSubOrderAndRefund(sub.orderId, sub.id);
+    }
+
     const reasonLabel = REJECT_REASON_LABELS[reason] ?? reason;
+    // The Complaint stays the owner's record of WHY, and carries anything the automatic refund
+    // couldn't settle by itself so it never disappears silently.
+    const refundNote = partial
+      ? ` Refunded ₹${partial.refunded.toFixed(2)} for this seller's items` +
+        (partial.refundToSource > 0
+          ? ` (₹${partial.refundToSource.toFixed(2)} returned to the original payment method).`
+          : " (taken off the amount due).") +
+        (partial.storeCreditPortion > 0
+          ? ` ⚠️ ₹${partial.storeCreditPortion.toFixed(2)} of it was paid with store credit — credit that back by hand.`
+          : "") +
+        (partial.clawbackBlocked
+          ? " ⚠️ This seller was already paid out for these items — recover it from their next payout."
+          : "")
+      : "";
     const complaint = await prisma.complaint.create({
       data: {
         userId: sub.order.customerId,
         orderId: sub.orderId,
         subject: `Seller rejected order #${sub.order.orderNumber}`,
-        message: `Reason: ${reasonLabel}.` + (note ? ` Note: ${note}` : ""),
+        message: `Reason: ${reasonLabel}.` + (note ? ` Note: ${note}` : "") + refundNote,
       },
     });
     notifyNewComplaint({
@@ -251,7 +280,7 @@ router.post("/:id/reject", async (req: SellerRequest, res: Response) => {
       customerName: sub.order.shippingName || req.appUser!.name,
     }).catch((e: unknown) => console.error("[background task failed]", e));
 
-    if (isLastActiveSeller && (sub.order.status === "PLACED" || sub.order.status === "CONFIRMED")) {
+    if (cancelWholeOrder) {
       // Whole order is now cancelled — same refund/notify path as a customer-initiated cancel.
       bustUserSpend(sub.order.customerId);
       if (sub.order.paymentStatus === "PAID" && sub.order.razorpayPaymentId) {
@@ -266,11 +295,17 @@ router.post("/:id/reject", async (req: SellerRequest, res: Response) => {
       notifyOrderStatusChange({ id: sub.order.id, orderNumber: sub.order.orderNumber, status: "CANCELLED", customerId: sub.order.customerId }).catch((e: unknown) => console.error("[background task failed]", e));
       syncInvoicePaymentStatus(sub.order.id).catch((e) => console.error("Invoice sync failed:", e));
       refundWalletOnCancel(sub.order.id).catch((e) => console.error("wallet refund failed:", e));
+      reverseSellerLedgerOnCancel(sub.order.id).catch((e) => console.error("seller ledger reversal failed:", e));
     }
 
     res.json({
       success: true,
-      data: { subOrderId: sub.id, orderCancelled: isLastActiveSeller, complaintId: complaint.id },
+      data: {
+        subOrderId: sub.id,
+        orderCancelled: cancelWholeOrder,
+        complaintId: complaint.id,
+        refunded: partial?.refunded ?? 0,
+      },
     });
   } catch (e) {
     sendError(res, e);

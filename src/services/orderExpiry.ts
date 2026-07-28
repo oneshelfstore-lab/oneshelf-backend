@@ -1,5 +1,6 @@
 import prisma from "../lib/prisma.js";
 import { refundWalletOnCancel } from "./referralRewards.js";
+import { reverseSellerLedgerOnCancel } from "./subOrderFulfillment.js";
 import { reconcileOrderPayment } from "./paymentReconciliation.js";
 import { restoreConsumption } from "./stockBatches.js";
 
@@ -68,6 +69,7 @@ export async function expireStaleUnpaidOrders(): Promise<number> {
       // order the customer abandoned), return that credit. Safe to call unconditionally — it verifies
       // status === CANCELLED internally and is idempotent.
       await refundWalletOnCancel(order.id);
+      await reverseSellerLedgerOnCancel(order.id);
     } catch (err) {
       console.error(JSON.stringify({ level: "error", msg: "order-expiry failed", orderId: order.id, err: String(err) }));
     }

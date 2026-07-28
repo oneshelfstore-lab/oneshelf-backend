@@ -15,7 +15,7 @@ import { accrueReferralCommission, refundWalletOnCancel } from "../services/refe
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { restoreConsumption } from "../services/stockBatches.js";
 import { shapeOrderMessage } from "../services/orderMessages.js";
-import { assertSellersPacked, markSubOrderPackedByOwner } from "../services/subOrderFulfillment.js";
+import { assertSellersPacked, markSubOrderPackedByOwner, reverseSellerLedgerOnCancel } from "../services/subOrderFulfillment.js";
 import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 
 const router = Router();
@@ -227,6 +227,7 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
     }
     if (newStatus === "CANCELLED") {
       refundWalletOnCancel(order.id).catch((e) => console.error("wallet refund failed:", e));
+      reverseSellerLedgerOnCancel(order.id).catch((e) => console.error("seller ledger reversal failed:", e));
     }
 
     res.json({ success: true, data: { orderId: order.id, status: newStatus } });

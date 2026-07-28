@@ -7,7 +7,7 @@ import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orde
 import { accrueReferralCommission, refundWalletOnCancel } from "../services/referralRewards.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { restoreConsumption } from "../services/stockBatches.js";
-import { assertSellersPacked } from "../services/subOrderFulfillment.js";
+import { assertSellersPacked, reverseSellerLedgerOnCancel } from "../services/subOrderFulfillment.js";
 
 /**
  * Admin order management for the React dashboard (JWT auth).
@@ -143,6 +143,7 @@ router.put("/:id/status", requireRole("OWNER", "ACCOUNTANT", "BILLING_CLERK") as
     }
     if (newStatus === "CANCELLED") {
       refundWalletOnCancel(order.id).catch((e) => console.error("wallet refund failed:", e));
+      reverseSellerLedgerOnCancel(order.id).catch((e) => console.error("seller ledger reversal failed:", e));
     }
 
     res.json({ success: true, data: { orderId: order.id, status: newStatus } });

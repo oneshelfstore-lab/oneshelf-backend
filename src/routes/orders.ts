@@ -21,6 +21,7 @@ import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 import { generateOrderInvoice, syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { generateInvoicePdf } from "../services/pdfGenerator.js";
 import { refundWalletOnCancel } from "../services/referralRewards.js";
+import { reverseSellerLedgerOnCancel } from "../services/subOrderFulfillment.js";
 import { markOrderPaid } from "../services/orderPayment.js";
 import { reconcileOrderPayment } from "../services/paymentReconciliation.js";
 import { generateOtp, orderRequiresOtp, OTP_VISIBLE_STATUSES } from "../lib/otp.js";
@@ -632,6 +633,7 @@ router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
     syncInvoicePaymentStatus(order.id).catch((e) => console.error("Invoice sync failed:", e));
     // Return any store credit that was applied to this order (idempotent; no-op if none).
     refundWalletOnCancel(order.id).catch((e) => console.error("wallet refund failed:", e));
+    reverseSellerLedgerOnCancel(order.id).catch((e) => console.error("seller ledger reversal failed:", e));
 
     res.json({ success: true, message: "Order cancelled", data: { orderId: order.id, status: "CANCELLED" } });
   } catch (e) {

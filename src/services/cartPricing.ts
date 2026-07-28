@@ -66,6 +66,11 @@ export interface CartTotals {
   // Preview only — placement is what actually decrements stock/materializes the reward line(s),
   // and can differ slightly if stock runs out between quote and placement (same as `outOfRange`).
   freeGifts: FreeGiftLine[];
+  // Owner-configured minimum cart subtotal to place an order (0 = unenforced) + whether this cart
+  // is currently under it. A real placement must reject when true (same as `outOfRange`); a
+  // /cart/quote preview just surfaces it so the app can disable "Place order" ahead of time.
+  minOrderValue: number;
+  belowMinOrder: boolean;
 }
 
 interface CartItemWithVariant {
@@ -231,10 +236,16 @@ export async function calculateCartTotals(
   // Delivery charge
   const storeConfig = await prisma.storeConfig.findFirst();
   const freeDeliveryAbove = storeConfig ? Number(storeConfig.freeDeliveryAbove) : 500;
+  const minOrderValue = storeConfig ? Number(storeConfig.minOrderValue) : 0;
   const isFreeDelivery = appliedCoupon &&
     (await prisma.coupon.findUnique({ where: { code: appliedCoupon } }))?.couponType === "FREE_DELIVERY";
 
   const isPickup = fulfillmentType === "PICKUP";
+  // Delivery only — a minimum basket exists to make the trip worth running, and there is no trip on a
+  // pickup order. Decided HERE rather than at the placement check so /cart/quote and POST /orders can
+  // never disagree: gating only the placement would leave the app disabling "Place order" on a pickup
+  // cart that the server would in fact have accepted.
+  const belowMinOrder = !isPickup && minOrderValue > 0 && subtotal < minOrderValue;
   // Distance-based charge (falls back to the flat StoreConfig.deliveryCharge when the store or the
   // address has no saved coordinates). Skipped entirely for pickup — nothing to deliver.
   const distanceResult = isPickup
@@ -323,5 +334,7 @@ export async function calculateCartTotals(
     distanceKm: distanceResult.distanceKm,
     outOfRange: distanceResult.outOfRange,
     freeGifts,
+    minOrderValue,
+    belowMinOrder,
   };
 }

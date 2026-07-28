@@ -1587,6 +1587,11 @@ model StoreConfig {
   deliveryDateLabel                    String   @default("Today")
   freeDeliveryAbove                    Decimal  @default(500) @db.Decimal(10, 2)
   deliveryCharge                       Decimal  @default(30) @db.Decimal(10, 2)
+  // Minimum cart subtotal (goods value, before delivery) required to place a DELIVERY order.
+  // 0 = unenforced, and that is deliberately the default: this column lands on every existing store
+  // at once, so a non-zero default would silently start refusing small baskets nobody had agreed to
+  // turn away. Owner opts in from Store Settings.
+  minOrderValue                        Decimal  @default(0) @db.Decimal(10, 2)
   isOrderingAllowed                    Boolean  @default(true)
   operatingHoursStart                  String?
   operatingHoursEnd                    String?

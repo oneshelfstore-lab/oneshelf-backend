@@ -124,6 +124,14 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       throw new ValidationError("This address is outside our delivery area.");
     }
 
+    // Minimum order value (StoreConfig.minOrderValue, 0 = unenforced) — a real placement must reject,
+    // same as outOfRange; /cart/quote just surfaces `belowMinOrder` for the app to warn early. No
+    // fulfillmentType check here on purpose: calculateCartTotals already scopes the flag to delivery,
+    // so the quote and this check can't drift.
+    if (totals.belowMinOrder) {
+      throw new ValidationError(`Minimum order value is ₹${totals.minOrderValue}. Please add more items.`);
+    }
+
     // Owner-curated pincode allowlist (StoreConfig.allowedPincodes). Empty = unenforced.
     if (fulfillmentType === "DELIVERY" && address) {
       const pincodeCfg = await prisma.storeConfig.findFirst({ select: { allowedPincodes: true } });
@@ -629,7 +637,7 @@ router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
     // Cancelling removes this order from the rolling spend → re-tier the customer promptly.
     bustUserSpend(order.customerId);
 
-    notifyOrderStatusChange({ ...order, status: "CANCELLED" }).catch(() => {});
+    notifyOrderStatusChange({ ...order, status: "CANCELLED" }).catch((e: unknown) => console.error("[background task failed]", e));
     syncInvoicePaymentStatus(order.id).catch((e) => console.error("Invoice sync failed:", e));
     // Return any store credit that was applied to this order (idempotent; no-op if none).
     refundWalletOnCancel(order.id).catch((e) => console.error("wallet refund failed:", e));
@@ -1104,7 +1112,7 @@ router.post("/:orderId/items/:itemId/substitute/respond", async (req: FirebaseAu
 
     // Notify owner that customer approved.
     const { notifySubstitutionResponse } = await import("../services/fcmNotifier.js");
-    notifySubstitutionResponse(order, item.substituteProductName ?? "", "approved").catch(() => {});
+    notifySubstitutionResponse(order, item.substituteProductName ?? "", "approved").catch((e: unknown) => console.error("[background task failed]", e));
 
     res.json({
       success: true,

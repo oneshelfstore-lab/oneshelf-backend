@@ -33,6 +33,8 @@ const updateSchema = z.object({
   freeDeliveryAbove: z.number().min(0).optional(),
   // Minimum cart subtotal to place an order. 0 = unenforced.
   minOrderValue: z.number().min(0).optional(),
+  // Subtotal at or below which the delivery fee can't be waived by coupon or tier. 0 = unenforced.
+  compulsoryDeliveryUpto: z.number().min(0).optional(),
   isOrderingAllowed: z.boolean().optional(),
   operatingHoursStart: z.string().max(10).optional().nullable(),
   operatingHoursEnd: z.string().max(10).optional().nullable(),

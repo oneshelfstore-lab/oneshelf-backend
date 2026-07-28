@@ -1592,6 +1592,10 @@ model StoreConfig {
   // at once, so a non-zero default would silently start refusing small baskets nobody had agreed to
   // turn away. Owner opts in from Store Settings.
   minOrderValue                        Decimal  @default(0) @db.Decimal(10, 2)
+  // Subtotal at or below which the delivery fee is COMPULSORY — no FREE_DELIVERY coupon and no member
+  // tier perk can waive it. 0 = unenforced. Sits below freeDeliveryAbove, it does not replace it:
+  // a tiny basket costs the same to ride out as a large one, so shipping it free is a straight loss.
+  compulsoryDeliveryUpto               Decimal  @default(0) @db.Decimal(10, 2)
   isOrderingAllowed                    Boolean  @default(true)
   operatingHoursStart                  String?
   operatingHoursEnd                    String?

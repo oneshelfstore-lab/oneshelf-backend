@@ -9,6 +9,24 @@ function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 
+/**
+ * Is the delivery fee compulsory on this cart — i.e. can a FREE_DELIVERY coupon or a member tier
+ * perk NOT waive it?
+ *
+ * ⚠️ The comparison is `<=`, not `<`: the rule is "compulsory at or below ₹X", so a cart landing
+ * exactly on the figure is still charged. Pickup is always exempt (nothing is being delivered), and
+ * 0 means the store hasn't opted in.
+ */
+export function isDeliveryFeeCompulsory(opts: {
+  isPickup: boolean;
+  compulsoryDeliveryUpto: number;
+  deliveryEligibleSubtotal: number;
+}): boolean {
+  const { isPickup, compulsoryDeliveryUpto, deliveryEligibleSubtotal } = opts;
+  if (isPickup || compulsoryDeliveryUpto <= 0) return false;
+  return deliveryEligibleSubtotal <= compulsoryDeliveryUpto;
+}
+
 export interface CartLineItem {
   variantId: string;
   quantity: number;
@@ -258,19 +276,32 @@ export async function calculateCartTotals(
   // Buy-1-Get-1 units don't count (otherwise 2×₹300 BOGO would "spend" ₹600 and unlock free delivery
   // while the customer only pays ₹300). Coupon/loyalty discounts still count toward the threshold.
   const deliveryEligibleSubtotal = round2(subtotal - bogoDiscount);
+  // Floor below which the delivery fee is COMPULSORY: no FREE_DELIVERY coupon and no member tier perk
+  // can waive it (0 = unenforced). A tiny basket costs the same to ride out as a large one, so a ₹40
+  // order shipped free is a straight loss — this is the store's protection against that, and it sits
+  // BELOW freeDeliveryAbove rather than replacing it. Uses the same BOGO-adjusted subtotal as the
+  // threshold above so the two can't disagree about what the customer actually spent.
+  const compulsoryDeliveryUpto = storeConfig ? Number(storeConfig.compulsoryDeliveryUpto) : 0;
+  const deliveryFeeCompulsory = isDeliveryFeeCompulsory({
+    isPickup,
+    compulsoryDeliveryUpto,
+    deliveryEligibleSubtotal,
+  });
+
   // Pickup never incurs a delivery charge. Otherwise charge the (possibly distance-based) fee unless
   // the order qualifies for free delivery (threshold, FREE_DELIVERY coupon, or a member tier perk).
   // A free-delivery waiver still fully waives a distance-priced order — the perk means "no delivery
   // fee," not "no delivery fee up to the flat rate."
-  if (!isPickup && deliveryEligibleSubtotal < freeDeliveryAbove && !isFreeDelivery && !tierFreeDelivery) {
+  if (!isPickup && (deliveryFeeCompulsory || (deliveryEligibleSubtotal < freeDeliveryAbove && !isFreeDelivery && !tierFreeDelivery))) {
     deliveryCharge = standardDelivery;
   }
 
   // Attribute the delivery waiver to the tier ONLY when the tier was the reason it's free — the order
-  // is a delivery order, below the free-delivery threshold, with no free-delivery coupon, so it would
-  // have been charged if not for the member perk. Otherwise the waiver isn't the program's cost.
+  // is a delivery order, below the free-delivery threshold, with no free-delivery coupon, and not under
+  // the compulsory-fee floor, so it would have been charged if not for the member perk. Otherwise the
+  // waiver isn't the program's cost.
   const tierDeliveryWaived =
-    tierFreeDelivery && !isPickup && !isFreeDelivery && deliveryEligibleSubtotal < freeDeliveryAbove
+    tierFreeDelivery && !isPickup && !isFreeDelivery && !deliveryFeeCompulsory && deliveryEligibleSubtotal < freeDeliveryAbove
       ? standardDelivery
       : 0;
 

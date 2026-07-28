@@ -15,6 +15,7 @@ import { accrueReferralCommission, refundWalletOnCancel } from "../services/refe
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { restoreConsumption } from "../services/stockBatches.js";
 import { shapeOrderMessage } from "../services/orderMessages.js";
+import { assertSellersPacked, markSubOrderPackedByOwner } from "../services/subOrderFulfillment.js";
 import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 
 const router = Router();
@@ -181,6 +182,11 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
       throw new ValidationError(`Cannot transition from '${order.status}' to '${newStatus}'. Allowed: ${allowed?.join(", ") ?? "none"}`);
     }
 
+    // Marking the parent PACKED is what releases it to the delivery pool, and the agent's collection run
+    // can only pick up slices the seller has already packed — so every external seller must be ready
+    // first, or the order deadlocks mid-run. See services/subOrderFulfillment.ts.
+    if (newStatus === "PACKED") await assertSellersPacked(order.id);
+
     const updateData: any = { status: newStatus };
 
     // Handle cancellation — restore stock
@@ -224,6 +230,25 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
     }
 
     res.json({ success: true, data: { orderId: order.id, status: newStatus } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/owner/orders/:id/sub-orders/:subOrderId/packed ──
+// Mark one seller's slice packed on their behalf. Needed because assertSellersPacked (above) now blocks
+// the parent PACKED transition until every external seller is ready: a seller who has physically bagged
+// the goods but never tapped "packed" would otherwise strand the order. Also the recovery path for an
+// order already stuck at PACKED with an unpacked slice. Idempotent.
+router.post("/:id/sub-orders/:subOrderId/packed", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const orderId = String(req.params.id ?? "");
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    if (!order) throw new NotFoundError("Order", orderId);
+    assertPaymentSettled(order);
+
+    const result = await markSubOrderPackedByOwner(orderId, String(req.params.subOrderId ?? ""));
+    res.json({ success: true, data: result });
   } catch (e) {
     sendError(res, e);
   }

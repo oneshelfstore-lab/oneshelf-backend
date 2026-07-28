@@ -7,6 +7,7 @@ import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orde
 import { accrueReferralCommission, refundWalletOnCancel } from "../services/referralRewards.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { restoreConsumption } from "../services/stockBatches.js";
+import { assertSellersPacked } from "../services/subOrderFulfillment.js";
 
 /**
  * Admin order management for the React dashboard (JWT auth).
@@ -106,6 +107,10 @@ router.put("/:id/status", requireRole("OWNER", "ACCOUNTANT", "BILLING_CLERK") as
     if (!allowed || !allowed.includes(newStatus)) {
       throw new ValidationError(`Cannot transition from '${order.status}' to '${newStatus}'.`);
     }
+
+    // Same collection-run invariant the Firebase owner route enforces — this back-office route can set
+    // PACKED too, so it needs the guard as well. See services/subOrderFulfillment.ts.
+    if (newStatus === "PACKED") await assertSellersPacked(order.id);
 
     if (newStatus === "CANCELLED") {
       await prisma.$transaction(async (tx) => {

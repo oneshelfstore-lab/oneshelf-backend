@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
-import { AppError } from "../lib/errors.js";
+import { AppError, send500WithRef } from "../lib/errors.js";
 import { ZodError } from "zod";
 
 export function globalErrorHandler(err: unknown, req: Request, res: Response, _next: NextFunction) {
@@ -31,17 +31,8 @@ export function globalErrorHandler(err: unknown, req: Request, res: Response, _n
     });
   }
 
-  // A 500 is by definition an unhandled cause — the stack only lives in the server logs, and the
-  // app has no way to point at it. Stamp a short ref on both so "an unexpected error occurred
-  // (ref: k3f9c2)" read off a phone screen greps straight to the stack in the Railway logs.
-  const ref = Math.random().toString(36).slice(2, 8);
-  console.error(`Unhandled error [ref ${ref}] ${req.method} ${req.originalUrl}:`, err);
-  return res.status(500).json({
-    success: false,
-    error: {
-      code: "INTERNAL_ERROR",
-      message: `An unexpected error occurred (ref: ${ref})`,
-      details: [],
-    },
-  });
+  // Ref-stamped 500 — see send500WithRef. Shared with sendError so a route that handles its own
+  // errors and one that calls next(err) produce the same greppable ref format. `req` is passed
+  // explicitly here since this handler already has it.
+  return send500WithRef(res, err, req);
 }

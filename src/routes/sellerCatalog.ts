@@ -23,6 +23,12 @@ function isLooseType(productType: string): boolean {
   return productType === "LOOSE" || productType === "PRODUCE";
 }
 
+// A product save runs one interactive transaction that loops per variant (create/update + a stock
+// batch each), so a 20-size product is easily dozens of round-trips. Prisma's DEFAULT timeout is 5s,
+// which a busy DB or a cold connection blows through — surfacing as P2028 and, to the seller, a bare
+// "unexpected error" on a save that looked fine. maxWait covers waiting for a free pool connection.
+const CATALOG_TX_OPTIONS = { maxWait: 10_000, timeout: 30_000 };
+
 // Persist a free-text brand name into the shared Brand table so it shows up in the brand dropdown for
 // the seller's next product. The seller editor lets the brand be typed directly, so a brand that's
 // never gone through the explicit "add brand" dialog would otherwise never reach the dropdown. Upsert
@@ -154,7 +160,13 @@ router.get("/", async (req: SellerRequest, res: Response) => {
     const [products, total] = await Promise.all([
       prisma.catalogProduct.findMany({
         where,
-        include: { variants: { orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
+        // Only ACTIVE variants — "remove this size" in the editor soft-deletes (isActive: false, see
+        // the PUT's toRemove below) and nothing in either catalog route can ever set it back to true.
+        // Returning them anyway put a soft-deleted size back in the editor as an editable, priceable
+        // row that no customer could ever see (the whole customer catalog filters isActive) and that
+        // the editor then sent straight back with its id, keeping it alive forever. Filtering here
+        // makes "removed" mean removed, and re-adding the size creates a genuinely active variant.
+        include: { variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
         orderBy: { name: "asc" },
         skip: (page - 1) * limit,
         take: limit,
@@ -259,7 +271,7 @@ router.post("/", async (req: SellerRequest, res: Response) => {
         where: { id: created.id },
         include: { variants: { orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
       });
-    });
+    }, CATALOG_TX_OPTIONS);
 
     await ensureBrandPersisted(product?.brand);
 
@@ -275,11 +287,17 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
     const productId = req.params.id as string;
     const existing = await prisma.catalogProduct.findFirst({
       where: { id: productId, sellerId: req.sellerId },
-      include: { variants: true },
+      // Active only, matching the GET above: toRemove is derived from this list, so an
+      // already-soft-deleted variant is no longer re-stamped isActive:false on every save.
+      include: { variants: { where: { isActive: true } } },
     });
     if (!existing) throw new NotFoundError("Product", productId);
 
-    const updateSchema = productSchema.partial().omit({ variants: true }).extend({ variants: z.array(variantSchema).optional() });
+    // `.min(1)`: absent `variants` means "don't touch the sizes", but an explicitly EMPTY array used
+    // to deactivate every variant at once, leaving a product whose defaultVariant is null — it renders
+    // as permanently out-of-stock with no size row to fix it, and no route can reactivate one.
+    // `.max(20)` mirrors the create schema, which already caps it.
+    const updateSchema = productSchema.partial().omit({ variants: true }).extend({ variants: z.array(variantSchema).min(1).max(20).optional() });
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid product data", parsed.error.errors);
     const { variants: variantUpdates, categorySlug, ...productFields } = parsed.data;
@@ -367,11 +385,12 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
           }
         }
       }
-    });
+    }, CATALOG_TX_OPTIONS);
 
     const updated = await prisma.catalogProduct.findUnique({
       where: { id: productId },
-      include: { variants: { orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
+      // Active only, so the editor's post-save refresh matches what GET / returns (see its comment).
+      include: { variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
     });
 
     await ensureBrandPersisted(updated?.brand);
@@ -402,7 +421,9 @@ router.patch("/:id/stock", async (req: SellerRequest, res: Response) => {
     const { variantId, stock } = z.object({ variantId: z.string().min(1), stock: z.number().min(0) }).parse(req.body);
 
     const variant = await prisma.productVariant.findFirst({
-      where: { id: variantId, productId, product: { sellerId: req.sellerId } },
+      // isActive: a soft-deleted variant is no longer returned by any read path, so a stale client
+      // holding its id must not be able to keep editing an invisible variant's stock.
+      where: { id: variantId, productId, isActive: true, product: { sellerId: req.sellerId } },
       include: { product: { select: { productType: true } } },
     });
     if (!variant) throw new NotFoundError("Variant", variantId);
@@ -440,7 +461,8 @@ router.post("/:id/stock/receive", async (req: SellerRequest, res: Response) => {
     const { variantId, qty, unitCost, note, vendorId, billNumber, paymentDueDate } = receiveStockSchema.parse(req.body);
 
     const variant = await prisma.productVariant.findFirst({
-      where: { id: variantId, productId, product: { sellerId: req.sellerId } },
+      // isActive: see the stock PATCH above — don't let a stale client restock a removed size.
+      where: { id: variantId, productId, isActive: true, product: { sellerId: req.sellerId } },
       include: { product: { select: { productType: true, name: true, hsnCode: true, gstRate: true } } },
     });
     if (!variant) throw new NotFoundError("Variant", variantId);

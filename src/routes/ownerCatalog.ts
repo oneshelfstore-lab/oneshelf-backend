@@ -25,6 +25,11 @@ function isLooseType(productType: string): boolean {
   return productType === "LOOSE" || productType === "PRODUCE";
 }
 
+// See sellerCatalog's identical constant: a product save is one interactive transaction looping per
+// variant, and Prisma's default 5s timeout is short enough that a many-size product on a busy DB
+// fails with P2028 — which reaches the owner as a bare "unexpected error" on an otherwise fine save.
+const CATALOG_TX_OPTIONS = { maxWait: 10_000, timeout: 30_000 };
+
 function formatProductForApp(product: any) {
   const isLoose = isLooseType(product.productType);
   return {
@@ -77,7 +82,11 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
       prisma.catalogProduct.findMany({
         where,
         include: {
-          variants: { orderBy: { packageSize: "asc" } },
+          // Active only — same reasoning as sellerCatalog's GET: "remove this size" soft-deletes
+          // (isActive: false, see the PUT's toRemove) and no route can ever set it back to true, so
+          // returning them put a dead size back in the editor as a live, editable row that no
+          // customer could see. Every customer read path already filters this.
+          variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
           category: { select: { slug: true, name: true } },
           seller: { select: { name: true } },
         },
@@ -248,7 +257,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           category: { select: { slug: true, name: true } },
         },
       });
-    });
+    }, CATALOG_TX_OPTIONS);
 
     // A new product can immediately show up as a "New arrival" / shift category revenue — the
     // owner's Analytics tab shouldn't have to wait out the 5-min TTL to see their own edit.
@@ -266,12 +275,17 @@ router.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     const productId = req.params.id as string;
     const existing = await prisma.catalogProduct.findUnique({
       where: { id: productId },
-      include: { variants: true },
+      // Active only, matching the GET above: toRemove derives from this list, so an already
+      // soft-deleted variant is no longer re-stamped isActive:false on every save.
+      include: { variants: { where: { isActive: true } } },
     });
     if (!existing) throw new NotFoundError("Product", productId);
 
     const updateSchema = productCreateSchema.partial().omit({ variants: true }).extend({
-      variants: z.array(variantCreateSchema.extend({ id: z.string().optional() })).optional(),
+      // `.min(1)`: absent means "don't touch the sizes", but an explicitly EMPTY array deactivated
+      // every variant at once, leaving a product with a null defaultVariant that reads as permanently
+      // out of stock and that no route can revive. `.max(20)` mirrors the create schema.
+      variants: z.array(variantCreateSchema.extend({ id: z.string().optional() })).min(1).max(20).optional(),
     });
 
     const parsed = updateSchema.safeParse(req.body);
@@ -353,12 +367,13 @@ router.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
           }
         }
       }
-    });
+    }, CATALOG_TX_OPTIONS);
 
     const updated = await prisma.catalogProduct.findUnique({
       where: { id: productId },
       include: {
-        variants: { orderBy: { packageSize: "asc" } },
+        // Active only, so the editor's post-save refresh matches what the list GET returns.
+        variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
         category: { select: { slug: true, name: true } },
       },
     });

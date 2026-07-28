@@ -1692,6 +1692,10 @@ model StoreConfig {
   tds194oThreshold                     Decimal  @default(500000) @db.Decimal(12, 2)
   // Sec 206AA floor rate when the seller has no PAN on file.
   tds194oNoPanRatePct                  Decimal  @default(5) @db.Decimal(5, 2)
+  // Force-update gate: the customer app's own BuildConfig.VERSION_CODE must be >= this to use the
+  // app. NULL = unenforced (default) — set this only when shipping a change an older client can't
+  // safely talk to (e.g. a breaking API contract change), not on every release.
+  minSupportedVersionCode              Int?
   createdAt                            DateTime @default(now())
   updatedAt                            DateTime @updatedAt
 }

@@ -69,6 +69,8 @@ const updateSchema = z.object({
   tds194oRatePct: z.number().min(0).max(30).optional(),
   tds194oThreshold: z.number().min(0).max(100000000).optional(),
   tds194oNoPanRatePct: z.number().min(0).max(30).optional(),
+  // Force-update gate. null clears it (unenforced); omit to leave unchanged.
+  minSupportedVersionCode: z.number().int().min(1).optional().nullable(),
 });
 
 // GET /api/app/config — public, no auth

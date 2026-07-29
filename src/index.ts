@@ -67,6 +67,7 @@ import webhookRoutes from "./routes/webhooks.js";
 import productIntakeRoutes from "./routes/productIntake.js";
 import ownerProductIntakeRoutes from "./routes/ownerProductIntake.js";
 import onboardingAgreementRoutes from "./routes/onboardingAgreements.js";
+import privacyNoticeRoutes from "./routes/privacyNotice.js";
 import deliveryOnboardingRoutes from "./routes/deliveryOnboarding.js";
 import ownerOnboardingQueueRoutes from "./routes/ownerOnboardingQueue.js";
 import { authMiddleware } from "./middleware/auth.js";
@@ -297,6 +298,9 @@ app.use("/api/app/partner-applications", partnerApplicationRoutes);
 // Public — static onboarding consent/agreement copy (nothing sensitive; see the file's own note
 // on why this is server-served rather than hardcoded in the app).
 app.use("/api/app/onboarding", onboardingAgreementRoutes);
+// Public — the customer DPDP notice (Rules 2025, Rule 3). MUST be readable without an account:
+// the notice has to be available at or before collection, i.e. before anyone signs up.
+app.use("/api/app/privacy-notice", privacyNoticeRoutes);
 // Internal automation (subscriptions engine) — shared-secret header, no user auth. Must stay BEFORE
 // the global JWT guard so an external scheduler with no identity can reach it.
 app.use("/api/app/internal", internalRoutes);

@@ -26,6 +26,12 @@ import {
   getDeletionBlockers,
   analyzeWallet,
 } from "../services/accountDeletion.js";
+import {
+  getConsentState,
+  recordConsents,
+  OPTIONAL_CONSENT_TYPES,
+} from "../services/customerConsent.js";
+import { NOTICE_VERSION, GRIEVANCE_OFFICER } from "../data/customerPrivacyNotice.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -42,6 +48,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
       select: {
         id: true, name: true, email: true, phone: true, photoUrl: true,
         role: true, phoneVerified: true, createdAt: true,
+        nomineeName: true, nomineePhone: true,
       },
     });
     if (!user) throw new NotFoundError("User", req.appUser!.id);
@@ -174,6 +181,12 @@ const updateProfileSchema = z.object({
     z.string().regex(/^[6-9]\d{9}$/, "Phone must be 10 digits starting with 6-9").nullable().optional(),
   ),
   photoUrl: z.string().max(500).optional().nullable(),
+  // DPDP §14 nomination. Blank clears it — a nomination must be as revocable as it is grantable.
+  nomineeName: z.preprocess((v) => (v === "" ? null : v), z.string().max(100).nullable().optional()),
+  nomineePhone: z.preprocess(
+    (v) => (typeof v === "string" ? v.replace(/\D/g, "").replace(/^91(?=\d{10}$)/, "") || null : v),
+    z.string().regex(/^[6-9]\d{9}$/, "Nominee phone must be 10 digits starting with 6-9").nullable().optional(),
+  ),
 });
 
 router.put("/", async (req: FirebaseAuthRequest, res: Response) => {
@@ -193,6 +206,7 @@ router.put("/", async (req: FirebaseAuthRequest, res: Response) => {
       select: {
         id: true, name: true, email: true, phone: true, photoUrl: true,
         role: true, phoneVerified: true, createdAt: true,
+        nomineeName: true, nomineePhone: true,
       },
     });
 
@@ -202,6 +216,121 @@ router.put("/", async (req: FirebaseAuthRequest, res: Response) => {
     if ((e as { code?: string })?.code === "P2002") {
       return sendError(res, new ConflictError("This email is already used by another account."));
     }
+    sendError(res, e);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// DPDP — consent, access (data export)
+// ═══════════════════════════════════════════════════════════════════════
+
+// GET /api/app/me/consents — current per-purpose consent + whether the notice must be re-shown.
+router.get("/consents", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const state = await getConsentState(req.appUser!.id);
+    res.json({ success: true, data: { ...state, currentNoticeVersion: NOTICE_VERSION } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// POST /api/app/me/consents — record a consent decision.
+// Two callers: the first-run notice screen (acceptNotice=true + every purpose's answer) and the
+// Privacy Centre toggles (acceptNotice=false + the single purpose that changed).
+const consentSchema = z.object({
+  acceptNotice: z.boolean().optional().default(false),
+  consents: z
+    .array(
+      z.object({
+        type: z.enum(OPTIONAL_CONSENT_TYPES as [string, ...string[]]),
+        granted: z.boolean(),
+      }),
+    )
+    .max(20)
+    .optional()
+    .default([]),
+});
+
+router.post("/consents", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = consentSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid consent payload", parsed.error.errors);
+    const state = await recordConsents(
+      req.appUser!.id,
+      parsed.data.consents,
+      parsed.data.acceptNotice,
+    );
+    res.json({ success: true, data: { ...state, currentNoticeVersion: NOTICE_VERSION } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// GET /api/app/me/data-export — DPDP §11 right of access.
+// Returns what we hold AND who it has been shared with; §11(b) makes the sharing list part of the
+// right, so a plain profile dump would not satisfy it. Order lines are summarised rather than
+// itemised — §11 is "a summary of personal data", and the customer can already open any order.
+router.get("/data-export", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const [user, addresses, orders, complaints, consents, walletTxns] = await Promise.all([
+      prisma.user.findUnique({
+        where: { id: userId },
+        select: {
+          id: true, name: true, email: true, phone: true, photoUrl: true, role: true,
+          phoneVerified: true, createdAt: true, walletBalance: true, referralCode: true,
+          nomineeName: true, nomineePhone: true,
+        },
+      }),
+      prisma.address.findMany({ where: { userId } }),
+      prisma.order.findMany({
+        where: { customerId: userId },
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true, orderNumber: true, status: true, paymentMethod: true, paymentStatus: true,
+          totalAmount: true, createdAt: true, deliveredAt: true,
+          _count: { select: { items: true } },
+        },
+      }),
+      prisma.complaint.findMany({
+        where: { userId },
+        select: { id: true, subject: true, status: true, createdAt: true },
+      }),
+      prisma.consentRecord.findMany({
+        where: { subjectType: "USER", subjectId: userId },
+        orderBy: { grantedAt: "desc" },
+        select: { consentType: true, version: true, granted: true, grantedAt: true, withdrawnAt: true },
+      }),
+      prisma.walletTransaction.findMany({
+        where: { userId },
+        orderBy: { createdAt: "desc" },
+        select: { id: true, type: true, amount: true, balanceAfter: true, createdAt: true },
+      }),
+    ]);
+    if (!user) throw new NotFoundError("User", userId);
+
+    res.json({
+      success: true,
+      data: {
+        generatedAt: new Date().toISOString(),
+        profile: user,
+        addresses,
+        orders,
+        complaints,
+        consents,
+        walletTransactions: walletTxns,
+        // §11(b) — the recipients disclosure. Static because the set genuinely is static; if a new
+        // processor is ever added it MUST be added here and to the privacy notice at the same time.
+        sharedWith: [
+          "The delivery agent assigned to each of your orders (name, phone, delivery address)",
+          "The seller fulfilling each order (order contents, delivery address)",
+          "Razorpay — payment processing (payment amount and reference; we never hold your card/UPI details)",
+          "Google Firebase — sign-in, push notifications, file storage, crash reporting",
+        ],
+        grievance: GRIEVANCE_OFFICER,
+      },
+    });
+  } catch (e) {
     sendError(res, e);
   }
 });

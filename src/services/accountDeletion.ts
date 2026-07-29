@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHmac } from "node:crypto";
 import prisma from "../lib/prisma.js";
 import { ConflictError } from "../lib/errors.js";
 import { admin, isFirebaseInitialized } from "../lib/firebase.js";
@@ -29,11 +29,25 @@ async function sumTodayCodCash(userId: string): Promise<number> {
   return orders.reduce((sum, o) => sum + Number(o.totalAmount), 0);
 }
 
-/** Stable hash of a phone number (PII-minimising — we keep the hash, never the cleartext, post-purge). */
+/**
+ * Stable KEYED hash of a phone number (PII-minimising — we keep the hash, never the cleartext,
+ * post-purge).
+ *
+ * ⚠️ Must stay an HMAC with a server-side secret. A bare SHA-256 of a 10-digit number is NOT
+ * anonymisation: Indian mobiles start 6-9, so the whole keyspace is ~4×10⁹ and a GPU reverses it in
+ * seconds — which would mean a "deleted" user's phone number is still effectively stored, gutting
+ * the erasure this whole file exists to perform. Without the pepper set we return null and simply
+ * keep no hash; losing the re-signup throttle is strictly better than keeping recoverable PII.
+ */
 function hashPhone(phone: string): string | null {
+  const pepper = process.env.PHONE_HASH_PEPPER;
+  if (!pepper) {
+    console.warn("[accountDeletion] PHONE_HASH_PEPPER unset — skipping phone hash on purge");
+    return null;
+  }
   const digits = phone.replace(/\D/g, "").slice(-10);
   if (digits.length < 10) return null;
-  return createHash("sha256").update(digits).digest("hex");
+  return createHmac("sha256", pepper).update(digits).digest("hex");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -314,6 +328,10 @@ export async function anonymizeUser(userId: string): Promise<string | null> {
         deletionStatus: "DELETED",
         deletedAt: null,
         phoneHash,
+        // The nominee is a THIRD PARTY whose name/number we hold only to serve this account —
+        // erasing the account without erasing them would leave someone else's PII behind.
+        nomineeName: null,
+        nomineePhone: null,
       },
     });
   });

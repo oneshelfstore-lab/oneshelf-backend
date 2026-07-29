@@ -246,6 +246,14 @@ enum ConsentType {
   SENSITIVE_DATA_PROCESSING
   LOCATION_TRACKING
   POLICE_VERIFICATION
+  // DPDP Rules 2025 (Rule 3) — customer-side itemised consent. PRIVACY_NOTICE records "this person
+  // was shown the notice at version X"; the other three are the individually-refusable purposes.
+  // Order fulfilment / account / tax records are deliberately NOT here — that is the purpose the
+  // data was voluntarily given for, not an optional add-on, so it is notice-only, never a toggle.
+  PRIVACY_NOTICE
+  MARKETING_COMMS
+  LOCATION_USE
+  DIAGNOSTICS
 }
 
 enum SubOrderStatus {
@@ -372,9 +380,16 @@ model User {
   deletionStatus AccountStatus @default(ACTIVE)
   deletedAt      DateTime?
   deletionReason String?
-  // SHA-256 of the bare-10 phone, captured at PURGE before the number is nulled. Survives the scrub
-  // so a future re-signup with the same number can be recognised (referral/coupon-farming throttle).
+  // Keyed HMAC-SHA256 of the bare-10 phone, captured at PURGE before the number is nulled. Survives
+  // the scrub so a future re-signup with the same number can be recognised (referral/coupon-farming
+  // throttle). ⚠️ Must stay KEYED (PHONE_HASH_PEPPER) — a bare digest of a 10-digit number is
+  // brute-forceable in seconds, which would make this a retained phone number, not an erased one.
   phoneHash      String?
+
+  // DPDP §14 nomination — who may exercise this person's rights if they die or are incapacitated.
+  // Third-party PII, so it is scrubbed on account purge like the account holder's own fields.
+  nomineeName  String?
+  nomineePhone String?
 
   // Membership (loyalty) tier-up push dedup — the last tier key we've observed/notified this user at.
   // NULL means "never observed" (first delivery after this feature ships records a silent baseline
@@ -1828,10 +1843,14 @@ model DeliveryProfile {
 // and when. NOT a single blanket checkbox: partner agreement, sensitive-KYC-data processing, and
 // location tracking (delivery only) are each recorded separately (Phase 1 captures these; Phase 2
 // adds re-prompt-on-version-bump logic).
+// Append-only: a withdrawal writes a NEW row rather than mutating the old one, so "what were they
+// shown, what did they agree to, when did they change it" stays reconstructable. DPDP §6 puts the
+// burden of PROVING consent on the fiduciary — mutating in place would destroy that evidence.
+// Latest row per (subjectType, subjectId, consentType) is the current state.
 model ConsentRecord {
   id          String      @id @default(cuid())
-  subjectType String // "SELLER" | "DELIVERY"
-  subjectId   String // Seller.id (SELLER) or User.id (DELIVERY)
+  subjectType String // "SELLER" | "DELIVERY" | "USER" (customer — DPDP Rule 3 itemised consent)
+  subjectId   String // Seller.id (SELLER) or User.id (DELIVERY / USER)
   consentType ConsentType
   version     String // e.g. "seller-agreement-v1" — bump to re-prompt on change
   granted     Boolean     @default(true)

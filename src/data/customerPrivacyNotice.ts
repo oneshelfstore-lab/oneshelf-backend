@@ -17,11 +17,13 @@ export const NOTICE_VERSION = "customer-privacy-notice-v1";
 
 /** Rule 3 requires a contactable person or role title — a generic mailbox alone is not enough. */
 export const GRIEVANCE_OFFICER = {
-  // ⚠️ Replace with the real person's name once appointed. A role title is legally acceptable, but
-  // a name is better. This same human may also serve as the Consumer Protection (E-Commerce)
-  // Rules, 2020 grievance officer — the two roles are separate obligations, one person can hold both.
-  name: "Grievance Officer, Oneshelf",
+  // Appointed 30 Jul 2026. ⚠️ This same human may also need to serve as the Consumer Protection
+  // (E-Commerce) Rules, 2020 grievance officer — the two are SEPARATE statutory obligations that
+  // one person may hold, but both must be separately published to count.
+  name: "Shivansh Agarwal, Grievance Officer",
   email: "oneshelfstore@gmail.com",
+  // ⚠️ Rule 3 wants the officer "easily contactable". An email alone is defensible; adding a
+  // published phone number is materially stronger. Fill this in when there's a number to publish.
   phone: "",
   /** Days we commit to. The DPDP statutory ceiling is 90; committing to less is a promise we keep. */
   responseDays: 30,

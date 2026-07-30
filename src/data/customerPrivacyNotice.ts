@@ -92,9 +92,23 @@ export const NOTICE = {
   /** Rule 3 — retention. Plain-language, and it must match what accountDeletion.ts actually does. */
   retention:
     "We keep your account data for as long as your account exists. If you delete your account we remove or anonymise your name, email, phone, photos, addresses and cart after a roughly 15-day recovery window. Order and tax-invoice records are kept in anonymised form for the period Indian tax law requires.",
-  /** Rule 3 — recipients. Naming them is the point; "trusted partners" is not a disclosure. */
+  /**
+   * Rule 3 — recipients AND cross-border transfer. Naming them is the point; "trusted partners" is
+   * not a disclosure, and omitting where the data physically sits is not one either.
+   *
+   * ⚠️ These are facts about the live infrastructure, not boilerplate — keep them true:
+   *  - Railway app + Postgres are in the **Southeast Asia (Singapore)** region (`railway status`).
+   *    The backend reaches the DB over `postgres.railway.internal`, and Railway private networking
+   *    is region-scoped, so both services are necessarily in the same region.
+   *  - Razorpay is an Indian entity and keeps payment data in India (RBI localisation).
+   *  - Google Firebase runs on Google's global infrastructure, which includes servers outside India.
+   * If the hosting region ever moves, this sentence has to move with it.
+   */
   recipients:
-    "Your delivery address and phone number are shared with the delivery agent assigned to your order, and with the seller fulfilling it. Payments are processed by Razorpay. Sign-in, notifications, file storage and crash reporting use Google Firebase. We do not share your data with anyone else except where the law requires it.",
+    "Your delivery address and phone number are shared with the delivery agent assigned to your order, and with the seller fulfilling it. Payments are processed by Razorpay, which keeps payment data in India. Sign-in, notifications, file storage and crash reporting use Google Firebase. We do not share your data with anyone else except where the law requires it.",
+  /** Rule 3 — the transfer-outside-India disclosure, stated separately so it cannot be skimmed past. */
+  crossBorder:
+    "Where your data is kept: our app servers and database are hosted in Singapore, and Google Firebase processes sign-in, notification, file-storage and crash data on Google's global infrastructure, which includes servers outside India. Your data is therefore stored and processed outside India. We use only providers permitted under Indian law and require them to protect your data to the same standard we do.",
   /** Rule 3 / §11-14 — the rights we must both state and actually implement. */
   rights: [
     "Ask us what personal data we hold about you and who we have shared it with (Settings → Privacy & data → Download my data).",

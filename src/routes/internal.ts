@@ -1,7 +1,11 @@
 import crypto from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import { sendError } from "../lib/errors.js";
-import { generateDueSubscriptionOrders, closeMonthlyStatements } from "../services/subscriptionEngine.js";
+import {
+  generateDueSubscriptionOrders,
+  closeMonthlyStatements,
+  notifyEndingSoonSubscriptions,
+} from "../services/subscriptionEngine.js";
 import { purgeExpiredDeletions } from "../services/accountDeletion.js";
 import { runAutoSellerPayouts } from "../services/sellerPayout.js";
 import { closeMonthlyReferralPayouts } from "../services/referralRewards.js";
@@ -44,6 +48,11 @@ router.post("/subscriptions/run", async (req: Request, res: Response) => {
     if (!authorize(req, res)) return;
     const gen = await generateDueSubscriptionOrders();
     const bill = await closeMonthlyStatements();
+    // "Your subscription ends in 3 days" reminders. ⚠️ Wired HERE and deliberately NOT into the
+    // in-process 30-minute sweeper: the reminder is picked by exact date-equality (endDate === today+3)
+    // with no "already notified" flag, so a half-hourly driver would push the same customer up to 48
+    // times in a day. This endpoint is the once-a-day driver, which is what makes that design safe.
+    const endingSoon = await notifyEndingSoonSubscriptions();
     // Piggyback the daily account-deletion purge on the same reliable external cron (free-tier safe).
     const purged = await purgeExpiredDeletions();
     // Piggyback seller auto-payout too — a no-op unless the owner has turned it on (StoreConfig).
@@ -56,6 +65,7 @@ router.post("/subscriptions/run", async (req: Request, res: Response) => {
         generated: gen.generated,
         skipped: gen.skipped,
         billed: bill.billed,
+        endingSoonNotified: endingSoon.notified,
         purged,
         sellersPaidOut: payout.paidCount,
         referralPayoutsCreated: referralPayouts.created,

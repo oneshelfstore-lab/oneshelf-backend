@@ -10,12 +10,31 @@ import {
 import { notifyOrderStatusChange, notifyDeliveryArrived } from "../services/fcmNotifier.js";
 import { accrueReferralCommission, istMonthKey } from "../services/referralRewards.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
+import { syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { OTP_LOCK_SECONDS } from "../lib/otp.js";
 import { signOrderMedia, signOrderMediaList } from "../lib/storageUrls.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
 router.use(requireAppRole("DELIVERY", "OWNER") as any);
+
+/**
+ * Everything that must happen once an order reaches DELIVERED, in ONE place so the two completion
+ * paths (single `/:id/deliver` and the batched `/subscription-run/deliver-all`) can't drift — they
+ * already had: deliver-all ran neither the referral accrual nor the tier-up check, so whether a
+ * referrer earned their commission on a subscription delivery depended on which button the rider
+ * tapped. Invoice sync was missing from BOTH, leaving every rider-completed COD order's invoice
+ * unpaid in the books even though the cash was collected.
+ *
+ * All three are best-effort and fire-and-forget: a delivery must never fail because a push, a
+ * ledger row, or an invoice update did.
+ */
+function runDeliveredHooks(order: { id: string; status: string; customerId: string; orderNumber: string }): void {
+  notifyOrderStatusChange({ ...order, status: "DELIVERED" }).catch((e: unknown) => console.error("[background task failed]", e));
+  syncInvoicePaymentStatus(order.id).catch((e) => console.error("Invoice sync failed:", e));
+  accrueReferralCommission(order.id).catch((e) => console.error("referral commission accrual failed:", e));
+  checkTierUpOnDelivery(order.id).catch((e) => console.error("tier-up check failed:", e));
+}
 
 // ─── GET /api/app/delivery/orders — assigned orders ─────────────────
 
@@ -368,7 +387,7 @@ router.post("/subscription-run/deliver-all", async (req: FirebaseAuthRequest, re
         });
         if (r.count > 0) {
           delivered++;
-          notifyOrderStatusChange({ ...o, status: "DELIVERED" }).catch((e: unknown) => console.error("[background task failed]", e));
+          runDeliveredHooks(o);
         }
       } catch (e) {
         console.error("subscription deliver-all: order failed", o.id, e);
@@ -647,11 +666,7 @@ router.post("/:id/deliver", async (req: FirebaseAuthRequest, res: Response) => {
       });
     }
 
-    notifyOrderStatusChange({ ...order, status: "DELIVERED" }).catch((e: unknown) => console.error("[background task failed]", e));
-    // Referral commission: accrue the referrer's ongoing % on this order (idempotent + best-effort —
-    // never blocks the delivery response).
-    accrueReferralCommission(order.id).catch((e) => console.error("referral commission accrual failed:", e));
-    checkTierUpOnDelivery(order.id).catch((e) => console.error("tier-up check failed:", e));
+    runDeliveredHooks(order);
 
     res.json({ success: true, data: { orderId: order.id, status: "DELIVERED" } });
   } catch (e) {

@@ -288,6 +288,13 @@ export async function calculateCartTotals(
     deliveryEligibleSubtotal,
   });
 
+  // A FREE_DELIVERY coupon under the compulsory floor waives nothing, so DON'T record it as applied —
+  // placement writes a CouponRedemption off couponCode, which would burn a single-use code for zero
+  // benefit. (`isFreeDelivery` above stays true but every later use of it is already guarded by
+  // deliveryFeeCompulsory, so the fee is still charged.) /coupons/validate refuses these up front;
+  // this is the backstop for a stale client that sends one anyway.
+  if (isFreeDelivery && deliveryFeeCompulsory) appliedCoupon = null;
+
   // Pickup never incurs a delivery charge. Otherwise charge the (possibly distance-based) fee unless
   // the order qualifies for free delivery (threshold, FREE_DELIVERY coupon, or a member tier perk).
   // A free-delivery waiver still fully waives a distance-priced order — the perk means "no delivery

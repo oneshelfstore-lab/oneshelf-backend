@@ -3,6 +3,7 @@ import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib/errors.js";
 import { requireRole } from "../middleware/auth.js";
+import { isDeliveryFeeCompulsory } from "../services/cartPricing.js";
 import {
   firebaseAuthMiddleware,
   requireAppRole,
@@ -65,6 +66,21 @@ appCouponRouter.post("/validate", async (req: FirebaseAuthRequest, res: Response
         success: true,
         data: { valid: false, reason: `Minimum order ₹${coupon.minOrder} required` },
       });
+    }
+
+    // A FREE_DELIVERY coupon can't waive a fee the store charges compulsorily, so refuse it up front
+    // rather than "applying" it to no effect (and burning a single-use code). Same floor + same
+    // helper the pricing engine uses, so the two can't disagree. Pickup isn't known here, but a
+    // free-delivery coupon does nothing on a pickup order either way.
+    if (coupon.couponType === "FREE_DELIVERY") {
+      const cfg = await prisma.storeConfig.findFirst({ select: { compulsoryDeliveryUpto: true } });
+      const floor = cfg ? Number(cfg.compulsoryDeliveryUpto) : 0;
+      if (isDeliveryFeeCompulsory({ isPickup: false, compulsoryDeliveryUpto: floor, deliveryEligibleSubtotal: cartTotal })) {
+        return res.json({
+          success: true,
+          data: { valid: false, reason: `Free delivery needs an order above ₹${floor}` },
+        });
+      }
     }
 
     let discount = 0;

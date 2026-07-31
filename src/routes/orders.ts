@@ -776,9 +776,13 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit as string) || 20));
 
     // Subscription-generated orders are EXCLUDED from the main "My Orders" list — a daily milk
-    // subscription would otherwise flood it with ~30 rows/month. They live in the Subscriptions screen
-    // instead. subscriptionId is null for normal checkout orders.
-    const listWhere = { customerId: userId, subscriptionId: null };
+    // subscription would otherwise flood it with ~30 rows/month. subscriptionId is null for normal
+    // checkout orders. ?subscription=only inverts it, for the app's Past → Subscription sub-tab
+    // (which had no way to ever receive a row before this).
+    const listWhere = {
+      customerId: userId,
+      subscriptionId: req.query.subscription === "only" ? { not: null } : null,
+    };
     const [orders, total] = await Promise.all([
       prisma.order.findMany({
         where: listWhere,

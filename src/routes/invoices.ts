@@ -13,9 +13,13 @@ import { getNextInvoiceNumber } from "../services/invoiceNumbering.js";
 import { generateInvoicePdf } from "../services/pdfGenerator.js";
 import { resolveStoreState, stateCodeFromGstin } from "../lib/stateCodes.js";
 import { consumeFifo, recordConsumption } from "../services/stockBatches.js";
-import type { AuthRequest } from "../middleware/auth.js";
+import { requireRole, BILLING_ROLES, FINANCE_ROLES, type AuthRequest } from "../middleware/auth.js";
 
 const router = Router();
+
+// Reads (list / detail / PDF) stay open to every staff role — showing a colleague an invoice is
+// what this dashboard is for. What's gated below is issuing and restating financial documents:
+// a credit or debit note rewrites a number that has already been filed with the GST portal.
 
 const WALKIN_CUSTOMER_ID = "walkin-customer";
 
@@ -122,7 +126,7 @@ async function logAudit(
 
 // ─── POST /api/invoices — Create invoice ─────────────────────────────
 
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", requireRole(...BILLING_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const parsed = createInvoiceSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -470,7 +474,7 @@ router.get("/:id", async (req: Request, res: Response) => {
 
 // ─── POST /api/invoices/:id/cancel — Cancel invoice ──────────────────
 
-router.post("/:id/cancel", async (req: Request, res: Response) => {
+router.post("/:id/cancel", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const parsed = cancelSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -547,7 +551,7 @@ router.post("/:id/cancel", async (req: Request, res: Response) => {
 
 // ─── POST /api/invoices/credit-note — Create credit note ─────────────
 
-router.post("/credit-note", async (req: Request, res: Response) => {
+router.post("/credit-note", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const parsed = creditNoteSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -716,7 +720,7 @@ router.post("/credit-note", async (req: Request, res: Response) => {
 
 // ─── POST /api/invoices/debit-note — Create debit note ───────────────
 
-router.post("/debit-note", async (req: Request, res: Response) => {
+router.post("/debit-note", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const parsed = debitNoteSchema.safeParse(req.body);
     if (!parsed.success) {

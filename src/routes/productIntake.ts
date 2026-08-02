@@ -1,7 +1,9 @@
 import { Router, type Request, type Response, type NextFunction } from "express";
+import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError } from "../lib/errors.js";
+import { constantTimeEquals } from "./internal.js";
 
 // Submissions from the standalone product-intake HTML form (see tools/add-products.html).
 // The brother/staff fill the form from anywhere on the web → POST lands here → owner reviews
@@ -83,8 +85,23 @@ const submitSchema = z.object({
 
 // ─── POST / — public submit ──────────────────────────────────────────────────
 
+// The global 100/min limiter is far too generous for an ANONYMOUS write: the schema accepts 200
+// products × 20 variants, so 100 req/min is ~400k attacker-controlled rows a minute per IP —
+// enough to exhaust storage and bury the owner's review queue. This is a form a human fills in a
+// few times a day, so a tight bucket costs legitimate users nothing.
+const intakeSubmitLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    success: false,
+    error: { code: "RATE_LIMITED", message: "Too many submissions. Try again later.", details: [] },
+  },
+});
+
 router.options("/", publicCors);
-router.post("/", publicCors, async (req: Request, res: Response) => {
+router.post("/", publicCors, intakeSubmitLimiter, async (req: Request, res: Response) => {
   try {
     const parsed = submitSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -122,8 +139,11 @@ function adminAuth(req: Request, res: Response, next: NextFunction) {
     });
     return;
   }
-  const provided = req.headers["x-intake-admin-token"];
-  if (provided !== secret) {
+  const header = req.headers["x-intake-admin-token"];
+  const provided = Array.isArray(header) ? header[0] : header;
+  // Constant-time — a plain `!==` exits at the first differing byte and leaks the match length.
+  // Shares internal.ts's implementation so both shared-secret checks behave identically.
+  if (!provided || !constantTimeEquals(provided, secret)) {
     res.status(403).json({
       success: false,
       error: { code: "FORBIDDEN", message: "Invalid admin token" },

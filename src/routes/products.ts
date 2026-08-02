@@ -2,8 +2,13 @@ import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError, ConflictError, sendError } from "../lib/errors.js";
+import { requireRole } from "../middleware/auth.js";
 
 const router = Router();
+
+// Reads open to all staff; writes are OWNER-only, matching the precedent adminCatalogRouter already
+// sets for the app-facing catalog (catalog.ts:713 etc). This is the legacy POS product table — the
+// same pricing/stock authority, so it gets the same gate rather than a looser one.
 
 // ─── Validation Schemas ──────────────────────────────────────────────
 
@@ -68,7 +73,7 @@ const paginationSchema = z.object({
 
 // ─── POST /api/products — Create product ─────────────────────────────
 
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
     const parsed = createProductSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -222,7 +227,7 @@ router.get("/:id", async (req: Request, res: Response) => {
 
 // ─── PUT /api/products/:id — Update product ──────────────────────────
 
-router.put("/:id", async (req: Request, res: Response) => {
+router.put("/:id", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
     const existing = await prisma.product.findUnique({
       where: { id: req.params.id },
@@ -277,7 +282,7 @@ router.put("/:id", async (req: Request, res: Response) => {
 
 // ─── DELETE /api/products/:id — Soft delete ──────────────────────────
 
-router.delete("/:id", async (req: Request, res: Response) => {
+router.delete("/:id", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
     const existing = await prisma.product.findUnique({
       where: { id: req.params.id },
@@ -306,7 +311,7 @@ const bulkProductSchema = z.array(
   }),
 ).min(1).max(500);
 
-router.post("/bulk", async (req: Request, res: Response) => {
+router.post("/bulk", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
     const parsed = bulkProductSchema.safeParse(req.body);
     if (!parsed.success) {

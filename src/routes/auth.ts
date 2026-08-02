@@ -54,7 +54,16 @@ router.post("/login", async (req: Request, res: Response) => {
       data: { userId: user.email, action: "LOGIN", entityType: "User", entityId: user.id, ipAddress: req.ip || "" },
     });
 
-    const payload: JwtPayload = { userId: user.id, email: user.email, role: user.role, name: user.name };
+    // mustChangePassword rides in the token so requirePasswordChanged can refuse every dashboard
+    // route until the seeded/reset password is actually replaced. Login itself still succeeds —
+    // the client needs a token to be able to CALL change-password.
+    const payload: JwtPayload = {
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      name: user.name,
+      mustChangePassword: user.mustChangePassword,
+    };
     const token = generateToken(payload);
     const refreshToken = generateRefreshToken(payload);
 
@@ -99,7 +108,15 @@ router.post("/refresh", async (req: Request, res: Response) => {
       });
     }
 
-    const newPayload: JwtPayload = { userId: user.id, email: user.email, role: user.role, name: user.name };
+    // Re-read from the DB (not copied from the old token) so a password change made on another
+    // device clears the flag here too.
+    const newPayload: JwtPayload = {
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      name: user.name,
+      mustChangePassword: user.mustChangePassword,
+    };
     const newToken = generateToken(newPayload);
     const newRefreshToken = generateRefreshToken(newPayload);
 
@@ -157,7 +174,20 @@ router.post("/change-password", authMiddleware, async (req: AuthRequest, res: Re
       data: { passwordHash, mustChangePassword: false },
     });
 
-    res.json({ success: true, data: { message: "Password changed successfully" } });
+    // Hand back fresh tokens. The caller's current token still carries mustChangePassword: true,
+    // so without this they'd change their password and remain locked out by requirePasswordChanged
+    // until they logged in again.
+    // Rebuilt from the caller's own verified token rather than the DB row — same identity, only the
+    // flag changes, and it avoids re-introducing this file's nullable-`user.email` type wart.
+    const payload: JwtPayload = { ...req.user!, mustChangePassword: false };
+    res.json({
+      success: true,
+      data: {
+        message: "Password changed successfully",
+        token: generateToken(payload),
+        refreshToken: generateRefreshToken(payload),
+      },
+    });
   } catch (e) {
     sendError(res, e);
   }

@@ -70,7 +70,7 @@ import onboardingAgreementRoutes from "./routes/onboardingAgreements.js";
 import privacyNoticeRoutes from "./routes/privacyNotice.js";
 import deliveryOnboardingRoutes from "./routes/deliveryOnboarding.js";
 import ownerOnboardingQueueRoutes from "./routes/ownerOnboardingQueue.js";
-import { authMiddleware } from "./middleware/auth.js";
+import { authMiddleware, requireRole, requirePasswordChanged, STAFF_ROLES } from "./middleware/auth.js";
 import { auditLoggerMiddleware } from "./middleware/auditLogger.js";
 import { globalErrorHandler } from "./middleware/errorHandler.js";
 import { initFirebase } from "./lib/firebase.js";
@@ -177,7 +177,10 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS
 const PUBLIC_OPEN_PATHS = ["/api/app/public/product-intake"];
 
 app.use(cors((req, callback) => {
-  const isPublic = PUBLIC_OPEN_PATHS.some((p) => req.path.startsWith(p));
+  // EXACT match, not startsWith. A prefix match also caught `/api/app/public/product-intake/admin`,
+  // handing the shared-secret admin endpoints the same `origin: true` as the anonymous submit form —
+  // the opposite of what productIntake.ts's own comment claimed. Only the bare submit path is open.
+  const isPublic = PUBLIC_OPEN_PATHS.some((p) => req.path === p || req.path === `${p}/`);
   if (isPublic) {
     callback(null, { origin: true, credentials: false });
     return;
@@ -192,12 +195,35 @@ app.use(cors((req, callback) => {
   });
 }));
 
-// Capture the raw request body so the Razorpay webhook can verify its HMAC signature against the
-// exact bytes Razorpay signed (a parsed-then-restringified body would not match).
-app.use(express.json({
-  limit: "10mb",
+// ─── Body parsing ───────────────────────────────────────────────────
+//
+// A single global `express.json({ limit: "10mb" })` used to apply to EVERY route, including the
+// unauthenticated ones — so any anonymous caller could make the server parse and hold 10 MB before
+// a single line of auth or handler code ran. The raw-body hook made it worse by retaining a second
+// copy of every request. Both are now scoped: the few routes that genuinely carry bulk payloads are
+// allowlisted below, and everything else gets a limit sized for what an API request actually is.
+//
+// These mounts must stay ABOVE the route mounts — the first parser to run wins (body-parser marks
+// the request handled), so the global default below only applies to paths not matched here.
+
+const LARGE_BODY_LIMIT = "10mb";
+
+// Razorpay webhook — needs the exact bytes Razorpay signed for the HMAC check (a parsed-then-
+// restringified body would not match), so this is the ONLY place the raw-body hook is installed.
+app.use("/api/app/webhooks", express.json({
+  limit: LARGE_BODY_LIMIT,
   verify: (req, _res, buf) => { (req as any).rawBody = buf; },
 }));
+
+// Bulk imports legitimately carry a whole catalog in one request.
+app.use("/api/catalog/import-csv", express.json({ limit: LARGE_BODY_LIMIT }));
+app.use("/api/categories/import-csv", express.json({ limit: LARGE_BODY_LIMIT }));
+// Public intake form: up to 200 products × 20 variants (and separately rate-limited in its router).
+app.use("/api/app/public/product-intake", express.json({ limit: LARGE_BODY_LIMIT }));
+
+// Everything else. A real request on this API — place an order, save a product, update config — is
+// a few KB; 512 KB is already generous headroom.
+app.use(express.json({ limit: "512kb" }));
 
 // ─── Request ID + structured access log ────────────────────────────
 // Assigns/propagates a request id and emits one JSON line per request on finish
@@ -253,6 +279,27 @@ const authLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, error: { code: "RATE_LIMITED", message: "Too many login attempts, try again later", details: [] } },
+});
+
+// Second login brake, keyed on the ACCOUNT being attacked rather than the source IP.
+//
+// authLimiter above buckets by IP, which two things defeat: a botnet or proxy pool rotates the key
+// for free, and if the `trust proxy` hop count is ever wrong for the deployment, a client-supplied
+// X-Forwarded-For sets the key outright. Neither touches this one — the attacker cannot vary the
+// email of the account they are trying to break into. 10 tries per 15 min per account is invisible
+// to a human who mistyped their password and ruinous to a guessing run.
+//
+// Deliberately keyed on the email alone (no IP fallback): a request with no email fails zod
+// validation in the handler anyway, and mixing in req.ip would need express-rate-limit v8's
+// ipKeyGenerator helper for correct IPv6 handling, for a bucket that only ever holds junk.
+const loginAccountLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) =>
+    String((req.body as any)?.email ?? "").toLowerCase().trim().slice(0, 200) || "__no_email__",
+  message: { success: false, error: { code: "RATE_LIMITED", message: "Too many login attempts for this account, try again later", details: [] } },
 });
 
 const writeLimiter = rateLimit({
@@ -358,12 +405,20 @@ app.use("/api/app/me", appUserRoutes);
 
 // ─── Auth routes (no auth middleware) ───────────────────────────────
 
-app.use("/api/auth/login", authLimiter);
+app.use("/api/auth/login", authLimiter, loginAccountLimiter);
 app.use("/api/auth", authRoutes);
 
 // ─── Protected routes ───────────────────────────────────────────────
 
 app.use("/api", authMiddleware as any);
+// Defense in depth: authMiddleware proves WHO you are, this proves you belong on the dashboard at
+// all. Blocks the app-side roles (CUSTOMER/DELIVERY/SELLER) from every `/api/*` route in one place,
+// including any router added later that forgets its own gate. Mounted here so it can only ever
+// affect routes registered BELOW it — every `/api/app/*` router is mounted above and is unaffected.
+app.use("/api", requireRole(...STAFF_ROLES) as any);
+// Refuses every dashboard route while the account is still on its seeded/reset password. Sits
+// below the `/api/auth` mount above, so change-password itself stays reachable.
+app.use("/api", requirePasswordChanged as any);
 app.use("/api", auditLoggerMiddleware as any);
 
 app.use("/api/company", companyRoutes);
@@ -385,7 +440,10 @@ app.use("/api/reports", reportRoutes);
 
 // ─── Audit Log viewer endpoint ──────────────────────────────────────
 
-app.get("/api/audit-logs", async (req, res) => {
+// OWNER-only: this is the tamper-evidence record (it carries user emails, IPs, and the old/new
+// values of every logged change). Readable by any staff role it would let an attacker confirm
+// whether their own activity was recorded — the log has to outrank the people it watches.
+app.get("/api/audit-logs", requireRole("OWNER") as any, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));

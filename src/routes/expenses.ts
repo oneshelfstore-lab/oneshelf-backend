@@ -3,8 +3,12 @@ import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError, sendError } from "../lib/errors.js";
 import { amountSchema, nonNegativeAmountSchema, dateStringSchema, paginationSchema } from "../validators/index.js";
+import { requireRole, FINANCE_ROLES } from "../middleware/auth.js";
 
 const router = Router();
+
+// Reads open to all staff; writes are finance-only — expenses feed the P&L and the 44AD/GSTR-3B
+// reports, so a fabricated or deleted row changes a filed figure.
 
 // ─── Validation ──────────────────────────────────────────────────────
 
@@ -48,7 +52,7 @@ const listExpenseSchema = paginationSchema.extend({
 
 // ─── POST /api/expenses ──────────────────────────────────────────────
 
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const parsed = createExpenseSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -147,7 +151,7 @@ router.get("/:id", async (req: Request, res: Response) => {
 
 // ─── PUT /api/expenses/:id ───────────────────────────────────────────
 
-router.put("/:id", async (req: Request, res: Response) => {
+router.put("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const existing = await prisma.expense.findUnique({ where: { id: req.params.id } });
     if (!existing) throw new NotFoundError("Expense", req.params.id!);
@@ -186,7 +190,7 @@ router.put("/:id", async (req: Request, res: Response) => {
 // Expense has no isActive flag (unlike Vendor/Employee) — a mis-entered expense is hard-deleted.
 // The global audit-logger middleware records the delete regardless.
 
-router.delete("/:id", async (req: Request, res: Response) => {
+router.delete("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const existing = await prisma.expense.findUnique({ where: { id: req.params.id } });
     if (!existing) throw new NotFoundError("Expense", req.params.id!);

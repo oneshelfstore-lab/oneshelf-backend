@@ -3,8 +3,12 @@ import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError, sendError } from "../lib/errors.js";
 import { isUpGstin, extractPanFromGstin, optionalPanSchema } from "../validators/index.js";
+import { requireRole, BILLING_ROLES } from "../middleware/auth.js";
 
 const router = Router();
+
+// Reads open to all staff; creating/editing a customer record is a billing action, and a customer
+// row is PII — a VIEWER must not be able to rewrite someone's name, phone or GSTIN.
 
 // ─── Validation Schemas ──────────────────────────────────────────────
 
@@ -63,7 +67,7 @@ const paginationSchema = z.object({
 
 // ─── POST /api/customers — Create ────────────────────────────────────
 
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", requireRole(...BILLING_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const parsed = createCustomerSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -208,7 +212,7 @@ router.get("/:id", async (req: Request, res: Response) => {
 
 // ─── PUT /api/customers/:id — Update ─────────────────────────────────
 
-router.put("/:id", async (req: Request, res: Response) => {
+router.put("/:id", requireRole(...BILLING_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const existing = await prisma.customer.findUnique({
       where: { id: req.params.id },

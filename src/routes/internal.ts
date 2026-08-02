@@ -31,7 +31,9 @@ function authorize(req: Request, res: Response): boolean {
   return true;
 }
 
-function constantTimeEquals(a: string, b: string): boolean {
+/** Shared with productIntake.ts's admin-token check — one implementation, so a future fix to the
+ *  comparison can't land on only half the shared-secret endpoints. */
+export function constantTimeEquals(a: string, b: string): boolean {
   const aBuf = Buffer.from(a);
   const bBuf = Buffer.from(b);
   // Lengths differ ⇒ definitely not equal, but comparing against a same-length buffer keeps this

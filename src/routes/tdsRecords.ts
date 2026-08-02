@@ -4,8 +4,12 @@ import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError, sendError } from "../lib/errors.js";
 import { panSchema, nonNegativeAmountSchema, dateStringSchema, paginationSchema } from "../validators/index.js";
 import { getCurrentFinancialYear } from "../services/invoiceNumbering.js";
+import { requireRole, FINANCE_ROLES } from "../middleware/auth.js";
 
 const router = Router();
+
+// Reads open to all staff; writes are finance-only. A TDS record is a statutory withholding entry
+// that goes into a quarterly return — altering one is altering what was filed with the department.
 
 // ─── Validation ──────────────────────────────────────────────────────
 
@@ -57,7 +61,7 @@ function quarterFor(date: Date): "Q1" | "Q2" | "Q3" | "Q4" {
 // quarter/financialYear are derived from paymentDate (not caller-supplied) — the whole point of a TDS
 // register is that its quarter bucket is a legal fact, not a free-text field someone can mis-key.
 
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const parsed = createTdsSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -144,7 +148,7 @@ router.get("/:id", async (req: Request, res: Response) => {
 
 // ─── PUT /api/tds-records/:id ─────────────────────────────────────────
 
-router.put("/:id", async (req: Request, res: Response) => {
+router.put("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const existing = await prisma.tdsRecord.findUnique({ where: { id: req.params.id } });
     if (!existing) throw new NotFoundError("TdsRecord", req.params.id!);
@@ -195,7 +199,7 @@ router.put("/:id", async (req: Request, res: Response) => {
 // ─── DELETE /api/tds-records/:id ──────────────────────────────────────
 // Once the return is filed (or deposited to govt) this is a real regulatory record — block deletion.
 
-router.delete("/:id", async (req: Request, res: Response) => {
+router.delete("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const existing = await prisma.tdsRecord.findUnique({ where: { id: req.params.id } });
     if (!existing) throw new NotFoundError("TdsRecord", req.params.id!);

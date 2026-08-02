@@ -5,8 +5,13 @@ import { ValidationError, NotFoundError, sendError } from "../lib/errors.js";
 import { calculateLineItemTax, calculateInvoiceTotals } from "../services/taxEngine.js";
 import { receiveBatch } from "../services/stockBatches.js";
 import { recordVendorPayment } from "../services/vendorPayments.js";
+import { requireRole, FINANCE_ROLES } from "../middleware/auth.js";
 
 const router = Router();
+
+// Reads open to all staff; writes are finance-only. Creating a purchase bill also RECEIVES STOCK
+// (receiveBatch) and bumps the vendor's outstanding balance, so it is simultaneously an inventory
+// and a payables write — not something a viewer or clerk should be able to invent.
 
 // ─── Validation ──────────────────────────────────────────────────────
 
@@ -47,7 +52,7 @@ const listSchema = z.object({
 
 // ─── POST /api/purchase-bills ────────────────────────────────────────
 
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const parsed = createBillSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -263,7 +268,7 @@ router.get("/:id", async (req: Request, res: Response) => {
 
 // ─── POST /api/purchase-bills/:id/payment — Quick payment ───────────
 
-router.post("/:id/payment", async (req: Request, res: Response) => {
+router.post("/:id/payment", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const paymentSchema = z.object({
       amount: z.number().positive(),

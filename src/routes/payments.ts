@@ -2,10 +2,17 @@ import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError, AppError, sendError } from "../lib/errors.js";
-import type { AuthRequest } from "../middleware/auth.js";
+import { requireRole, BILLING_ROLES, type AuthRequest } from "../middleware/auth.js";
 import { recordVendorPayment } from "../services/vendorPayments.js";
 
 const router = Router();
+
+// Recording a customer payment against an invoice is the billing clerk's core job, so the POST
+// below is BILLING_ROLES rather than finance-only. ⚠️ Note it also accepts PURCHASE_BILL payments
+// (the vendor branch), which means a clerk can mark a vendor bill settled. That is a narrower
+// insider-fraud question, not the open door this gate closes, and it is audit-logged; tighten to
+// FINANCE_ROLES here if vendor settlement should be finance-only, but check the dashboard's
+// payment modal still works for clerks first.
 
 function getUserId(req: Request): string {
   return (req as AuthRequest).user?.email || "system";
@@ -64,7 +71,7 @@ async function logAudit(
 
 // ─── POST /api/payments — Record payment ─────────────────────────────
 
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", requireRole(...BILLING_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const parsed = createPaymentSchema.safeParse(req.body);
     if (!parsed.success) {

@@ -3,8 +3,12 @@ import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError, sendError } from "../lib/errors.js";
 import { isUpGstin, optionalPanSchema } from "../validators/index.js";
+import { requireRole, FINANCE_ROLES } from "../middleware/auth.js";
 
 const router = Router();
+
+// Reads open to all staff; writes are finance-only — a vendor row carries bank details and drives
+// the payables ledger, so editing or deleting one moves where the store's money goes.
 
 // ─── Validation ──────────────────────────────────────────────────────
 
@@ -53,7 +57,7 @@ const listSchema = z.object({
 
 // ─── POST /api/vendors ───────────────────────────────────────────────
 
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const parsed = createVendorSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -235,7 +239,7 @@ router.get("/:id", async (req: Request, res: Response) => {
 
 // ─── PUT /api/vendors/:id ────────────────────────────────────────────
 
-router.put("/:id", async (req: Request, res: Response) => {
+router.put("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const existing = await prisma.vendor.findUnique({ where: { id: req.params.id } });
     if (!existing || !existing.isActive) {
@@ -278,7 +282,7 @@ router.put("/:id", async (req: Request, res: Response) => {
 
 // ─── DELETE /api/vendors/:id — Soft delete ───────────────────────────
 
-router.delete("/:id", async (req: Request, res: Response) => {
+router.delete("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const existing = await prisma.vendor.findUnique({ where: { id: req.params.id } });
     if (!existing) throw new NotFoundError("Vendor", req.params.id!);

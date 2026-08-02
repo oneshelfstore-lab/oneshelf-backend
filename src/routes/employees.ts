@@ -3,8 +3,14 @@ import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError, ConflictError, sendError } from "../lib/errors.js";
 import { phoneSchema, panSchema, emailSchema, nonNegativeAmountSchema, amountSchema, dateStringSchema, paginationSchema } from "../validators/index.js";
+import { requireRole, FINANCE_ROLES } from "../middleware/auth.js";
 
 const router = Router();
+
+// Payroll is the one dashboard resource whose READS are gated too. Everywhere else VIEWER may look
+// and simply not touch; salary, PAN and bank details of staff are third-party PII, not "the state
+// of the business", so a billing clerk or viewer has no reason to see them at all.
+router.use(requireRole(...FINANCE_ROLES) as any);
 
 // ─── Validation — Employee ───────────────────────────────────────────
 

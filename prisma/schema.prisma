@@ -1602,6 +1602,9 @@ model StoreConfig {
   deliveryDateLabel                    String   @default("Today")
   freeDeliveryAbove                    Decimal  @default(500) @db.Decimal(10, 2)
   deliveryCharge                       Decimal  @default(30) @db.Decimal(10, 2)
+  // Owner kill switch — every delivery order is free, unconditionally. Overrides freeDeliveryAbove,
+  // compulsoryDeliveryUpto and distance-based pricing entirely. Off by default (existing behavior).
+  noDeliveryCharge                     Boolean  @default(false)
   // Minimum cart subtotal (goods value, before delivery) required to place a DELIVERY order.
   // 0 = unenforced, and that is deliberately the default: this column lands on every existing store
   // at once, so a non-zero default would silently start refusing small baskets nobody had agreed to

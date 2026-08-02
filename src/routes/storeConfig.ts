@@ -35,6 +35,9 @@ const updateSchema = z.object({
   minOrderValue: z.number().min(0).optional(),
   // Subtotal at or below which the delivery fee can't be waived by coupon or tier. 0 = unenforced.
   compulsoryDeliveryUpto: z.number().min(0).optional(),
+  // Kill switch — every delivery is free, unconditionally (overrides freeDeliveryAbove,
+  // compulsoryDeliveryUpto, and distance pricing). Off by default.
+  noDeliveryCharge: z.boolean().optional(),
   isOrderingAllowed: z.boolean().optional(),
   operatingHoursStart: z.string().max(10).optional().nullable(),
   operatingHoursEnd: z.string().max(10).optional().nullable(),

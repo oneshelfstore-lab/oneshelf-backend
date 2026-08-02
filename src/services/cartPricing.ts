@@ -287,28 +287,31 @@ export async function calculateCartTotals(
     compulsoryDeliveryUpto,
     deliveryEligibleSubtotal,
   });
+  // Owner kill switch — every delivery is free, full stop. Overrides the compulsory floor + distance
+  // pricing below; checked first so nothing downstream needs its own copy of this condition.
+  const noDeliveryCharge = storeConfig?.noDeliveryCharge === true;
 
   // A FREE_DELIVERY coupon under the compulsory floor waives nothing, so DON'T record it as applied —
   // placement writes a CouponRedemption off couponCode, which would burn a single-use code for zero
   // benefit. (`isFreeDelivery` above stays true but every later use of it is already guarded by
   // deliveryFeeCompulsory, so the fee is still charged.) /coupons/validate refuses these up front;
   // this is the backstop for a stale client that sends one anyway.
-  if (isFreeDelivery && deliveryFeeCompulsory) appliedCoupon = null;
+  if (isFreeDelivery && deliveryFeeCompulsory && !noDeliveryCharge) appliedCoupon = null;
 
   // Pickup never incurs a delivery charge. Otherwise charge the (possibly distance-based) fee unless
   // the order qualifies for free delivery (threshold, FREE_DELIVERY coupon, or a member tier perk).
   // A free-delivery waiver still fully waives a distance-priced order — the perk means "no delivery
   // fee," not "no delivery fee up to the flat rate."
-  if (!isPickup && (deliveryFeeCompulsory || (deliveryEligibleSubtotal < freeDeliveryAbove && !isFreeDelivery && !tierFreeDelivery))) {
+  if (!noDeliveryCharge && !isPickup && (deliveryFeeCompulsory || (deliveryEligibleSubtotal < freeDeliveryAbove && !isFreeDelivery && !tierFreeDelivery))) {
     deliveryCharge = standardDelivery;
   }
 
   // Attribute the delivery waiver to the tier ONLY when the tier was the reason it's free — the order
   // is a delivery order, below the free-delivery threshold, with no free-delivery coupon, and not under
   // the compulsory-fee floor, so it would have been charged if not for the member perk. Otherwise the
-  // waiver isn't the program's cost.
+  // waiver isn't the program's cost. (noDeliveryCharge is a store-wide waiver, not the tier's doing.)
   const tierDeliveryWaived =
-    tierFreeDelivery && !isPickup && !isFreeDelivery && !deliveryFeeCompulsory && deliveryEligibleSubtotal < freeDeliveryAbove
+    !noDeliveryCharge && tierFreeDelivery && !isPickup && !isFreeDelivery && !deliveryFeeCompulsory && deliveryEligibleSubtotal < freeDeliveryAbove
       ? standardDelivery
       : 0;
 

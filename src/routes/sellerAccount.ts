@@ -690,4 +690,70 @@ router.get("/analytics", async (req: SellerRequest, res: Response) => {
   }
 });
 
+// ─── Manager access — the house co-manager's login IS effectively the owner's second seat, so it
+// can view + edit EVERY seller's profile (owner's ask). Reuses updateSchema/shapeProfile above;
+// skips the KYC-lock/change-request dance that guards a SELLER self-editing their own approved
+// data — that lock exists to stop a seller silently overwriting what the owner already reviewed,
+// and doesn't apply when the owner's own manager is the one making the edit. ──
+function requireHouseManager(req: SellerRequest, res: Response): boolean {
+  if (!req.sellerIsHouse) {
+    res.status(403).json({
+      success: false,
+      error: { code: "NOT_HOUSE", message: "Only the house manager can view other sellers", details: [] },
+    });
+    return false;
+  }
+  return true;
+}
+
+router.get("/sellers", async (req: SellerRequest, res: Response) => {
+  try {
+    if (!requireHouseManager(req, res)) return;
+    const sellers = await prisma.seller.findMany({ orderBy: [{ isHouse: "desc" }, { createdAt: "desc" }] });
+    const data = await Promise.all(sellers.map(async (s) => shapeProfile(s, await isAgreementCurrent(s.id))));
+    res.json({ success: true, data });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+router.get("/sellers/:id", async (req: SellerRequest, res: Response) => {
+  try {
+    if (!requireHouseManager(req, res)) return;
+    const id = String(req.params.id ?? "");
+    const seller = await prisma.seller.findUnique({ where: { id } });
+    if (!seller) throw new NotFoundError("Seller", id);
+    res.json({ success: true, data: shapeProfile(seller, await isAgreementCurrent(seller.id)) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+router.put("/sellers/:id", async (req: SellerRequest, res: Response) => {
+  try {
+    if (!requireHouseManager(req, res)) return;
+    const id = String(req.params.id ?? "");
+    const parsed = updateSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid profile data", parsed.error.errors);
+
+    const current = await prisma.seller.findUnique({ where: { id }, select: { gstin: true, pan: true } });
+    if (!current) throw new NotFoundError("Seller", id);
+
+    if (parsed.data.gstin !== undefined || parsed.data.pan !== undefined) {
+      const nextGstin = (parsed.data.gstin ?? current.gstin) as string | null;
+      const nextPan = (parsed.data.pan ?? current.pan) as string | null;
+      if (nextGstin && nextPan && extractPanFromGstin(nextGstin) !== nextPan) {
+        throw new ValidationError(
+          `PAN (${nextPan}) doesn't match the PAN inside the GSTIN (${extractPanFromGstin(nextGstin)}). Check both.`,
+        );
+      }
+    }
+
+    const updated = await prisma.seller.update({ where: { id }, data: parsed.data });
+    res.json({ success: true, data: shapeProfile(updated, await isAgreementCurrent(updated.id)) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 export default router;

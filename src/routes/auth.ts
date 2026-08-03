@@ -63,6 +63,7 @@ router.post("/login", async (req: Request, res: Response) => {
       role: user.role,
       name: user.name,
       mustChangePassword: user.mustChangePassword,
+      tokenVersion: user.tokenVersion,
     };
     const token = generateToken(payload);
     const refreshToken = generateRefreshToken(payload);
@@ -116,6 +117,7 @@ router.post("/refresh", async (req: Request, res: Response) => {
       role: user.role,
       name: user.name,
       mustChangePassword: user.mustChangePassword,
+      tokenVersion: user.tokenVersion,
     };
     const newToken = generateToken(newPayload);
     const newRefreshToken = generateRefreshToken(newPayload);
@@ -169,9 +171,13 @@ router.post("/change-password", authMiddleware, async (req: AuthRequest, res: Re
     }
 
     const passwordHash = await bcrypt.hash(newPassword, 10);
-    await prisma.user.update({
+    // Bump tokenVersion so every OTHER token already issued for this account stops working. If the
+    // reason for changing the password was that it leaked, leaving the thief's existing 24h session
+    // alive would make the change cosmetic. The caller gets fresh tokens below and stays signed in.
+    const updated = await prisma.user.update({
       where: { id: user.id },
-      data: { passwordHash, mustChangePassword: false },
+      data: { passwordHash, mustChangePassword: false, tokenVersion: { increment: 1 } },
+      select: { tokenVersion: true },
     });
 
     // Hand back fresh tokens. The caller's current token still carries mustChangePassword: true,
@@ -179,7 +185,13 @@ router.post("/change-password", authMiddleware, async (req: AuthRequest, res: Re
     // until they logged in again.
     // Rebuilt from the caller's own verified token rather than the DB row — same identity, only the
     // flag changes, and it avoids re-introducing this file's nullable-`user.email` type wart.
-    const payload: JwtPayload = { ...req.user!, mustChangePassword: false };
+    // Must carry the NEW tokenVersion, or the token we just handed back would be invalidated by
+    // the very bump above and the user would be signed out the moment they used it.
+    const payload: JwtPayload = {
+      ...req.user!,
+      mustChangePassword: false,
+      tokenVersion: updated.tokenVersion,
+    };
     res.json({
       success: true,
       data: {

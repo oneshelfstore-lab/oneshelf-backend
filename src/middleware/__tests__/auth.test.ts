@@ -9,6 +9,7 @@ import {
   FINANCE_ROLES,
   requireRole,
   requirePasswordChanged,
+  isTokenRevoked,
 } from "../auth.js";
 
 /** Minimal express doubles — this repo has no mocking precedent, and none is needed: the
@@ -97,5 +98,32 @@ describe("requirePasswordChanged", () => {
   it("allows when the flag is absent (tokens issued before this field existed)", () => {
     const r = runMiddleware(requirePasswordChanged, { role: "OWNER" });
     expect(r.nextCalled).toBe(true);
+  });
+});
+
+describe("isTokenRevoked", () => {
+  it("accepts a token whose version matches the stored one", () => {
+    expect(isTokenRevoked(3, 3)).toBe(false);
+  });
+
+  it("rejects a token issued before the stored version was bumped", () => {
+    expect(isTokenRevoked(2, 3)).toBe(true);
+  });
+
+  // The backward-compat rule, and the reason this is a function rather than an inline comparison.
+  // Tokens minted before tokenVersion shipped carry `undefined`; the column defaults to 0. If this
+  // ever returns true, deploying signs out every dashboard user simultaneously.
+  it("treats a pre-tokenVersion token (undefined) as current against the 0 default", () => {
+    expect(isTokenRevoked(undefined, 0)).toBe(false);
+  });
+
+  it("still revokes a pre-tokenVersion token once the account has been bumped", () => {
+    expect(isTokenRevoked(undefined, 1)).toBe(true);
+  });
+
+  // Guards the ?? fallback specifically: `||` would treat a legitimate version 0 as missing. Same
+  // result here, but the test documents which operator is required.
+  it("treats an explicit version 0 as current", () => {
+    expect(isTokenRevoked(0, 0)).toBe(false);
   });
 });

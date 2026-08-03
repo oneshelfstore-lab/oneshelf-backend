@@ -312,6 +312,20 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       // Record coupon usage. The global cap is enforced atomically (guarded
       // updateMany) to prevent over-redemption under concurrency; per-user cap is
       // checked against the redemption ledger, and a redemption row is written.
+      //
+      // ⚠️ LOAD-BEARING ORDER — the coupon UPDATE below MUST stay above the per-user count, and
+      // must stay unconditional. The per-user check is a read-then-write (count, then create),
+      // which in isolation races: two concurrent checkouts would both read the pre-insert count
+      // and both redeem. What makes it safe is that the UPDATE takes a row-level exclusive lock on
+      // the coupon, held to commit — a second checkout on the SAME coupon blocks there, and under
+      // READ COMMITTED its later COUNT(*) takes a fresh snapshot that sees the first transaction's
+      // committed redemption row. So the lock, not a unique constraint, is the serialisation.
+      //
+      // Which means: reordering these statements, or skipping the increment on some path (e.g.
+      // "only bump usageCount when usageLimit is set"), silently reopens the race with no test
+      // failing. If this block ever needs restructuring, add @@unique([couponId, userId]) on
+      // CouponRedemption and catch P2002 instead — but check for existing duplicate rows first,
+      // since a perUserLimit > 1 coupon legitimately has several per user.
       if (totals.couponCode) {
         const coupon = await tx.coupon.findUnique({ where: { code: totals.couponCode } });
         if (coupon) {

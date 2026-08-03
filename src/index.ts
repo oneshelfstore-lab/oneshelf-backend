@@ -86,7 +86,43 @@ const PORT = parseInt(process.env.PORT || "4000", 10);
 
 // Behind Nginx/Cloud load balancer: trust the first proxy so req.ip and
 // express-rate-limit see the real client IP (not the proxy's).
+//
+// ⚠️ The "1" is an assertion about the deployment, and it is UNVERIFIED against Railway's edge.
+// It means "exactly one proxy sits in front", so Express takes the last X-Forwarded-For entry as
+// the client. If the real chain is longer, a client-supplied XFF header becomes the trusted value
+// and every IP-keyed rate limit below is bypassable by sending a different one each request. (The
+// login limiter is keyed on the submitted email precisely so it does not depend on this being
+// right — but the general and write limiters still do.)
+//
+// This cannot be settled by reading code, so the diagnostic below answers it from real traffic
+// instead of leaving it to someone remembering to run a manual probe.
 app.set("trust proxy", 1);
+
+// One-shot proxy-chain diagnostic. Logs the first few requests' raw XFF chain alongside the IP
+// Express derived from it, then goes quiet. Read it once after deploy:
+//   chainLength 1  → "trust proxy: 1" is correct, nothing to do.
+//   chainLength >1 → set trust proxy to that number (or `true` if Railway's hop count varies) and
+//                    re-check, because until then the IP-keyed limiters are advisory only.
+// Deliberately not gated behind an env var — a diagnostic nobody remembers to enable answers
+// nothing, and this costs a handful of log lines exactly once per boot.
+let proxyProbesRemaining = 5;
+app.use((req, _res, next) => {
+  if (proxyProbesRemaining > 0) {
+    proxyProbesRemaining--;
+    const raw = req.headers["x-forwarded-for"];
+    const chain = typeof raw === "string" ? raw.split(",").map((s) => s.trim()) : raw ?? [];
+    console.log(JSON.stringify({
+      level: "info",
+      type: "proxy-chain-probe",
+      note: "chainLength > 1 means `trust proxy: 1` is wrong — see index.ts",
+      chainLength: chain.length,
+      chain,
+      derivedIp: req.ip,
+      trustProxySetting: 1,
+    }));
+  }
+  next();
+});
 
 // Explicit alongside helmet()'s hidePoweredBy (which already strips this) — Express sets
 // "X-Powered-By: Express" by default, revealing the framework to anyone probing headers.

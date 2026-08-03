@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import type { UserRole } from "@prisma/client";
+import prisma from "../lib/prisma.js";
 
 const JWT_SECRET = process.env.JWT_SECRET;
 // Hard-fail on boot if the secret is missing, default, or weak. A predictable
@@ -24,6 +25,10 @@ export interface JwtPayload {
   /** True while the account still holds its seeded / admin-reset password. Carried in the token so
    *  requirePasswordChanged can enforce it without a DB read per request. */
   mustChangePassword?: boolean;
+  /** Snapshot of User.tokenVersion at issue time. authMiddleware refuses the token once the stored
+   *  value moves past it. Optional so tokens issued before this shipped still validate (they read
+   *  as undefined and are compared against 0, the column default). */
+  tokenVersion?: number;
 }
 
 export interface AuthRequest extends Request {
@@ -42,7 +47,20 @@ export function verifyToken(token: string): JwtPayload {
   return jwt.verify(token, SECRET) as JwtPayload;
 }
 
-export function authMiddleware(req: AuthRequest, res: Response, next: NextFunction) {
+/**
+ * Whether a token's baked-in version has been superseded by the stored one.
+ *
+ * Pure and exported so the backward-compat rule can be pinned by a test without mocking Prisma
+ * (this codebase has no mocking precedent — every existing test is a pure-function test). The
+ * `?? 0` is the part that matters: tokens minted before tokenVersion existed carry `undefined`,
+ * and the column defaults to 0, so they must read as CURRENT. Drop the fallback and the deploy
+ * signs out every dashboard user at once.
+ */
+export function isTokenRevoked(tokenVersion: number | undefined, storedVersion: number): boolean {
+  return (tokenVersion ?? 0) !== storedVersion;
+}
+
+export async function authMiddleware(req: AuthRequest, res: Response, next: NextFunction) {
   const header = req.headers.authorization;
   if (!header || !header.startsWith("Bearer ")) {
     return res.status(401).json({
@@ -51,23 +69,63 @@ export function authMiddleware(req: AuthRequest, res: Response, next: NextFuncti
     });
   }
 
+  let payload: JwtPayload;
   try {
     const token = header.slice(7);
-    const payload = verifyToken(token);
+    payload = verifyToken(token);
     if ((payload as any).type === "refresh") {
       return res.status(401).json({
         success: false,
         error: { code: "UNAUTHORIZED", message: "Cannot use refresh token for API access", details: [] },
       });
     }
-    req.user = payload;
-    next();
   } catch {
     return res.status(401).json({
       success: false,
       error: { code: "TOKEN_EXPIRED", message: "Token expired or invalid", details: [] },
     });
   }
+
+  // Signature-valid is not the same as still-valid. A JWT is stateless and lives 24h, so without
+  // this lookup a dismissed employee kept full dashboard access for up to a day after being
+  // deactivated — isActive only ever gated the next LOGIN and the next REFRESH, never the token
+  // already in their hands. One indexed read by primary key per dashboard request; this API is
+  // low-traffic internal tooling, and the alternative is an un-revokable session.
+  //
+  // Deliberately NOT applied to the Firebase app auth path — that middleware has its own lookup.
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: payload.userId },
+      select: { isActive: true, tokenVersion: true },
+    });
+
+    if (!user || !user.isActive) {
+      return res.status(401).json({
+        success: false,
+        error: { code: "ACCOUNT_DISABLED", message: "This account is no longer active", details: [] },
+      });
+    }
+
+    // Tokens minted before tokenVersion existed carry undefined; the column defaults to 0, so they
+    // stay valid until something actually bumps it. That keeps the deploy from logging everyone out.
+    if (isTokenRevoked(payload.tokenVersion, user.tokenVersion)) {
+      return res.status(401).json({
+        success: false,
+        error: { code: "TOKEN_REVOKED", message: "This session has been ended. Please sign in again.", details: [] },
+      });
+    }
+  } catch (e) {
+    // A DB failure must not be mistaken for a bad token — that would read as "your login is
+    // broken" during an outage. Fail closed, but say what actually happened.
+    console.error("authMiddleware lookup failed:", e);
+    return res.status(503).json({
+      success: false,
+      error: { code: "AUTH_UNAVAILABLE", message: "Could not verify your session right now", details: [] },
+    });
+  }
+
+  req.user = payload;
+  next();
 }
 
 /**

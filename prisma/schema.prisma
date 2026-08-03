@@ -342,6 +342,12 @@ model User {
   isActive           Boolean   @default(true)
   mustChangePassword Boolean   @default(false)
   lastLoginAt        DateTime?
+  // Bumped to invalidate every dashboard JWT already issued to this user. A JWT is stateless and
+  // lives 24h, so before this there was no way to end a session early: setting isActive=false
+  // blocked the next login and the next refresh, but the token already in someone's hands kept
+  // working for up to a day. authMiddleware now compares this against the value baked into the
+  // token. Raised on password change, and available for "log this account out everywhere".
+  tokenVersion       Int       @default(0)
 
   // Firebase-linked app users
   firebaseUid   String? @unique

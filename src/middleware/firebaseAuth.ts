@@ -128,6 +128,36 @@ export async function firebaseAuthMiddleware(
       }
     }
 
+    // ─── Mirror the Postgres role into a Firebase custom claim ────────────────────────────────
+    //
+    // firestore.rules and storage.rules used to identify the owner by a HARDCODED uid string, while
+    // this API's authority is User.role in Postgres — two sources of truth that could disagree, and
+    // which made rotating or adding an owner a rules edit + redeploy. The rules now read
+    // request.auth.token.role instead, and this is what puts it there.
+    //
+    // Done HERE rather than at the ~8 places role changes (ownerUsers, ownerStaff, ownerSellers,
+    // partner-application provisioning, the phone-link branch above, …) because a sync that has to
+    // be remembered at N call sites is a sync that eventually gets missed. This runs on every
+    // authenticated request, sees the authoritative row, and self-heals: existing users get their
+    // claim on their next API call, so no backfill script is needed.
+    //
+    // The write only fires when the claim actually differs from the DB — `decoded` already carries
+    // the token's current custom claims, so steady state costs one string comparison and no I/O.
+    //
+    // ⚠️ The claim reaches the RULES only after the client's next ID-token refresh (Firebase does
+    // this roughly hourly; the app can force it with getIdToken(true)). So there is a window where
+    // the DB says OWNER and the token does not yet. That is exactly why the rules accept the legacy
+    // hardcoded uid as well for now — see the comment in firestore.rules.
+    //
+    // Best-effort: a claim write must never turn a working request into a 401.
+    if ((decoded as Record<string, unknown>).role !== user.role) {
+      try {
+        await admin.auth().setCustomUserClaims(decoded.uid, { role: user.role });
+      } catch (e) {
+        console.error("setCustomUserClaims failed for", decoded.uid, e);
+      }
+    }
+
     req.appUser = {
       id: user.id,
       firebaseUid: user.firebaseUid!,

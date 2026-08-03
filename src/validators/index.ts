@@ -80,6 +80,19 @@ export const phoneSchema = z.string().regex(
   "Phone must be 10 digits starting with 6-9",
 );
 
+// ─── Settlement bank account ──────────────────────────────────────────────────
+// Shared by every "where does this partner's money go" field: seller payouts
+// (sellerAccount.ts), customer referral payouts (appUser.ts), and rider payout details
+// (deliveryOnboarding.ts). Lived as three byte-identical local copies before this.
+export const bankAccountNumberSchema = z.string().regex(/^\d{9,18}$/, "Invalid account number");
+
+// IFSC: 4-letter bank code + a literal 0 (reserved) + 6-char branch code.
+export const ifscSchema = z
+  .string()
+  .trim()
+  .toUpperCase()
+  .regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, "Invalid IFSC code");
+
 // HSN code: 4-8 digits
 export const hsnCodeSchema = z.string().regex(
   /^\d{4,8}$/,

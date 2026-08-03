@@ -5,7 +5,13 @@ import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { memoCache } from "../lib/httpCache.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
-import { isValidGstin, optionalPanSchema, extractPanFromGstin } from "../validators/index.js";
+import {
+  isValidGstin,
+  optionalPanSchema,
+  extractPanFromGstin,
+  bankAccountNumberSchema,
+  ifscSchema,
+} from "../validators/index.js";
 import { PARTNER_AGREEMENT_VERSION } from "../data/onboardingAgreements.js";
 
 // A GSTIN is optional (a seller may be unregistered) but, when present, must be well-formed +
@@ -263,8 +269,8 @@ router.put("/", async (req: SellerRequest, res: Response) => {
 // bank-details route so both money-settlement flows validate the same way.
 const bankDetailsSchema = z.object({
   accountName: z.string().trim().min(2).max(100),
-  accountNumber: z.string().regex(/^\d{9,18}$/, "Invalid account number"),
-  ifsc: z.string().trim().toUpperCase().regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, "Invalid IFSC code"),
+  accountNumber: bankAccountNumberSchema,
+  ifsc: ifscSchema,
 });
 
 router.put("/bank-details", async (req: SellerRequest, res: Response) => {
@@ -691,10 +697,10 @@ router.get("/analytics", async (req: SellerRequest, res: Response) => {
 });
 
 // ─── Manager access — the house co-manager's login IS effectively the owner's second seat, so it
-// can view + edit EVERY seller's profile (owner's ask). Reuses updateSchema/shapeProfile above;
-// skips the KYC-lock/change-request dance that guards a SELLER self-editing their own approved
-// data — that lock exists to stop a seller silently overwriting what the owner already reviewed,
-// and doesn't apply when the owner's own manager is the one making the edit. ──
+// can view + edit EVERY seller's profile, not just its own (owner's ask). Reuses updateSchema/
+// shapeProfile above; skips the KYC-lock/change-request dance that guards a SELLER self-editing
+// their own approved data — that lock exists to stop a seller silently overwriting what the owner
+// already reviewed, and doesn't apply when the owner's own manager is the one making the edit. ──
 function requireHouseManager(req: SellerRequest, res: Response): boolean {
   if (!req.sellerIsHouse) {
     res.status(403).json({

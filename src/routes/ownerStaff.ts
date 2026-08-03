@@ -84,24 +84,45 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       orderBy: { createdAt: "asc" },
     });
 
-    let agent;
-    if (existing) {
-      // Promote to DELIVERY. Keep their real name if they already have one; otherwise
-      // use the name the owner typed. Normalize the stored phone for clean matching.
-      const keepName = existing.name && existing.name !== "App User" ? existing.name : name;
-      agent = await prisma.user.update({
-        where: { id: existing.id },
-        data: { role: "DELIVERY", phone, name: keepName },
-        select: { id: true, name: true, phone: true, firebaseUid: true, isAvailableForDelivery: true },
+    const agent = await prisma.$transaction(async (tx) => {
+      let user;
+      if (existing) {
+        // Promote to DELIVERY. Keep their real name if they already have one; otherwise
+        // use the name the owner typed. Normalize the stored phone for clean matching.
+        const keepName = existing.name && existing.name !== "App User" ? existing.name : name;
+        user = await tx.user.update({
+          where: { id: existing.id },
+          data: { role: "DELIVERY", phone, name: keepName },
+          select: { id: true, name: true, phone: true, firebaseUid: true, isAvailableForDelivery: true },
+        });
+      } else {
+        // Pre-register: a DELIVERY row with no Firebase account yet. firebaseAuthMiddleware
+        // links the account to this row by phone on the agent's first login.
+        user = await tx.user.create({
+          data: { name, phone, role: "DELIVERY", phoneVerified: false },
+          select: { id: true, name: true, phone: true, firebaseUid: true, isAvailableForDelivery: true },
+        });
+      }
+
+      // ⚠️ LOAD-BEARING — this is the ONLY thing putting a hand-added rider through KYC.
+      // deliveryOnboarding.ts reads a MISSING DeliveryProfile as a virtual already-APPROVED
+      // profile (a grandfather clause for riders who predate self-serve onboarding), and the
+      // NavGraph gate lets those straight through to the dashboard. Without this create, THIS
+      // route — the documented, primary way riders are added — kept minting new grandfathered
+      // riders forever: live with no ID photo, no selfie, no DL/RC, no consent records, and
+      // invisible to the owner's onboarding queue (which reads deliveryProfile rows, so there
+      // was nothing to find). Same fix ownerSellers.ts POST / got for the identical hole.
+      //
+      // upsert with an empty `update` = create-if-missing: a rider who's already mid-onboarding
+      // (or was previously approved, demoted via DELETE /:id, and is now being re-added) keeps
+      // their existing status instead of being sent back to square one.
+      await tx.deliveryProfile.upsert({
+        where: { userId: user.id },
+        create: { userId: user.id, onboardingStatus: "NOT_STARTED" },
+        update: {},
       });
-    } else {
-      // Pre-register: a DELIVERY row with no Firebase account yet. firebaseAuthMiddleware
-      // links the account to this row by phone on the agent's first login.
-      agent = await prisma.user.create({
-        data: { name, phone, role: "DELIVERY", phoneVerified: false },
-        select: { id: true, name: true, phone: true, firebaseUid: true, isAvailableForDelivery: true },
-      });
-    }
+      return user;
+    });
 
     res.json({ success: true, data: shape(agent) });
   } catch (e) {

@@ -1,6 +1,7 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
-import { optionalPanSchema } from "../validators/index.js";
+import { optionalPanSchema, bankAccountNumberSchema, ifscSchema } from "../validators/index.js";
+import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import {
@@ -94,6 +95,44 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
 });
 
 // ─── PUT / — progressive save. Document fields are Firebase Storage URLs, uploaded client-side ──
+
+// Where this rider's payout is settled. Was `z.any()`, so an IFSC of "asdf" saved happily onto a
+// field nobody re-reads until someone tries to actually pay them — same class of silent-money bug
+// the seller payout account got its own validated route for. Not a separate route here: unlike
+// SellerProfileTab, the rider has no standalone bank editor — this draft IS the only entry point.
+//
+// Every field is individually optional (the form is a progressive save, and a rider may settle by
+// UPI alone), but account number and IFSC are all-or-nothing: one without the other is an account
+// that cannot be paid into. The app sends all three keys with "" for the ones left blank, so blank
+// is normalized to absent rather than being validated as a malformed value.
+const blankToUndefined = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
+
+export const deliveryBankSchema = z
+  .object({
+    accountNumber: z.preprocess(blankToUndefined, bankAccountNumberSchema.optional()),
+    ifsc: z.preprocess(blankToUndefined, ifscSchema.optional()),
+    // e.g. name@okhdfcbank / 9876543210@ybl. Deliberately loose on the handle (every PSP coins its
+    // own suffix) — this checks the shape, not a registry.
+    upi: z.preprocess(
+      blankToUndefined,
+      z.string().regex(/^[\w.\-]{2,64}@[a-zA-Z]{2,32}$/, "Invalid UPI ID").optional(),
+    ),
+  })
+  .refine((b) => Boolean(b.accountNumber) === Boolean(b.ifsc), {
+    message: "Enter both the account number and the IFSC code, or neither.",
+  })
+  // Drop the keys left blank instead of persisting `{"ifsc": undefined}` into the Json column —
+  // the owner reads this straight off the review card, so absent should look absent.
+  .transform((b) => {
+    const out: Record<string, string> = {};
+    if (b.accountNumber) out.accountNumber = b.accountNumber;
+    if (b.ifsc) out.ifsc = b.ifsc;
+    if (b.upi) out.upi = b.upi;
+    return out;
+  })
+  .optional()
+  .nullable();
+
 const updateSchema = z.object({
   panNumber: optionalPanSchema,
   idDocType: z.enum(["AADHAAR", "VOTER_ID", "DL"]).optional().nullable(),
@@ -106,23 +145,48 @@ const updateSchema = z.object({
   rcDocUrl: z.string().max(500).optional().nullable(),
   insuranceExpiry: z.coerce.date().optional().nullable(),
   insuranceDocUrl: z.string().max(500).optional().nullable(),
-  bankDetails: z.any().optional().nullable(),
+  bankDetails: deliveryBankSchema,
   emergencyContactName: z.string().max(120).optional().nullable(),
   emergencyContactPhone: z.string().max(15).optional().nullable(),
   policeVerificationDocUrl: z.string().max(500).optional().nullable(),
 });
 
+// The app renders a rejected save's `error.message` and nothing else, so a bare "Invalid onboarding
+// data" tells the rider which of ~15 fields is wrong: none of them. Name the offending field.
+// Only these can actually fail — everything else is a max-length string or a chip-backed enum.
+const FIELD_LABELS: Record<string, string> = {
+  panNumber: "PAN",
+  accountNumber: "Bank account number",
+  ifsc: "IFSC",
+  upi: "UPI ID",
+};
+
+function readableZodMessage(issues: z.ZodIssue[]): string {
+  const first = issues[0];
+  if (!first) return "Invalid onboarding data";
+  // A cross-field refine (the account/IFSC pair) has an empty path and already reads as a sentence.
+  const key = first.path.filter((p): p is string => typeof p === "string").at(-1);
+  const label = key ? FIELD_LABELS[key] : undefined;
+  return label ? `${label}: ${first.message}` : first.message;
+}
+
 router.put("/", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     if (!req.appUser) throw new NotFoundError("User", "");
     const parsed = updateSchema.safeParse(req.body);
-    if (!parsed.success) throw new ValidationError("Invalid onboarding data", parsed.error.errors);
+    if (!parsed.success) throw new ValidationError(readableZodMessage(parsed.error.errors), parsed.error.errors);
 
     const existing = await getOrCreateProfile(req.appUser.id);
+    const { bankDetails, ...rest } = parsed.data;
     const updated = await prisma.deliveryProfile.update({
       where: { userId: req.appUser.id },
       data: {
-        ...parsed.data,
+        ...rest,
+        // bankDetails is a Json column and Prisma's generated input type won't take a plain `null`
+        // literal to clear one — it wants the Prisma.DbNull sentinel (same wrinkle storeConfig.ts
+        // documents for deliverySlabs). Scoped to this one key rather than `as any` on the whole
+        // payload, which would also silence real type errors on the 14 fields beside it.
+        ...(bankDetails !== undefined ? { bankDetails: bankDetails ?? Prisma.DbNull } : {}),
         // Editing after submission means the owner would review stale data — un-submit.
         ...(existing.onboardingStatus === "PENDING_REVIEW" ? { onboardingStatus: "IN_PROGRESS" as const } : {}),
       },

@@ -109,3 +109,25 @@ export async function signOrderMedia<T extends OrderMedia>(order: T): Promise<T>
 export async function signOrderMediaList<T extends OrderMedia>(orders: T[]): Promise<T[]> {
   return Promise.all(orders.map(signOrderMedia));
 }
+
+/** 24h, not the order-media default of 6h. A user's own photo is read far less often per session
+ *  than an order screen — `GET /me` isn't refetched on every tap — so the shorter TTL would let a
+ *  cached avatar silently break mid-session once the URL expires. Still expires same-day. */
+const USER_PHOTO_TTL_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Same treatment as order media, applied to `User.photoUrl` (M-5 of SECURITY_AUDIT_2026-08.md — the
+ * one bucket still minting permanent `ref.downloadUrl` tokens as of the Aug 2026 audit). The app now
+ * uploads and stores the bare object path; this signs it at read time. Legacy rows still holding a
+ * full `https://…?token=…` from before this change pass through unchanged via [classifyStoredMedia]
+ * — no backfill needed, only new uploads get the expiring treatment.
+ *
+ * A user's own photo has exactly one consumer shape (a `User` row with `photoUrl`), unlike order
+ * media's three sibling fields, so this is a single-field version of [signOrderMedia] rather than a
+ * reason to generalise that one.
+ */
+export async function signUserPhoto<T extends { photoUrl?: string | null }>(user: T): Promise<T> {
+  if (!("photoUrl" in user)) return user;
+  const signed = await signStoragePath(user.photoUrl, USER_PHOTO_TTL_MS);
+  return { ...user, photoUrl: signed };
+}

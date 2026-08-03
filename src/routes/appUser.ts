@@ -32,6 +32,7 @@ import {
   OPTIONAL_CONSENT_TYPES,
 } from "../services/customerConsent.js";
 import { NOTICE_VERSION, GRIEVANCE_OFFICER } from "../data/customerPrivacyNotice.js";
+import { signUserPhoto } from "../lib/storageUrls.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -52,7 +53,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
       },
     });
     if (!user) throw new NotFoundError("User", req.appUser!.id);
-    res.json({ success: true, data: user });
+    res.json({ success: true, data: await signUserPhoto(user) });
   } catch (e) {
     sendError(res, e);
   }
@@ -210,7 +211,7 @@ router.put("/", async (req: FirebaseAuthRequest, res: Response) => {
       },
     });
 
-    res.json({ success: true, data: user });
+    res.json({ success: true, data: await signUserPhoto(user) });
   } catch (e) {
     // email is @unique — another account may already use it.
     if ((e as { code?: string })?.code === "P2002") {
@@ -313,7 +314,7 @@ router.get("/data-export", async (req: FirebaseAuthRequest, res: Response) => {
       success: true,
       data: {
         generatedAt: new Date().toISOString(),
-        profile: user,
+        profile: await signUserPhoto(user),
         addresses,
         orders,
         complaints,

@@ -231,6 +231,28 @@ export async function notifyNewComplaint(info: { id: string; subject: string; cu
   });
 }
 
+// Owner paged this complaint to a seller, asking for a response.
+export async function notifyComplaintForwarded(sellerOwnerUserId: string, info: { complaintId: string; subject: string }) {
+  const tokens = await getUserTokens(sellerOwnerUserId);
+  if (tokens.length === 0) return;
+  await sendToTokens(tokens, {
+    type: "complaint_forwarded",
+    complaintId: info.complaintId,
+    title: "The store needs your response",
+    body: `A customer complaint needs your input: ${info.subject}`,
+  });
+}
+
+// Seller replied — surfaces to the owner only (the seller never talks to the customer directly).
+export async function notifyComplaintSellerResponded(info: { complaintId: string; subject: string; sellerName: string }) {
+  await sendToTopic("owner_orders", {
+    type: "complaint_seller_response",
+    complaintId: info.complaintId,
+    title: `${info.sellerName} responded`,
+    body: `Reply on complaint: ${info.subject}`,
+  });
+}
+
 export async function notifyNewQuoteRequest(info: { id: string; type: string; customerName: string }) {
   await sendToTopic("owner_orders", {
     type: "quote_request",

@@ -910,6 +910,9 @@ export function shapeComplaint(c: {
   orderId: string | null; imageUrl?: string | null; createdAt: Date; resolvedAt: Date | null;
   returnRequested?: boolean; suggestedRefundAmount?: unknown; sellerNote?: string | null;
   refundedAmount?: unknown; refundMode?: string | null; refundedAt?: Date | null;
+  forwardedToSellerId?: string | null; forwardedAt?: Date | null; forwardNote?: string | null;
+  sellerResponse?: string | null; sellerRespondedAt?: Date | null;
+  forwardedSeller?: { name: string } | null;
   user?: { name: string; phone: string | null; role?: string } | null;
 }) {
   return {
@@ -934,6 +937,13 @@ export function shapeComplaint(c: {
     refundedAmount: c.refundedAmount != null ? Number(c.refundedAmount) : null,
     refundMode: c.refundMode ?? null,
     refundedAt: c.refundedAt ? c.refundedAt.getTime() : null,
+    // Owner→seller routing (see ownerComplaints.ts /forward + sellerComplaints.ts /respond).
+    forwardedToSellerId: c.forwardedToSellerId ?? null,
+    forwardedSellerName: c.forwardedSeller?.name ?? null,
+    forwardedAt: c.forwardedAt ? c.forwardedAt.getTime() : null,
+    forwardNote: c.forwardNote ?? null,
+    sellerResponse: c.sellerResponse ?? null,
+    sellerRespondedAt: c.sellerRespondedAt ? c.sellerRespondedAt.getTime() : null,
   };
 }
 

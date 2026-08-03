@@ -8,6 +8,7 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { shapeComplaint } from "./appUser.js";
+import { notifyComplaintForwarded } from "../services/fcmNotifier.js";
 
 // Owner complaint inbox. Mounted at /api/app/owner/complaints.
 const router = Router();
@@ -33,7 +34,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         orderBy: { createdAt: "desc" },
         skip: (page - 1) * limit,
         take: limit,
-        include: { user: { select: { name: true, phone: true, role: true } } },
+        include: { user: { select: { name: true, phone: true, role: true } }, forwardedSeller: { select: { name: true } } },
       }),
       prisma.complaint.count({ where: role ? { user: { role } } : undefined }),
     ]);
@@ -43,6 +44,79 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
       data: complaints.map((c) => shapeComplaint(c)),
       pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
     });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// GET /api/app/owner/complaints/:id/sellers → sellers who fulfilled a slice of this complaint's
+// order — the "dedicated seller" a complaint can be paged to. Empty when the complaint has no
+// linked order (nothing to route it to; the owner just handles it themselves).
+router.get("/:id/sellers", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const complaint = await prisma.complaint.findUnique({ where: { id } });
+    if (!complaint) throw new NotFoundError("Complaint", id);
+    if (!complaint.orderId) return res.json({ success: true, data: [] });
+
+    const subOrders = await prisma.subOrder.findMany({
+      where: { orderId: complaint.orderId },
+      distinct: ["sellerId"],
+      select: { seller: { select: { id: true, name: true, isHouse: true } } },
+    });
+    res.json({ success: true, data: subOrders.map((s) => s.seller) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+const forwardSchema = z.object({
+  sellerId: z.string().min(1),
+  note: z.string().max(1000).optional(),
+});
+
+// POST /api/app/owner/complaints/:id/forward { sellerId, note? } → page this complaint to the
+// seller who fulfilled part of its order, asking for a response. Clears any earlier reply — a
+// re-forward (ask again, or page a different seller) is a fresh ask, not a continuation.
+router.post("/:id/forward", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const parsed = forwardSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid forward request", parsed.error.errors);
+
+    const complaint = await prisma.complaint.findUnique({ where: { id } });
+    if (!complaint) throw new NotFoundError("Complaint", id);
+    if (!complaint.orderId) {
+      throw new ValidationError("This complaint has no linked order — there's no seller to page it to.");
+    }
+
+    const subOrder = await prisma.subOrder.findFirst({
+      where: { orderId: complaint.orderId, sellerId: parsed.data.sellerId },
+      select: { seller: { select: { id: true, name: true, ownerUserId: true } } },
+    });
+    if (!subOrder) throw new ValidationError("That seller didn't fulfil part of this order.");
+
+    const updated = await prisma.complaint.update({
+      where: { id },
+      data: {
+        forwardedToSellerId: parsed.data.sellerId,
+        forwardedAt: new Date(),
+        forwardNote: parsed.data.note?.trim() || null,
+        sellerResponse: null,
+        sellerRespondedAt: null,
+      },
+      include: { user: { select: { name: true, phone: true, role: true } }, forwardedSeller: { select: { name: true } } },
+    });
+
+    if (subOrder.seller.ownerUserId) {
+      try {
+        await notifyComplaintForwarded(subOrder.seller.ownerUserId, { complaintId: id, subject: complaint.subject });
+      } catch (notifyErr) {
+        console.warn("notifyComplaintForwarded failed:", notifyErr);
+      }
+    }
+
+    res.json({ success: true, data: shapeComplaint(updated) });
   } catch (e) {
     sendError(res, e);
   }
@@ -58,7 +132,7 @@ router.post("/:id/resolve", async (req: FirebaseAuthRequest, res: Response) => {
     const updated = await prisma.complaint.update({
       where: { id },
       data: { status: "RESOLVED", resolvedAt: new Date() },
-      include: { user: { select: { name: true, phone: true, role: true } } },
+      include: { user: { select: { name: true, phone: true, role: true } }, forwardedSeller: { select: { name: true } } },
     });
     res.json({ success: true, data: shapeComplaint(updated) });
   } catch (e) {
@@ -121,7 +195,7 @@ router.post("/:id/refund", async (req: FirebaseAuthRequest, res: Response) => {
       });
     }
 
-    const updated = await prisma.complaint.findUnique({ where: { id }, include: { user: { select: { name: true, phone: true, role: true } } } });
+    const updated = await prisma.complaint.findUnique({ where: { id }, include: { user: { select: { name: true, phone: true, role: true } }, forwardedSeller: { select: { name: true } } } });
     res.json({ success: true, data: shapeComplaint(updated!) });
   } catch (e: any) {
     // P2002 on WalletTransaction's @@unique([orderId, type]) — this order already has an

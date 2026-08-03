@@ -221,13 +221,25 @@ async function main() {
 
   // ─── Default Admin User ────────────────────────────────────────────
   console.log("Seeding admin user...");
-  const adminPassword = await bcrypt.hash("admin123", 10);
+  // No literal here, ever. A default password checked into git is the first thing anyone tries
+  // against a public dashboard, and `update: {}` means re-seeding never rotates it away.
+  const seedPassword = process.env.SEED_ADMIN_PASSWORD;
+  if (!seedPassword || seedPassword.length < 8) {
+    throw new Error("SEED_ADMIN_PASSWORD must be set (>=8 chars) to seed the admin user.");
+  }
+  const adminPassword = await bcrypt.hash(seedPassword, 10);
   await prisma.user.upsert({
-    where: { email: "admin@company.com" },
+    where: { email: process.env.SEED_ADMIN_EMAIL || "admin@company.com" },
     update: {},
-    create: { email: "admin@company.com", passwordHash: adminPassword, name: "Admin", role: "OWNER", mustChangePassword: true },
+    create: {
+      email: process.env.SEED_ADMIN_EMAIL || "admin@company.com",
+      passwordHash: adminPassword,
+      name: "Admin",
+      role: "OWNER",
+      mustChangePassword: true,
+    },
   });
-  console.log("  Admin: admin@company.com / admin123");
+  console.log("  Admin seeded from SEED_ADMIN_PASSWORD");
 
   // ─── V2: Categories (matching Oneshelf app) ────────────────────────
   console.log("Seeding categories...");

@@ -195,10 +195,22 @@ router.put("/", async (req: FirebaseAuthRequest, res: Response) => {
     const parsed = updateProfileSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
 
-    // If the phone number changes, it is no longer verified — force re-verification.
     const data: Record<string, unknown> = { ...parsed.data };
     if (parsed.data.phone !== undefined && parsed.data.phone !== req.appUser!.phone) {
-      data.phoneVerified = false;
+      // A new value has to be provably THIS account's own Firebase-verified number — the ID
+      // token that authorized this exact request is the only source of truth we trust for that,
+      // not an arbitrary client-submitted string. Previously any 10-digit string matching the
+      // regex was accepted outright: the app's own Phone-Auth OTP screen never reached the
+      // server at all, and when Firebase refused to attach a number already claimed by another
+      // account, the client used to save it anyway — the two accounts then silently shared one
+      // phone number in Postgres (User.phone has no unique constraint). Clearing to null needs
+      // no such proof — there's nothing to fake by removing a value.
+      if (parsed.data.phone !== null && parsed.data.phone !== req.appUser!.tokenPhone) {
+        throw new ValidationError(
+          "This number hasn't been verified on this device yet. Complete phone verification, then save again.",
+        );
+      }
+      data.phoneVerified = parsed.data.phone !== null;
     }
 
     const user = await prisma.user.update({

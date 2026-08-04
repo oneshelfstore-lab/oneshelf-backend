@@ -10,6 +10,12 @@ export interface FirebaseAuthUser {
   name: string;
   role: UserRole;
   phone: string | null;
+  // The phone number THIS Firebase Auth session's ID token actually proves ownership of right
+  // now (bare 10 digits, null if this account has no phone credential attached). Distinct from
+  // `phone` above (the value on file in Postgres) — routes that let a client change the profile
+  // phone (appUser.ts PUT /me) compare the two so a phone change can only be saved once Firebase
+  // itself has verified it, not on the strength of an arbitrary client-submitted string.
+  tokenPhone: string | null;
 }
 
 export interface FirebaseAuthRequest extends Request {
@@ -48,6 +54,13 @@ export async function firebaseAuthMiddleware(
     const idToken = header.slice(7);
     const decoded = await admin.auth().verifyIdToken(idToken);
 
+    // Bare-10-digit phone the TOKEN claims for this session (matches how we store it: strip
+    // +91 / spaces / dashes). Hoisted above the user lookup — needed both for first-login
+    // auto-linking below AND for req.appUser.tokenPhone on every request, new user or not.
+    const phone10 = decoded.phone_number
+      ? decoded.phone_number.replace(/\D/g, "").slice(-10)
+      : null;
+
     let user = await prisma.user.findUnique({
       where: { firebaseUid: decoded.uid },
     });
@@ -64,10 +77,6 @@ export async function firebaseAuthMiddleware(
 
     if (!user) {
       const email = decoded.email ?? null;
-      // Bare-10-digit phone (matches how we store it: strip +91 / spaces / dashes).
-      const phone10 = decoded.phone_number
-        ? decoded.phone_number.replace(/\D/g, "").slice(-10)
-        : null;
 
       // 1) Link by PHONE — this is what lets the owner PRE-REGISTER a delivery agent
       //    (or any role) by phone number before that person has ever logged in. On
@@ -165,6 +174,7 @@ export async function firebaseAuthMiddleware(
       name: user.name,
       role: user.role,
       phone: user.phone,
+      tokenPhone: phone10,
     };
 
     next();

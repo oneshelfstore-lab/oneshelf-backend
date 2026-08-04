@@ -1058,6 +1058,12 @@ model Address {
   lat         Decimal? @db.Decimal(10, 7)
   lng         Decimal? @db.Decimal(10, 7)
   isDefault   Boolean  @default(false)
+  // Who to hand the order to at this address — can differ from the account holder (e.g. a
+  // relative's flat). Was collected client-side and silently discarded pre-Aug-2026; see
+  // addressSchema in appUser.ts.
+  receiverName         String?
+  receiverPhone        String?
+  deliveryInstructions String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 

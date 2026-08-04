@@ -364,6 +364,9 @@ const addressSchema = z.object({
   lat: z.number().optional().nullable(),
   lng: z.number().optional().nullable(),
   isDefault: z.boolean().default(false),
+  receiverName: z.string().max(100).optional().nullable(),
+  receiverPhone: z.string().regex(/^[6-9]\d{9}$/, "Receiver phone must be 10 digits starting with 6-9").optional().nullable(),
+  deliveryInstructions: z.string().max(500).optional().nullable(),
 });
 
 router.post("/addresses", async (req: FirebaseAuthRequest, res: Response) => {

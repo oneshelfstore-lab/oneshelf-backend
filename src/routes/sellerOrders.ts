@@ -59,9 +59,10 @@ async function maybeAdvanceParentOrder(orderId: string) {
   await prisma.order.update({ where: { id: orderId }, data: { status: newStatus } });
 
   notifyOrderStatusChange({ ...order, status: newStatus }).catch((e: unknown) => console.error("[background task failed]", e));
-  // Unassigned delivery order → it's now in the shared pool; ping available agents.
-  if (newStatus === "PACKED" && !order.deliveryBoyId) {
-    notifyNewDeliveryAvailable({ id: order.id, orderNumber: order.orderNumber }).catch((e: unknown) => console.error("[background task failed]", e));
+  // Now in the shared pool → ping available agents. notifyNewDeliveryAvailable itself decides
+  // whether this order is actually poolable (unassigned + DELIVERY); don't re-test it here.
+  if (newStatus === "PACKED") {
+    notifyNewDeliveryAvailable(order).catch((e: unknown) => console.error("[background task failed]", e));
   }
 }
 

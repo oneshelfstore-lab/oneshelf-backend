@@ -42,6 +42,11 @@ const updateSchema = z.object({
   operatingHoursStart: z.string().max(10).optional().nullable(),
   operatingHoursEnd: z.string().max(10).optional().nullable(),
   deliveryRadius: z.number().min(0).optional().nullable(),
+  // Max un-handed-over COD a rider may hold before they're blocked from taking another cash order.
+  // 0 = unenforced (the default). Counted against CONFIRMED handovers only — see routes/delivery.ts.
+  maxRiderCashInHand: z.number().min(0).optional(),
+  // Require a proof-of-delivery photo on orders that carry no handover OTP. Off by default.
+  requireDeliveryProofPhoto: z.boolean().optional(),
   // Store's own pickup location (owner sets once — GPS or manual pin). Both null = distance-based
   // delivery pricing stays inactive (flat deliveryCharge fallback).
   storeLat: z.number().min(-90).max(90).optional().nullable(),

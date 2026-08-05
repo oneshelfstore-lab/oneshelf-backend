@@ -8,7 +8,7 @@ import {
   requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
-import { notifyOrderStatusChange, notifyDeliveryAssignment, notifyOrderMessage } from "../services/fcmNotifier.js";
+import { notifyOrderStatusChange, notifyDeliveryAssignment, notifyNewDeliveryAvailable, notifyOrderMessage } from "../services/fcmNotifier.js";
 import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orderInvoice.js";
 import { markSamplePacked } from "../services/freeSample.js";
 import { accrueReferralCommission, refundWalletOnCancel } from "../services/referralRewards.js";
@@ -17,6 +17,7 @@ import { restoreConsumption } from "../services/stockBatches.js";
 import { shapeOrderMessage } from "../services/orderMessages.js";
 import { assertSellersPacked, markSubOrderPackedByOwner, reverseSellerLedgerOnCancel } from "../services/subOrderFulfillment.js";
 import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
+import { getRiderOnboardingStatus, riderBlockedReason } from "./deliveryOnboarding.js";
 import { signOrderMedia } from "../lib/storageUrls.js";
 
 const router = Router();
@@ -91,6 +92,9 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
           deliveryOtpRequired: true, deliveryBoyId: true, couponCode: true,
           shippingName: true, shippingPhone: true, shippingAddress: true,
           source: true, // "BULK_QUOTE" → owner board shows a BULK badge
+          // A failed drop returns the order to PACKED, which is otherwise indistinguishable from a
+          // freshly-packed order. These are what tell the owner it came back and why.
+          deliveryAttempts: true, lastDeliveryFailure: true, lastDeliveryFailedAt: true,
           createdAt: true, updatedAt: true,
           customer: { select: { id: true, name: true, phone: true } },
           _count: { select: { items: true } },
@@ -220,6 +224,13 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
     }
 
     notifyOrderStatusChange({ ...order, status: newStatus }).catch((e: unknown) => console.error("[background task failed]", e));
+    // PACKED is what releases the order into the riders' shared pool — so this is the moment to wake
+    // them. It was missing here AND in adminOrders.ts, only sellerOrders.ts had it: on a single-store
+    // order (the common case) the owner packs it and NO rider was ever told. Riders had to guess and
+    // hit refresh. notifyNewDeliveryAvailable no-ops for assigned/pickup orders.
+    if (newStatus === "PACKED") {
+      notifyNewDeliveryAvailable(order).catch((e: unknown) => console.error("[background task failed]", e));
+    }
     // Referral hooks (idempotent + best-effort). Accrue the referrer's ongoing commission on every
     // delivery; refund any store credit if the order is cancelled.
     if (newStatus === "DELIVERED") {
@@ -276,9 +287,33 @@ router.post("/:id/assign", async (req: FirebaseAuthRequest, res: Response) => {
       throw new ValidationError("Can only assign delivery agents to delivery orders");
     }
 
+    // The route had no status check at all — a DELIVERED or CANCELLED order could be "assigned".
+    if (order.status === "DELIVERED" || order.status === "CANCELLED") {
+      throw new ValidationError(`This order is already ${order.status.toLowerCase()} — there's nothing to assign.`);
+    }
+    // Once it's OUT_FOR_DELIVERY the first rider is physically carrying the goods. Reassigning to
+    // someone else silently handed the order to a second rider with no unassign and no warning —
+    // both then saw it. Free to reassign before that (PACKED and earlier), which is the real use case.
+    if (
+      order.status === "OUT_FOR_DELIVERY" &&
+      order.deliveryBoyId &&
+      order.deliveryBoyId !== deliveryBoyId
+    ) {
+      throw new ValidationError(
+        "This order is already out for delivery with another partner — they have the goods. Have them return it or complete it first.",
+      );
+    }
+
     const agent = await prisma.user.findUnique({ where: { id: deliveryBoyId } });
-    if (!agent || agent.role !== "DELIVERY") {
+    if (!agent || agent.role !== "DELIVERY" || !agent.isActive) {
       throw new ValidationError("Invalid delivery agent");
+    }
+    // Same KYC gate the rider's own endpoints now enforce — otherwise the owner could hand an order
+    // to someone whose verification is pending or rejected, and the rider would then be blocked from
+    // acting on it (a dead-end order). See routes/deliveryOnboarding.ts.
+    const blocked = riderBlockedReason(await getRiderOnboardingStatus(agent.id));
+    if (blocked) {
+      throw new ValidationError(`${agent.name} isn't verified yet — approve them in the onboarding queue first.`);
     }
 
     await prisma.order.update({
@@ -289,6 +324,35 @@ router.post("/:id/assign", async (req: FirebaseAuthRequest, res: Response) => {
     notifyDeliveryAssignment(order, deliveryBoyId).catch((e: unknown) => console.error("[background task failed]", e));
 
     res.json({ success: true, data: { orderId: order.id, deliveryBoyId } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/owner/orders/:id/unassign — take an order off a rider ──
+//
+// The counterpart to a failed delivery: the rider brought the goods back to the shop, so the order
+// can go to somebody else. Deliberately the OWNER's call, not the rider's — only the store knows
+// whether the stock is physically back on the shelf. Releasing it while it's still in a rider's bag
+// would let a second rider accept an order they can't possibly fulfil.
+router.post("/:id/unassign", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const orderId = String(req.params.id ?? "");
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    if (!order) throw new NotFoundError("Order", orderId);
+    if (!order.deliveryBoyId) throw new ValidationError("This order isn't assigned to anyone.");
+    if (order.status === "DELIVERED" || order.status === "CANCELLED") {
+      throw new ValidationError(`This order is already ${order.status.toLowerCase()}.`);
+    }
+
+    const updated = await prisma.order.update({
+      where: { id: order.id },
+      // Back to PACKED so it re-enters the shared pool in a state a new rider can act on.
+      data: { deliveryBoyId: null, status: "PACKED" },
+    });
+    notifyNewDeliveryAvailable(updated).catch((e: unknown) => console.error("[background task failed]", e));
+
+    res.json({ success: true, data: { orderId: order.id, status: "PACKED", deliveryBoyId: null } });
   } catch (e) {
     sendError(res, e);
   }

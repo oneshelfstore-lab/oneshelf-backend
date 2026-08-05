@@ -1,5 +1,31 @@
 import { describe, it, expect } from "vitest";
-import { deliveryBankSchema } from "../deliveryOnboarding.js";
+import { deliveryBankSchema, riderBlockedReason } from "../deliveryOnboarding.js";
+
+// The gate deciding whether a rider may take orders at all. Both failure directions are bad and
+// silent: too strict locks every working rider out of the dashboard mid-shift, too loose puts an
+// unverified rider on the road — which is exactly the state that existed before, when the check
+// lived only in the Android NavGraph and the server never looked at onboardingStatus.
+describe("riderBlockedReason", () => {
+  it("clears an APPROVED rider", () => {
+    expect(riderBlockedReason("APPROVED")).toBeNull();
+  });
+
+  it("blocks every non-approved status", () => {
+    for (const s of ["NOT_STARTED", "IN_PROGRESS", "PENDING_REVIEW", "REJECTED"]) {
+      expect(riderBlockedReason(s), s).not.toBeNull();
+    }
+  });
+
+  it("blocks an unrecognised status rather than defaulting open", () => {
+    // A status added to the enum later must fail closed until someone decides it should pass.
+    expect(riderBlockedReason("SOMETHING_NEW")).not.toBeNull();
+  });
+
+  it("tells a pending rider and a rejected rider different things", () => {
+    // "we're reviewing it" vs "go fix it" is the whole difference between waiting and being stuck.
+    expect(riderBlockedReason("PENDING_REVIEW")).not.toBe(riderBlockedReason("REJECTED"));
+  });
+});
 
 // This field was `z.any()` until now, so every case below used to pass silently. The failure mode
 // is invisible at save time and only surfaces when someone tries to actually pay the rider — hence

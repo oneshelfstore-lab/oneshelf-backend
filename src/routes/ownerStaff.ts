@@ -8,6 +8,7 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { istMonthKey } from "../services/referralRewards.js";
+import { computeUnsettledCash, pendingSettlementFor } from "./delivery.js";
 
 // Owner-managed delivery staff. Mounted at /api/app/owner/delivery-agents.
 // A "delivery agent" is just a User with role = DELIVERY. The owner registers one by
@@ -59,6 +60,98 @@ router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
     });
     const paidSet = new Set(paid.map((p) => p.riderId));
     res.json({ success: true, data: agents.map((a) => shape(a, paidSet.has(a.id))) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── GET /api/app/owner/delivery-agents/cash — who is holding the store's money ─
+// Declared BEFORE the "/:id/..." routes so "cash" is never read as a rider id.
+//
+// This view did not exist. CashSettlement was written by the rider and read by exactly one thing:
+// the rider's own unsettled calculation. The owner had no way to answer "who owes me how much", and
+// no way to confirm a handover — so a rider tapping Settle closed their own debt and no screen would
+// ever have shown the money never arriving.
+router.get("/cash", async (_req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const riders = await prisma.user.findMany({
+      where: { role: "DELIVERY", isActive: true },
+      select: { id: true, name: true, phone: true },
+      orderBy: { name: "asc" },
+    });
+
+    const rows = await Promise.all(
+      riders.map(async (r) => {
+        const unsettled = await computeUnsettledCash(r.id);
+        const pending = await pendingSettlementFor(r.id);
+        return {
+          riderId: r.id,
+          name: r.name,
+          phone: r.phone,
+          // Collected and NOT yet confirmed back to the store.
+          outstanding: unsettled.amount,
+          outstandingOrderCount: unsettled.orderCount,
+          lastSettledAt: unsettled.lastSettledAt,
+          // A declaration waiting on the owner's acknowledgement — the actionable row.
+          pendingSettlementId: pending?.id ?? null,
+          pendingAmount: pending ? Number(pending.amount) : 0,
+          pendingSince: pending?.settledAt ?? null,
+        };
+      }),
+    );
+
+    res.json({
+      success: true,
+      data: {
+        riders: rows,
+        totalOutstanding: rows.reduce((s, r) => s + r.outstanding, 0),
+        awaitingConfirmation: rows.filter((r) => r.pendingSettlementId).length,
+      },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/owner/delivery-agents/settlements/:id/confirm — "I got the cash" ─
+// The other half of the handover. ONLY this clears the rider's outstanding figure (and unblocks
+// them if the cash-in-hand cap was holding them). Idempotent: re-confirming is a no-op success.
+router.post("/settlements/:id/confirm", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const settlement = await prisma.cashSettlement.findUnique({ where: { id } });
+    if (!settlement) throw new NotFoundError("Cash settlement", id);
+    if (settlement.status === "CONFIRMED") {
+      return res.json({ success: true, data: { id, status: "CONFIRMED", alreadyConfirmed: true } });
+    }
+    const updated = await prisma.cashSettlement.update({
+      where: { id },
+      data: { status: "CONFIRMED", confirmedAt: new Date(), confirmedById: req.appUser!.id },
+    });
+    res.json({
+      success: true,
+      data: { id: updated.id, status: updated.status, amount: Number(updated.amount), confirmedAt: updated.confirmedAt },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/owner/delivery-agents/settlements/:id/reject — the cash didn't arrive ─
+// Deletes the declaration so the rider's debt stays exactly where it was. Kept separate from
+// confirm rather than a status flag: a rejected declaration carries no accounting meaning, and
+// leaving REJECTED rows around would make the "one open declaration at a time" guard permanently
+// block the rider from re-declaring.
+router.post("/settlements/:id/reject", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const settlement = await prisma.cashSettlement.findUnique({ where: { id } });
+    if (!settlement) throw new NotFoundError("Cash settlement", id);
+    if (settlement.status === "CONFIRMED") {
+      throw new ValidationError("This handover is already confirmed — it can't be rejected.");
+    }
+    await prisma.cashSettlement.delete({ where: { id } });
+    res.json({ success: true, data: { id, rejected: true } });
   } catch (e) {
     sendError(res, e);
   }
@@ -140,6 +233,31 @@ router.delete("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     if (!user || user.role !== "DELIVERY") {
       throw new NotFoundError("Delivery agent", id);
     }
+
+    // ⚠️ Demoting a rider is not free — dropping their role to CUSTOMER makes the entire delivery
+    // router 403 for them, so anything they're mid-way through is ORPHANED: the order keeps pointing
+    // at them, they can no longer touch it, and only the owner can force it closed. And their
+    // outstanding COD becomes unqueryable, because the cash figure is only ever computed for riders.
+    // Refuse until both are settled, naming the numbers. Mirrors getDeletionBlockers in
+    // services/accountDeletion.ts, which already blocks a rider deleting their OWN account for the
+    // same reason — the owner's remove button just never got the equivalent guard.
+    const blockers: string[] = [];
+    const activeOrders = await prisma.order.count({
+      where: { deliveryBoyId: user.id, status: { in: ["PACKED", "OUT_FOR_DELIVERY"] } },
+    });
+    if (activeOrders > 0) {
+      blockers.push(
+        `${activeOrders} order${activeOrders === 1 ? "" : "s"} still out with them (reassign or complete ${activeOrders === 1 ? "it" : "them"} first)`,
+      );
+    }
+    const cash = await computeUnsettledCash(user.id);
+    if (cash.amount > 0) {
+      blockers.push(`₹${Math.round(cash.amount)} of COD cash not yet settled`);
+    }
+    if (blockers.length > 0) {
+      throw new ValidationError(`Can't remove ${user.name} yet — ${blockers.join(" and ")}.`);
+    }
+
     await prisma.user.update({ where: { id: user.id }, data: { role: "CUSTOMER" } });
     res.json({ success: true, data: { id: user.id } });
   } catch (e) {

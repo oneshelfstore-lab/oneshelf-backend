@@ -7,16 +7,49 @@ import {
   requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
-import { notifyOrderStatusChange, notifyDeliveryArrived } from "../services/fcmNotifier.js";
+import {
+  notifyOrderStatusChange,
+  notifyDeliveryArrived,
+  notifyCashSettlementDeclared,
+  notifyDeliveryFailed,
+  notifyNewDeliveryAvailable,
+} from "../services/fcmNotifier.js";
 import { accrueReferralCommission, istMonthKey } from "../services/referralRewards.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { OTP_LOCK_SECONDS } from "../lib/otp.js";
 import { signOrderMedia, signOrderMediaList } from "../lib/storageUrls.js";
+import { getRiderOnboardingStatus, riderBlockedReason } from "./deliveryOnboarding.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
 router.use(requireAppRole("DELIVERY", "OWNER") as any);
+
+/**
+ * KYC gate. Until now the ONLY thing stopping an unverified rider was the Android NavGraph choosing
+ * which screen to render — the server never looked at onboardingStatus at all, so a rider whose
+ * documents were pending (or REJECTED) could call these endpoints directly and deliver.
+ *
+ * Placed as router-level middleware rather than per-route so a route added later is gated by
+ * default. Mirrors the PHONE_REQUIRED gate in firebaseAuthMiddleware: a distinct code the client can
+ * route on, plus a readable message.
+ *
+ * ⚠️ OWNER is exempt and that is load-bearing — the owner shares this router (they can deliver and
+ * force-complete a jammed order) and has no DeliveryProfile at all, so gating them would lock the
+ * store out of its own dispatch. Costs one indexed lookup per delivery request; same trade the
+ * dashboard's tokenVersion check already makes.
+ */
+router.use(async (req: FirebaseAuthRequest, res: Response, next) => {
+  try {
+    if (req.appUser?.role === "OWNER") return next();
+    const status = await getRiderOnboardingStatus(req.appUser!.id);
+    const blocked = riderBlockedReason(status);
+    if (blocked) throw new AppError(403, "KYC_REQUIRED", blocked);
+    next();
+  } catch (e) {
+    sendError(res, e);
+  }
+});
 
 /**
  * Everything that must happen once an order reaches DELIVERED, in ONE place so the two completion
@@ -112,9 +145,15 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
 // Cash this agent has collected but not yet handed over/settled — since their LAST settlement (or
 // all-time if they've never settled). This is the "still owed to the store" figure, independent of
 // the calendar-day "today's stats" numbers below.
-async function computeUnsettledCash(userId: string) {
+// Exported for ownerStaff.ts's remove-rider guard (route→route import, same as ownerOrders.ts
+// pulling quoteMessageSchema from appUser.ts). Keeping the "since their last settlement" definition
+// in one place matters: a second copy would eventually disagree with the rider's own screen.
+export async function computeUnsettledCash(userId: string) {
+  // ⚠️ CONFIRMED only. Counting a PENDING settlement here would let a rider zero their own debt by
+  // tapping a button — which is exactly the hole the two-sided flow exists to close, and it would
+  // also hand them a way to clear the cash-in-hand cap without handing over a rupee.
   const lastSettlement = await prisma.cashSettlement.findFirst({
-    where: { deliveryBoyId: userId },
+    where: { deliveryBoyId: userId, status: "CONFIRMED" },
     orderBy: { settledAt: "desc" },
     select: { settledAt: true },
   });
@@ -165,11 +204,16 @@ router.get("/cash-summary", async (req: FirebaseAuthRequest, res: Response) => {
     // unsettled = the real "still owe the store" figure (may span multiple days if never settled),
     // distinct from totalCollected which is scoped to just today.
     const unsettled = await computeUnsettledCash(userId);
+    // An open declaration the owner hasn't acknowledged yet — the rider's screen needs this or the
+    // Settle button just looks broken (they tapped it, the debt didn't move, and nothing said why).
+    const pending = await pendingSettlementFor(userId);
     res.json({
       success: true,
       data: {
         date: startUtc.toISOString(), orderCount: orders.length, totalCollected,
         unsettledCash: unsettled.amount, unsettledOrderCount: unsettled.orderCount, lastSettledAt: unsettled.lastSettledAt,
+        pendingSettlementAmount: pending ? Number(pending.amount) : 0,
+        pendingSettlementAt: pending?.settledAt ?? null,
       },
     });
   } catch (e) {
@@ -177,24 +221,57 @@ router.get("/cash-summary", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
-// ─── POST /api/app/delivery/cash-settle — agent hands over collected COD cash ─
-// Records the handover (self-reported, same trust level as the rest of COD in this app — no money
-// physically moves through the backend) so the running unsettledCash total resets. Recomputes the
-// amount server-side (never trusts a client-sent figure) so it can't be under-reported.
+/** The rider's open (declared-but-unacknowledged) handover, if any. */
+export async function pendingSettlementFor(userId: string) {
+  return prisma.cashSettlement.findFirst({
+    where: { deliveryBoyId: userId, status: "PENDING" },
+    orderBy: { settledAt: "desc" },
+    select: { id: true, amount: true, orderCount: true, settledAt: true },
+  });
+}
+
+// ─── POST /api/app/delivery/cash-settle — rider DECLARES a cash handover ─
+// Creates a PENDING settlement; the owner confirms receipt separately
+// (POST /api/app/owner/delivery-agents/settlements/:id/confirm), and only that clears the debt.
+// Amount is recomputed server-side — a client-sent figure is never trusted.
 router.post("/cash-settle", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
     const note = typeof req.body?.note === "string" ? req.body.note.slice(0, 300) : null;
 
+    // One open declaration at a time, or the owner's queue fills with duplicates of the same money
+    // and confirming one of them silently "settles" a figure computed at a different moment.
+    const alreadyPending = await pendingSettlementFor(userId);
+    if (alreadyPending) {
+      throw new ValidationError(
+        `You've already handed over ₹${Math.round(Number(alreadyPending.amount))} — waiting for the store to confirm it.`,
+      );
+    }
+
     const unsettled = await computeUnsettledCash(userId);
     if (unsettled.orderCount === 0) throw new ValidationError("Nothing to settle — no unsettled COD cash.");
 
     const settlement = await prisma.cashSettlement.create({
-      data: { deliveryBoyId: userId, amount: unsettled.amount, orderCount: unsettled.orderCount, note },
+      data: {
+        deliveryBoyId: userId,
+        amount: unsettled.amount,
+        orderCount: unsettled.orderCount,
+        note,
+        status: "PENDING",
+      },
     });
+    notifyCashSettlementDeclared(userId, Number(settlement.amount)).catch((e: unknown) =>
+      console.error("[background task failed]", e),
+    );
     res.json({
       success: true,
-      data: { id: settlement.id, amount: Number(settlement.amount), orderCount: settlement.orderCount, settledAt: settlement.settledAt },
+      data: {
+        id: settlement.id,
+        amount: Number(settlement.amount),
+        orderCount: settlement.orderCount,
+        settledAt: settlement.settledAt,
+        status: settlement.status,
+      },
     });
   } catch (e) {
     sendError(res, e);
@@ -440,6 +517,31 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
+/**
+ * Cash-in-hand cap. A rider carrying more un-handed-over COD than the store allows can't take on
+ * another COD order until they hand it over AND the owner confirms it.
+ *
+ * ⚠️ Reads the CONFIRMED figure (computeUnsettledCash), so a rider cannot unblock themselves by
+ * declaring a settlement — that would make the cap self-service and therefore not a cap.
+ * StoreConfig.maxRiderCashInHand = 0 means unenforced, which is the default: this must not start
+ * refusing work at any existing store the moment it deploys.
+ */
+async function assertCashCapOk(userId: string, order: { paymentMethod: string; totalAmount: unknown; amountPaid: unknown }) {
+  if (order.paymentMethod !== "COD") return; // prepaid carries no cash
+  const config = await prisma.storeConfig.findFirst({ select: { maxRiderCashInHand: true } });
+  const cap = Number(config?.maxRiderCashInHand ?? 0);
+  if (cap <= 0) return;
+
+  const held = (await computeUnsettledCash(userId)).amount;
+  const incoming = Math.max(0, Number(order.totalAmount) - Number(order.amountPaid));
+  if (held + incoming > cap) {
+    throw new ValidationError(
+      `You're holding Rs.${Math.round(held)} of the store's cash (limit Rs.${Math.round(cap)}). ` +
+        "Hand it over and get it confirmed before taking another cash order.",
+    );
+  }
+}
+
 // Atomically claim an unassigned order for this delivery boy. Returns false if someone else grabbed
 // it first (the conditional updateMany only matches while deliveryBoyId is still null). Idempotent
 // when the caller already owns it.
@@ -460,6 +562,25 @@ router.post("/:id/accept", async (req: FirebaseAuthRequest, res: Response) => {
     const order = await prisma.order.findUnique({ where: { id: req.params.id } });
     if (!order) throw new NotFoundError("Order", req.params.id!);
     if (order.status !== "PACKED") throw new ValidationError("Can only accept orders in PACKED status");
+
+    // A multi-seller order has to be physically collected shop by shop first — that's what
+    // /collect/:subOrderId is for, and it's what auto-advances the order to OUT_FOR_DELIVERY.
+    // /accept flips straight to OUT_FOR_DELIVERY, so on such an order it would mark the goods
+    // "on the way" while they're still sitting at the sellers' shops. The Android UI already
+    // branches on requiresCollection and hides Accept, but a stale build or a direct call didn't
+    // have to obey it. Server decides now.
+    const pending = await prisma.subOrder.findMany({
+      where: { orderId: order.id, seller: { isHouse: false }, status: { notIn: ["COLLECTED", "CANCELLED"] } },
+      select: { seller: { select: { name: true } } },
+    });
+    if (pending.length > 0) {
+      throw new ValidationError(
+        `Collect from ${pending.map((p) => p.seller.name).join(", ")} first — this order has ` +
+          `${pending.length} pickup stop${pending.length === 1 ? "" : "s"} still to go.`,
+      );
+    }
+
+    await assertCashCapOk(userId, order);
 
     // Assigned to someone else → hands off. Unassigned (shared pool) → claim it atomically.
     if (order.deliveryBoyId && order.deliveryBoyId !== userId) {
@@ -503,6 +624,9 @@ router.post("/:id/collect/:subOrderId", async (req: FirebaseAuthRequest, res: Re
     // Assigned to someone else → forbidden. Unassigned (shared pool) → the agent claims it by
     // starting the collection run. Owner is exempt.
     if (!isOwner) {
+      // Starting a collection run is taking the order on, same as /accept — cap applies here too,
+      // or a capped rider just routes around it by collecting instead of accepting.
+      await assertCashCapOk(userId, order);
       if (order.deliveryBoyId && order.deliveryBoyId !== userId) {
         throw new AppError(403, "FORBIDDEN", "This order was already taken by another delivery partner");
       }
@@ -599,8 +723,30 @@ router.post("/:id/deliver", async (req: FirebaseAuthRequest, res: Response) => {
     }
 
     if (order.status === "DELIVERED") throw new ValidationError("Order is already delivered");
-    if (!["OUT_FOR_DELIVERY", "READY_FOR_PICKUP", "PACKED"].includes(order.status)) {
-      throw new ValidationError(`Cannot deliver order in '${order.status}' status`);
+    // PACKED is deliberately NOT deliverable by a rider: a delivery order becomes deliverable via
+    // /accept (→ OUT_FOR_DELIVERY) and a pickup order via the owner marking READY_FOR_PICKUP.
+    // Allowing PACKED let a rider jump straight to DELIVERED, so the customer never saw "out for
+    // delivery" and got no such push — their order went from "packed" to "delivered" in one hop.
+    // Kept open for the OWNER as the recovery path for an order already stuck at PACKED.
+    const deliverable = isOwner
+      ? ["OUT_FOR_DELIVERY", "READY_FOR_PICKUP", "PACKED"]
+      : ["OUT_FOR_DELIVERY", "READY_FOR_PICKUP"];
+    if (!deliverable.includes(order.status)) {
+      throw new ValidationError(
+        order.status === "PACKED"
+          ? "Accept this order first — then you can mark it delivered."
+          : `Cannot deliver order in '${order.status}' status`,
+      );
+    }
+
+    // An order below the OTP threshold completes with no evidence whatsoever that a handover
+    // happened — and those are the cheapest, most-disputed orders. When the owner turns this on, a
+    // photo stands in for the OTP. Off by default; OTP orders already have their proof.
+    if (!order.deliveryOtpRequired && !proofPhotoUrl && !order.deliveryProofPhotoUrl) {
+      const config = await prisma.storeConfig.findFirst({ select: { requireDeliveryProofPhoto: true } });
+      if (config?.requireDeliveryProofPhoto) {
+        throw new ValidationError("Take a photo of the handover before marking this delivered.");
+      }
     }
 
     // OTP verification
@@ -669,6 +815,124 @@ router.post("/:id/deliver", async (req: FirebaseAuthRequest, res: Response) => {
     runDeliveredHooks(order);
 
     res.json({ success: true, data: { orderId: order.id, status: "DELIVERED" } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/delivery/orders/:id/delivery-failed — the drop didn't happen ──
+//
+// Before this, DELIVERED was the ONLY terminal state a rider could reach. A customer who wasn't home
+// left the order pinned at OUT_FOR_DELIVERY forever, so the rider's real options were to mark it
+// delivered anyway (which flips COD to PAID, accrues referral commission and fires a tier-up on
+// goods nobody received) or leave it hanging. Both are worse than recording the truth.
+//
+// ⚠️ The order stays ASSIGNED to this rider on purpose — they still physically have the goods.
+// Sending it back to the shared pool here would let a second rider "accept" an order sitting in the
+// first one's bag. It drops to PACKED so they can re-attempt; the owner unassigns once the stock is
+// physically back at the shop (POST /owner/orders/:id/unassign).
+const FAILURE_REASONS: Record<string, string> = {
+  CUSTOMER_UNAVAILABLE: "Customer not at the address",
+  UNREACHABLE: "Customer didn't answer the phone",
+  WRONG_ADDRESS: "Address is wrong or not findable",
+  CUSTOMER_REFUSED: "Customer refused the order",
+  RESCHEDULED: "Customer asked to deliver later",
+  OTHER: "Other",
+};
+
+const failSchema = z.object({
+  reason: z.enum(Object.keys(FAILURE_REASONS) as [string, ...string[]]),
+  note: z.string().max(300).optional().nullable(),
+  proofPhotoUrl: z.string().max(500).optional().nullable(),
+});
+
+router.post("/:id/delivery-failed", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = failSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Pick a reason for the failed delivery", parsed.error.errors);
+    const { reason, note, proofPhotoUrl } = parsed.data;
+
+    const userId = req.appUser!.id;
+    const isOwner = req.appUser!.role === "OWNER";
+
+    const orderId = String(req.params.id ?? "");
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    if (!order) throw new NotFoundError("Order", orderId);
+    if (!isOwner && order.deliveryBoyId !== userId) {
+      throw new AppError(403, "FORBIDDEN", "Not assigned to you");
+    }
+    if (order.status === "DELIVERED" || order.status === "CANCELLED") {
+      throw new ValidationError(`This order is already ${order.status.toLowerCase()}.`);
+    }
+
+    const label = FAILURE_REASONS[reason]!;
+    const detail = note?.trim() ? `${label} — ${note.trim()}` : label;
+
+    const updated = await prisma.order.update({
+      where: { id: order.id },
+      data: {
+        // Back to PACKED (still theirs to re-attempt), never DELIVERED and never CANCELLED —
+        // cancelling is the owner's call, and it has refund/stock consequences this must not trigger.
+        status: "PACKED",
+        deliveryAttempts: { increment: 1 },
+        lastDeliveryFailure: detail,
+        lastDeliveryFailedAt: new Date(),
+        deliveryProofPhotoUrl: proofPhotoUrl ?? order.deliveryProofPhotoUrl,
+      },
+      select: { deliveryAttempts: true },
+    });
+
+    const rider = await prisma.user.findUnique({ where: { id: userId }, select: { name: true } });
+    notifyDeliveryFailed(order, {
+      riderName: rider?.name ?? "Delivery partner",
+      reason: detail,
+      attempts: updated.deliveryAttempts,
+    }).catch((e: unknown) => console.error("[background task failed]", e));
+
+    res.json({
+      success: true,
+      data: { orderId: order.id, status: "PACKED", attempts: updated.deliveryAttempts, reason: detail },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/delivery/orders/:id/release — hand an order back to the pool ──
+// The rider can't do this job after all (breakdown, shift over, wrong area). Only valid while the
+// order is still PACKED, i.e. before they've accepted it and physically taken the goods — once it's
+// OUT_FOR_DELIVERY the stock is in their bag and /delivery-failed is the honest route instead.
+router.post("/:id/release", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const orderId = String(req.params.id ?? "");
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    if (!order) throw new NotFoundError("Order", orderId);
+    if (order.deliveryBoyId !== userId) throw new AppError(403, "FORBIDDEN", "Not assigned to you");
+    if (order.status !== "PACKED") {
+      throw new ValidationError(
+        "You've already got this order — mark it delivered, or report a failed delivery if you can't hand it over.",
+      );
+    }
+    // A collection run already under way means they're holding some sellers' goods; releasing would
+    // strand those items with a rider the order no longer points at.
+    const collected = await prisma.subOrder.count({
+      where: { orderId: order.id, seller: { isHouse: false }, status: "COLLECTED" },
+    });
+    if (collected > 0) {
+      throw new ValidationError("You've already collected from some shops — report a failed delivery instead so the store knows where the goods are.");
+    }
+
+    const released = await prisma.order.updateMany({
+      where: { id: order.id, deliveryBoyId: userId, status: "PACKED" },
+      data: { deliveryBoyId: null },
+    });
+    if (released.count > 0) {
+      notifyNewDeliveryAvailable({ ...order, deliveryBoyId: null }).catch((e: unknown) =>
+        console.error("[background task failed]", e),
+      );
+    }
+    res.json({ success: true, data: { orderId: order.id, released: released.count > 0 } });
   } catch (e) {
     sendError(res, e);
   }

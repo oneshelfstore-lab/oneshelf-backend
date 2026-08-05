@@ -9,6 +9,7 @@ import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { restoreConsumption } from "../services/stockBatches.js";
 import { assertSellersPacked, reverseSellerLedgerOnCancel } from "../services/subOrderFulfillment.js";
 import { signOrderMedia, signOrderMediaList } from "../lib/storageUrls.js";
+import { notifyNewDeliveryAvailable } from "../services/fcmNotifier.js";
 
 /**
  * Admin order management for the React dashboard (JWT auth).
@@ -128,6 +129,12 @@ router.put("/:id/status", requireRole("OWNER", "ACCOUNTANT", "BILLING_CLERK") as
         if (order.paymentMethod === "COD") data.paymentStatus = "PAID";
       }
       await prisma.order.update({ where: { id: order.id }, data });
+    }
+
+    // Same as the Firebase owner route: PACKED releases the order into the riders' shared pool, so
+    // wake them. No-ops for assigned/pickup orders. See services/fcmNotifier.ts.
+    if (newStatus === "PACKED") {
+      notifyNewDeliveryAvailable(order).catch((e: unknown) => console.error("[background task failed]", e));
     }
 
     // Sync payment/cancellation to linked invoice

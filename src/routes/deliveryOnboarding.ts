@@ -42,6 +42,40 @@ function virtualDefaultProfile(userId: string): DeliveryProfileRow {
   } as DeliveryProfileRow;
 }
 
+/**
+ * May this rider actually work — take orders, collect, deliver?
+ *
+ * Exported because the gate has to be enforced in TWO more places than this file: routes/delivery.ts
+ * (the rider's own actions) and ownerOrders.ts's /assign (the owner handing them an order). Until
+ * now the ONLY gate was the Android NavGraph deciding which screen to show, so a rider whose KYC was
+ * NOT_STARTED, PENDING_REVIEW or outright REJECTED could call the API directly and deliver anyway.
+ *
+ * ⚠️ A MISSING profile row deliberately reads as APPROVED — the same grandfather clause
+ * virtualDefaultProfile encodes for riders who predate self-serve onboarding. Keep that rule in this
+ * one function; duplicating it is how it eventually drifts and locks out a real working rider.
+ */
+export async function getRiderOnboardingStatus(userId: string): Promise<string> {
+  const p = await prisma.deliveryProfile.findUnique({
+    where: { userId },
+    select: { onboardingStatus: true },
+  });
+  return p?.onboardingStatus ?? "APPROVED";
+}
+
+/** Human-readable reason this rider is blocked, or null if they're cleared to work. */
+export function riderBlockedReason(status: string): string | null {
+  switch (status) {
+    case "APPROVED":
+      return null;
+    case "PENDING_REVIEW":
+      return "Your documents are with the store for review. You can start delivering once they're approved.";
+    case "REJECTED":
+      return "Your verification was rejected. Open the app to see why and re-submit your documents.";
+    default: // NOT_STARTED | IN_PROGRESS
+      return "Finish your verification (ID, selfie, vehicle details) before you can take deliveries.";
+  }
+}
+
 async function getOrCreateProfile(userId: string): Promise<DeliveryProfileRow> {
   const existing = await prisma.deliveryProfile.findUnique({ where: { userId } });
   if (existing) return existing;

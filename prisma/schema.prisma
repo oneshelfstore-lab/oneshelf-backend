@@ -421,6 +421,9 @@ model User {
   sellerAccount          Seller?                 @relation("SellerOwner")
   deliveryProfile        DeliveryProfile?
   cashSettlements        CashSettlement[]
+  // Settlements this user (the owner) acknowledged receiving — the other half of the two-sided
+  // handover. Distinct from cashSettlements above, which is the rider's own side.
+  cashSettlementsConfirmed CashSettlement[]      @relation("CashSettlementConfirmedBy")
   riderSalaryPayments    RiderSalaryPayment[]
   walletTxns             WalletTransaction[]
   walletTopups           WalletTopup[]
@@ -1456,6 +1459,14 @@ model Order {
   deliveryBoy         User?     @relation("DeliveryOrders", fields: [deliveryBoyId], references: [id])
   deliveryOtpRequired Boolean   @default(false)
   deliveredAt         DateTime?
+  // Failed-delivery attempts (customer not home, unreachable, refused…). Until these existed the
+  // ONLY terminal state a rider could reach was DELIVERED — a failed drop left the order stuck at
+  // OUT_FOR_DELIVERY forever, so the rider's realistic options were "lie" or "leave it hanging".
+  // ponytail: counter + last reason, not a DeliveryAttempt log. The board only needs "how many
+  // tries, and why did the last one fail"; promote to a real per-attempt table if disputes need it.
+  deliveryAttempts       Int       @default(0)
+  lastDeliveryFailure    String?
+  lastDeliveryFailedAt   DateTime?
   // Honest ETA: placedAt + StoreConfig.avg{Delivery,Pickup}Minutes. Rendered as a range/slot,
   // never a hard minutes-promise. Null = fall back to the store's next-day schedule label.
   estimatedReadyAt    DateTime?
@@ -1680,6 +1691,16 @@ model StoreConfig {
   // Average fulfillment time used to compute the honest order ETA (shown as a range).
   avgDeliveryMinutes                   Int      @default(40)
   avgPickupMinutes                     Int      @default(20)
+  // ─── Delivery-rider cash & proof controls ──
+  // Max un-handed-over COD a rider may hold before they're blocked from taking another COD order.
+  // 0 = unenforced, and that is deliberately the default: this column lands on every store at once,
+  // and a non-zero default would start refusing work nobody agreed to refuse. Owner opts in.
+  // Counted against CONFIRMED settlements only — a rider can't unblock themselves by declaring.
+  maxRiderCashInHand                   Decimal  @default(0) @db.Decimal(12, 2)
+  // Require a proof-of-delivery photo on orders that carry NO handover OTP (i.e. below the OTP
+  // threshold). Those are the cheapest orders and today they complete with zero evidence at all.
+  // Off by default = existing behaviour unchanged until the owner turns it on.
+  requireDeliveryProofPhoto            Boolean  @default(false)
   // Delight engine (Phase 3). delightEnabled is the master kill switch. Scratch-card outcome
   // weights (a real NONE weight is mandatory so wins stay variable, not an entitlement);
   // scratchFlatOffValue = ₹ off for a FLAT_OFF win.
@@ -1963,20 +1984,38 @@ model SellerPayout {
   @@index([sellerId])
 }
 
-// A delivery agent's self-reported cash handover to the store (COD collected during their shift).
-// Same trust level as the rest of COD in this app — no money physically moves through the backend,
-// this just timestamps "I handed over ₹X" so the running cash-summary total resets instead of growing
-// unbounded across days. Mirrors SellerPayout's manual-ledger pattern.
+// A delivery agent's cash handover to the store (COD collected during their shift). No money moves
+// through the backend — this is the ledger of "I handed over ₹X", so the running cash-summary total
+// resets instead of growing unbounded across days. Mirrors SellerPayout's manual-ledger pattern.
+//
+// TWO-SIDED by design: the rider declares (PENDING), the OWNER acknowledges receipt (CONFIRMED).
+// ⚠️ The outstanding-cash figure counts from the last CONFIRMED settlement, never a PENDING one —
+// that is the whole point of the split. While a rider's own tap closed their own debt, "settled"
+// meant nothing more than "the rider pressed a button", and no screen anywhere would have noticed
+// the money never arriving. The cash-in-hand cap reads the same confirmed figure.
+enum CashSettlementStatus {
+  PENDING
+  CONFIRMED
+}
+
 model CashSettlement {
-  id            String   @id @default(cuid())
+  id            String               @id @default(cuid())
   deliveryBoyId String
-  deliveryBoy   User     @relation(fields: [deliveryBoyId], references: [id])
-  amount        Decimal  @db.Decimal(12, 2)
-  orderCount    Int      @default(0)
+  deliveryBoy   User                 @relation(fields: [deliveryBoyId], references: [id])
+  amount        Decimal              @db.Decimal(12, 2)
+  orderCount    Int                  @default(0)
   note          String?
-  settledAt     DateTime @default(now())
+  settledAt     DateTime             @default(now())
+  // ⚠️ Defaults to CONFIRMED, NOT PENDING, and that is deliberate: every row written before this
+  // column existed was already final under the old one-sided flow. Defaulting to PENDING would
+  // retroactively re-open all of them and resurrect debts the store already considers closed.
+  status        CashSettlementStatus @default(CONFIRMED)
+  confirmedAt   DateTime?
+  confirmedById String?
+  confirmedBy   User?                @relation("CashSettlementConfirmedBy", fields: [confirmedById], references: [id])
 
   @@index([deliveryBoyId])
+  @@index([status])
 }
 
 // One salary payment to a delivery rider for one calendar month (IST). @@unique([riderId, periodMonth])

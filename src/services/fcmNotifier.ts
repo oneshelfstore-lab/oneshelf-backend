@@ -153,7 +153,25 @@ export async function notifyDeliveryAssignment(order: { id: string; orderNumber:
 
 // An UNASSIGNED order just became ready (e.g. the house co-manager packed it). It enters the shared
 // "Available" pool — ping every available delivery agent so one can grab it. Data-only, like the rest.
-export async function notifyNewDeliveryAvailable(order: { id: string; orderNumber: string }) {
+//
+// ⚠️ The "is this order actually poolable?" test lives HERE, not at the call sites, and that is
+// deliberate: it must match routes/delivery.ts's pool query (`deliveryBoyId: null, status: PACKED,
+// fulfillmentType: DELIVERY`) exactly, and there are three callers (owner, admin, seller). With the
+// test at each call site they drifted immediately — sellerOrders.ts checked only deliveryBoyId (so
+// packing a PICKUP order woke every rider for something that would never appear in their feed) and
+// the owner/admin routes had no call at all, which is the common single-store path. Pass the order
+// and let this decide.
+export async function notifyNewDeliveryAvailable(order: {
+  id: string;
+  orderNumber: string;
+  deliveryBoyId?: string | null;
+  fulfillmentType?: string;
+}) {
+  // Already assigned ⇒ that rider got notifyDeliveryAssignment; it never enters the shared pool.
+  if (order.deliveryBoyId) return;
+  // Pickup orders are handed over at the counter — no rider is involved.
+  if (order.fulfillmentType && order.fulfillmentType !== "DELIVERY") return;
+
   const agents = await prisma.user.findMany({
     where: { role: "DELIVERY", isAvailableForDelivery: true },
     select: { id: true },
@@ -173,6 +191,36 @@ export async function notifyNewDeliveryAvailable(order: { id: string; orderNumbe
       body: `Order #${order.orderNumber} is ready to pick up. Tap to accept.`,
     },
   );
+}
+
+// A rider says they've handed over their COD cash. The debt does NOT clear until the owner confirms
+// receipt, so without this ping the declaration would sit in a queue nobody knew to open — and the
+// rider would stay blocked by the cash-in-hand cap waiting on it.
+export async function notifyCashSettlementDeclared(riderId: string, amount: number) {
+  const rider = await prisma.user.findUnique({ where: { id: riderId }, select: { name: true } });
+  await sendToTopic("owner_orders", {
+    type: "cash_settlement_declared",
+    riderId,
+    amount: String(amount),
+    title: "Cash handover to confirm",
+    body: `${rider?.name ?? "A delivery partner"} handed over Rs.${Math.round(amount)}. Confirm you received it.`,
+  });
+}
+
+// A delivery attempt failed (customer not home, unreachable, refused…). The goods are still with the
+// rider, so the owner has to decide: re-attempt, reassign, or cancel. Nothing else surfaces this.
+export async function notifyDeliveryFailed(
+  order: { id: string; orderNumber: string },
+  info: { riderName: string; reason: string; attempts: number },
+) {
+  await sendToTopic("owner_orders", {
+    type: "delivery_failed",
+    orderId: order.id,
+    orderNumber: order.orderNumber,
+    attempts: String(info.attempts),
+    title: `Delivery failed — #${order.orderNumber}`,
+    body: `${info.riderName}: ${info.reason} (attempt ${info.attempts}). The goods are still with them.`,
+  });
 }
 
 export async function notifyDeliveryArrived(order: { id: string; orderNumber: string; customerId: string }) {

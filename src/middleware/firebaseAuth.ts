@@ -22,6 +22,35 @@ export interface FirebaseAuthRequest extends Request {
   appUser?: FirebaseAuthUser;
 }
 
+// ─── Phone-on-file gate: allowlist ───────────────────────────────────────────────────────────
+//
+// Paths a CUSTOMER with no phone on file may still reach. Everything needed to ADD a phone (and
+// the setup screen's own supporting calls) stays open; everything else — cart, orders, wallet,
+// subscriptions — is refused until a number is on file.
+//
+// `GET /api/app/config` and `/api/app/privacy-notice` are absent deliberately: both are mounted
+// WITHOUT this middleware (the notice must be readable before signup), so the gate can never fire
+// on them and an entry here would be dead weight.
+//
+// ⚠️ `/api/app/me` is EXACT, not a prefix. As a prefix it would re-open every /me/* sub-resource
+// (wallet, orders, data-export, subscriptions) that this gate exists to close.
+const PHONELESS_EXACT = new Set(["/api/app/me"]);
+const PHONELESS_PREFIXES = [
+  "/api/app/me/consents", // the DPDP notice gate can run before setup completes
+  "/api/app/me/fcm-token", // device push registration happens at app start
+  "/api/app/me/referral", // ProfileSetupScreen renders its referral field ABOVE the phone step
+];
+
+/**
+ * True when [originalUrl] is reachable by a customer who has no phone number yet.
+ * Pure (no request object) so it can be unit-tested without mocking Express or Prisma.
+ */
+export function isPhonelessAllowedPath(originalUrl: string): boolean {
+  const path = (originalUrl.split("?")[0] ?? "").replace(/\/+$/, "") || "/";
+  if (PHONELESS_EXACT.has(path)) return true;
+  return PHONELESS_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
+}
+
 export async function firebaseAuthMiddleware(
   req: FirebaseAuthRequest,
   res: Response,
@@ -176,6 +205,32 @@ export async function firebaseAuthMiddleware(
       phone: user.phone,
       tokenPhone: phone10,
     };
+
+    // ─── Phone-on-file gate ───────────────────────────────────────────────────────────────────
+    //
+    // "A customer cannot use the app without a phone number; Gmail is optional." Until now that
+    // rule lived ONLY in the Android UI (ProfileSetupScreen + SplashViewModel routing), so a
+    // phone-less token could still call every endpoint directly. Mirrors the dashboard's
+    // requirePasswordChanged gate (middleware/auth.ts): refuse with a distinct code the client can
+    // route on, while leaving the endpoints needed to FIX it reachable (see the allowlist above).
+    //
+    // Done HERE rather than as an `app.use`: every /api/app/* router mounts this middleware itself
+    // and there is no single parent mount, so one check covers all ~40 routers with no mount-order
+    // surgery — and a router added later is gated automatically instead of being forgotten.
+    //
+    // ⚠️ CUSTOMER ONLY, and that is load-bearing. Owner/seller/delivery rows legitimately exist
+    // with no phone (a seeded owner, dashboard-only staff), and gating them is the owner-lockout
+    // trap this codebase has been bitten by before. Partner rows are provisioned BY phone anyway.
+    if (user.role === "CUSTOMER" && !user.phone && !isPhonelessAllowedPath(req.originalUrl)) {
+      return res.status(403).json({
+        success: false,
+        error: {
+          code: "PHONE_REQUIRED",
+          message: "Add and verify your phone number to continue.",
+          details: [],
+        },
+      });
+    }
 
     next();
   } catch (e) {

@@ -51,6 +51,18 @@ export function isPhonelessAllowedPath(originalUrl: string): boolean {
   return PHONELESS_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
 }
 
+// Play Integrity, via Firebase App Check. The Android app attaches a token as
+// `X-Firebase-AppCheck` (release builds only — see app/src/release/.../AppCheckInit.kt) proving
+// the request comes from a genuine, unmodified install of this app on a genuine device.
+//
+// ⚠️ Starts in LOG-ONLY mode by design, matching Firebase's own recommended rollout: watch the
+// App Check "Metrics" tab (or these warn logs) for a stretch with real traffic BEFORE flipping
+// APP_CHECK_ENFORCE=true — enforcing on day one with no verification data risks locking out
+// debug builds whose device hasn't been registered with a debug token in Firebase Console, or
+// any client whose Play Integrity attestation fails because the GCP project isn't linked yet in
+// Play Console → Play Integrity API → Project configuration.
+const APP_CHECK_ENFORCE = process.env.APP_CHECK_ENFORCE === "true";
+
 export async function firebaseAuthMiddleware(
   req: FirebaseAuthRequest,
   res: Response,
@@ -62,6 +74,39 @@ export async function firebaseAuthMiddleware(
       error: {
         code: "FIREBASE_NOT_CONFIGURED",
         message: "Firebase is not configured on the server",
+        details: [],
+      },
+    });
+  }
+
+  const appCheckHeader = req.headers["x-firebase-appcheck"];
+  const appCheckToken = Array.isArray(appCheckHeader) ? appCheckHeader[0] : appCheckHeader;
+  if (appCheckToken) {
+    try {
+      await admin.appCheck().verifyToken(appCheckToken);
+    } catch (e) {
+      console.warn(
+        `App Check REJECTED for ${req.method} ${req.originalUrl}: ${(e as Error).message}`,
+      );
+      if (APP_CHECK_ENFORCE) {
+        return res.status(401).json({
+          success: false,
+          error: {
+            code: "APP_CHECK_INVALID",
+            message: "Failed device/app integrity check",
+            details: [],
+          },
+        });
+      }
+    }
+  } else if (APP_CHECK_ENFORCE) {
+    // No header at all — either a pre-App-Check app build, or a debug build (App Check is
+    // release-only client-side). Only rejected once enforcement is actually on.
+    return res.status(401).json({
+      success: false,
+      error: {
+        code: "APP_CHECK_MISSING",
+        message: "Missing device/app integrity token",
         details: [],
       },
     });
@@ -110,13 +155,27 @@ export async function firebaseAuthMiddleware(
       // 1) Link by PHONE — this is what lets the owner PRE-REGISTER a delivery agent
       //    (or any role) by phone number before that person has ever logged in. On
       //    their first phone-OTP login we attach this Firebase account to the row the
-      //    owner created, keeping the pre-assigned role (e.g. DELIVERY). Only ever link
-      //    an UNCLAIMED row (firebaseUid: null) so we can't hijack an existing account.
+      //    owner created, keeping the pre-assigned role (e.g. DELIVERY).
+      //    Two rows qualify: a genuinely UNCLAIMED row (firebaseUid: null), or a
+      //    CUSTOMER row whose phone was never actually proven (phoneVerified: false —
+      //    e.g. a Google-signed-in account that once had a number typed into its
+      //    profile but never ran it through real Firebase phone verification). A live
+      //    phone-OTP token is stronger proof of that number than an unverified field,
+      //    so it takes over the row instead of spawning a duplicate. Scoped to
+      //    CUSTOMER + same-phone only — a SELLER/DELIVERY/OWNER row, or a row whose
+      //    phone IS already verified (a real second person legitimately sharing a
+      //    number), is never silently repointed here.
+      // ponytail: this reassigns the row's ONE firebaseUid slot, so the Google login
+      // this row used to answer to will re-create a fresh stub next time it's used
+      // (email is still unique-taken, so it can't re-claim this row). True dual-credential
+      // linking (many Firebase uids → one User row) needs a join table; upgrade to that
+      // if "same person keeps re-appearing under both sign-in methods" turns out common.
       const byPhone = phone10
         ? await prisma.user.findFirst({
             where: {
-              firebaseUid: null,
+              role: "CUSTOMER",
               phone: { in: [phone10, `+91${phone10}`, `91${phone10}`] },
+              OR: [{ firebaseUid: null }, { phoneVerified: false }],
             },
           })
         : null;

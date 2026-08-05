@@ -139,6 +139,17 @@ export async function firebaseAuthMiddleware(
       where: { firebaseUid: decoded.uid },
     });
 
+    // Second lookup: this uid may be a SECONDARY credential linked to a row whose primary
+    // firebaseUid is something else (see the phone-takeover branch below). Only checked when
+    // the direct hit above misses — the common case never pays for this extra query.
+    if (!user) {
+      const linked = await prisma.linkedCredential.findUnique({
+        where: { firebaseUid: decoded.uid },
+        include: { user: true },
+      });
+      if (linked) user = linked.user;
+    }
+
     // Restore-on-login: a soft-deleted account still within its grace window is reactivated the
     // moment the user signs back in — this is how "sign in again to cancel deletion" works. (A
     // fully purged account has firebaseUid=null, so it isn't found here and gets a fresh row below.)
@@ -165,11 +176,10 @@ export async function firebaseAuthMiddleware(
       //    CUSTOMER + same-phone only — a SELLER/DELIVERY/OWNER row, or a row whose
       //    phone IS already verified (a real second person legitimately sharing a
       //    number), is never silently repointed here.
-      // ponytail: this reassigns the row's ONE firebaseUid slot, so the Google login
-      // this row used to answer to will re-create a fresh stub next time it's used
-      // (email is still unique-taken, so it can't re-claim this row). True dual-credential
-      // linking (many Firebase uids → one User row) needs a join table; upgrade to that
-      // if "same person keeps re-appearing under both sign-in methods" turns out common.
+      // When the matched row already answers to a DIFFERENT firebaseUid (the takeover case),
+      // that credential is recorded as a LinkedCredential instead of overwriting the row's
+      // primary firebaseUid — so the original sign-in method (e.g. Google) keeps resolving to
+      // this same row too, rather than getting silently orphaned into re-creating a duplicate.
       const byPhone = phone10
         ? await prisma.user.findFirst({
             where: {
@@ -180,11 +190,23 @@ export async function firebaseAuthMiddleware(
           })
         : null;
 
-      if (byPhone) {
+      if (byPhone && !byPhone.firebaseUid) {
+        // Genuinely unclaimed row (e.g. owner pre-registered this phone) — first claim.
         user = await prisma.user.update({
           where: { id: byPhone.id },
-          // Normalize the stored phone + mark verified (a phone token proves the number).
           data: { firebaseUid: decoded.uid, phone: phone10, phoneVerified: true },
+        });
+      } else if (byPhone) {
+        // Already answers to another credential (its phone was just never verified there).
+        // Link this uid alongside it rather than reassigning — both sign-ins keep working.
+        await prisma.linkedCredential.upsert({
+          where: { firebaseUid: decoded.uid },
+          create: { firebaseUid: decoded.uid, userId: byPhone.id },
+          update: {},
+        });
+        user = await prisma.user.update({
+          where: { id: byPhone.id },
+          data: { phone: phone10, phoneVerified: true },
         });
       } else {
         // 2) Link by e-mail (Google). User.email is @unique, so a row may already hold

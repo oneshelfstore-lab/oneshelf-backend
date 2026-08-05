@@ -429,6 +429,13 @@ model User {
   subscriptions          Subscription[]
   subscriptionStatements SubscriptionStatement[]
 
+  // Secondary Firebase sign-in credentials (e.g. Google + phone-OTP) that resolve to THIS same
+  // row. `firebaseUid` above stays whichever credential claimed the row first/originally; a
+  // different credential later proven to be the same person (see firebaseAuth.ts's phone-link
+  // takeover) is recorded here instead of overwriting that column — so neither sign-in method
+  // ever gets silently orphaned into re-creating a fresh duplicate row.
+  linkedCredentials LinkedCredential[]
+
   // Referral v2 — ongoing commission payouts. Bank details the referrer fills in once (Referral
   // screen) so their monthly-accrued commission can be settled by manual bank transfer, same
   // pattern as SellerPayout (owner sends the money outside the app, then marks it paid in-app).
@@ -440,6 +447,17 @@ model User {
 
   @@index([phone])
   @@index([deletionStatus, deletedAt]) // the deletion sweeper's hot query
+}
+
+// A second Firebase Auth UID that resolves to a User row already claimed by a different
+// credential. One row here per alternate credential; `userId` is NOT unique on purpose — the
+// same account can accumulate more than one secondary sign-in method over time.
+model LinkedCredential {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  firebaseUid String   @unique
+  createdAt   DateTime @default(now())
 }
 
 // ─── 1. Company ──────────────────────────────────────────────────────

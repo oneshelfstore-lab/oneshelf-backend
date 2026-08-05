@@ -292,10 +292,14 @@ export async function processWalletOnDeletion(userId: string): Promise<WalletDel
  * Scrubs PII off the user row and removes transient/device state, while RETAINING records that
  * must survive for legal/financial/owner reasons (orders, invoices, wallet ledger, quote requests,
  * complaints — the Order→User relation is Restrict and invoices are kept for GST). Marks the row
- * DELETED. Returns the Firebase uid (if any) so the caller can revoke the credential afterwards.
+ * DELETED. Returns EVERY Firebase uid that resolved to this row (the primary one PLUS any
+ * secondary sign-in credentials linked via LinkedCredential — see firebaseAuth.ts's phone-takeover
+ * path) so the caller can revoke all of them; leaving a secondary credential live would let that
+ * sign-in method silently resolve straight back into this now-anonymized row on its next login.
  */
-export async function anonymizeUser(userId: string): Promise<string | null> {
+export async function anonymizeUser(userId: string): Promise<string[]> {
   let firebaseUid: string | null = null;
+  let linkedUids: string[] = [];
   await prisma.$transaction(async (tx) => {
     const u = await tx.user.findUnique({
       where: { id: userId },
@@ -304,6 +308,12 @@ export async function anonymizeUser(userId: string): Promise<string | null> {
     firebaseUid = u?.firebaseUid ?? null;
     // Keep a one-way hash of the number before scrubbing it (re-signup fraud throttle — Phase 5).
     const phoneHash = u?.phone ? hashPhone(u.phone) : null;
+
+    const linked = await tx.linkedCredential.findMany({ where: { userId }, select: { firebaseUid: true } });
+    linkedUids = linked.map((l) => l.firebaseUid);
+    // Not relying on the model's onDelete: Cascade — this is an UPDATE (the row survives for GST
+    // retention), so cascade never fires. Deleted explicitly here instead.
+    await tx.linkedCredential.deleteMany({ where: { userId } });
 
     // Transient / device state — safe to remove.
     await tx.address.deleteMany({ where: { userId } });
@@ -335,7 +345,7 @@ export async function anonymizeUser(userId: string): Promise<string | null> {
       },
     });
   });
-  return firebaseUid;
+  return firebaseUid ? [firebaseUid, ...linkedUids] : linkedUids;
 }
 
 /**
@@ -437,13 +447,15 @@ export async function purgeExpiredDeletions(): Promise<number> {
   for (const u of due) {
     try {
       const wallet = await processWalletOnDeletion(u.id); // refund real money first; throws → skip + retry
-      const firebaseUid = await anonymizeUser(u.id);
-      await cleanupUserStorage(firebaseUid); // best-effort Firebase Storage scrub (profile photo + quote images)
-      if (firebaseUid && isFirebaseInitialized()) {
-        try {
-          await admin.auth().deleteUser(firebaseUid);
-        } catch (err: any) {
-          console.warn("Firebase user deletion failed (data already anonymized):", err?.message);
+      const firebaseUids = await anonymizeUser(u.id);
+      await cleanupUserStorage(firebaseUids[0] ?? null); // best-effort Storage scrub (profile photo + quote images), primary uid only
+      if (isFirebaseInitialized()) {
+        for (const uid of firebaseUids) {
+          try {
+            await admin.auth().deleteUser(uid);
+          } catch (err: any) {
+            console.warn("Firebase user deletion failed (data already anonymized):", err?.message);
+          }
         }
       }
       await writeDeletionAudit(u.id, "purged", {

@@ -180,15 +180,42 @@ export async function firebaseAuthMiddleware(
       // that credential is recorded as a LinkedCredential instead of overwriting the row's
       // primary firebaseUid — so the original sign-in method (e.g. Google) keeps resolving to
       // this same row too, rather than getting silently orphaned into re-creating a duplicate.
-      const byPhone = phone10
+      //
+      // ⚠️ TWO SEPARATE LOOKUPS, and the role scoping differs between them. Collapsing them into
+      // one `role: "CUSTOMER"` query is what made an approved delivery applicant log in as a
+      // brand-new CUSTOMER instead of reaching their onboarding form:
+      //
+      // (a) UNCLAIMED row (firebaseUid: null) — ANY role. This IS the pre-registration mechanism.
+      //     ownerStaff.ts POST /, provisionDeliveryRider and provisionSeller all create a row
+      //     carrying the partner's role and NO firebase account, precisely so that person's first
+      //     phone-OTP login attaches to it and keeps that role. Scoping this to CUSTOMER made every
+      //     one of those paths silently mint a duplicate customer account instead, leaving the real
+      //     DELIVERY/SELLER row unclaimed and permanently unreachable by its owner.
+      // (b) TAKEOVER of a row that ALREADY answers to another credential — CUSTOMER only, and that
+      //     restriction is load-bearing: a live phone-OTP token must never be able to walk into an
+      //     unverified SELLER/DELIVERY/OWNER account on the strength of holding the number.
+      //
+      // Ordered (a) then (b) rather than one OR'd query on purpose: with both a pre-registered
+      // partner row and an old unverified customer row on the same number, findFirst's row order is
+      // arbitrary — and losing that coin flip reproduces this exact bug intermittently.
+      const phoneVariants = phone10 ? [phone10, `+91${phone10}`, `91${phone10}`] : [];
+      const unclaimed = phone10
         ? await prisma.user.findFirst({
-            where: {
-              role: "CUSTOMER",
-              phone: { in: [phone10, `+91${phone10}`, `91${phone10}`] },
-              OR: [{ firebaseUid: null }, { phoneVerified: false }],
-            },
+            where: { phone: { in: phoneVariants }, firebaseUid: null },
+            orderBy: { createdAt: "asc" },
           })
         : null;
+      const byPhone =
+        unclaimed ??
+        (phone10
+          ? await prisma.user.findFirst({
+              where: {
+                role: "CUSTOMER",
+                phone: { in: phoneVariants },
+                phoneVerified: false,
+              },
+            })
+          : null);
 
       if (byPhone && !byPhone.firebaseUid) {
         // Genuinely unclaimed row (e.g. owner pre-registered this phone) — first claim.

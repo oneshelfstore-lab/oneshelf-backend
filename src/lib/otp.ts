@@ -13,16 +13,19 @@ export function generateOtp(): string {
   return String(randomInt(100000, 1000000));
 }
 
-// Every delivery/pickup order at or above this value gets a handover code — regardless of payment
-// method (COD, prepaid, or advance-paid). Closes the old gap where COD orders ≤ ₹2000 had none.
-export const OTP_MIN_ORDER_TOTAL = 500;
+// 0 = every order gets a handover code. Was ₹500 (and ₹2000 before that), which left the cheapest,
+// most-disputed orders completing with no proof of handover at all.
+export const OTP_MIN_ORDER_TOTAL = 0;
 
 /**
- * True ⇒ this order must be OTP-verified at handover. Prepaid / advance-paid always require one
- * (money already captured); everything else is gated purely on order value.
+ * True ⇒ this order must be OTP-verified at handover. Now unconditional for every customer-placed
+ * order regardless of value or payment method.
+ *
+ * ⚠️ Subscription orders are the one exception and it is NOT here — subscriptionEngine.ts hardcodes
+ * `deliveryOtpRequired: false`, because the daily run is delivered as a batch
+ * (POST /subscription-run/deliver-all) and a per-drop code would break that flow.
  */
-export function orderRequiresOtp(paymentStatus: string, total: number): boolean {
-  if (paymentStatus === "PAID" || paymentStatus === "ADVANCE_PAID") return true;
+export function orderRequiresOtp(_paymentStatus: string, total: number): boolean {
   return total >= OTP_MIN_ORDER_TOTAL;
 }
 

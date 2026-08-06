@@ -103,6 +103,12 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         deliveryOtpRequired: true, shippingName: true, shippingPhone: true,
         shippingAddress: true, shippingPincode: true,
         createdAt: true, updatedAt: true,
+        // The saved address the customer actually picked on the map. shippingAddress is only the
+        // typed text, which geocodes to "somewhere on that street" — the rider needs the exact pin.
+        address: { select: { id: true, label: true, addressLine: true, landmark: true, pincode: true, lat: true, lng: true } },
+        // Who ordered. shippingName is the receiver at the door; customer.name is the account holder
+        // — the card shows the receiver and falls back to the account name when it's blank.
+        customer: { select: { id: true, name: true, phone: true } },
         // Bulk Express: "BULK_QUOTE" → delivery card shows a BULK badge. amountPaid (advance already
         // captured) lets the card show the correct cash-to-collect = totalAmount − amountPaid.
         source: true, amountPaid: true,
@@ -553,7 +559,12 @@ async function claimForAgent(orderId: string, userId: string): Promise<boolean> 
   return r.count > 0;
 }
 
-// ─── POST /api/app/delivery/orders/:id/accept — accept (and claim if pooled) ───
+// ─── POST /api/app/delivery/orders/:id/accept — claim the job (NOT "on the way") ───
+//
+// ⚠️ Accept used to flip straight to OUT_FOR_DELIVERY. That was a lie about where the goods are:
+// the rider taps Accept while still riding TO the shop, so the customer got an "out for delivery"
+// push (and the handover code) for a bag nobody had picked up yet. Accept now only CLAIMS the order
+// — status stays PACKED — and POST /:id/picked-up is what puts it on the road.
 
 router.post("/:id/accept", async (req: FirebaseAuthRequest, res: Response) => {
   try {
@@ -562,23 +573,6 @@ router.post("/:id/accept", async (req: FirebaseAuthRequest, res: Response) => {
     const order = await prisma.order.findUnique({ where: { id: req.params.id } });
     if (!order) throw new NotFoundError("Order", req.params.id!);
     if (order.status !== "PACKED") throw new ValidationError("Can only accept orders in PACKED status");
-
-    // A multi-seller order has to be physically collected shop by shop first — that's what
-    // /collect/:subOrderId is for, and it's what auto-advances the order to OUT_FOR_DELIVERY.
-    // /accept flips straight to OUT_FOR_DELIVERY, so on such an order it would mark the goods
-    // "on the way" while they're still sitting at the sellers' shops. The Android UI already
-    // branches on requiresCollection and hides Accept, but a stale build or a direct call didn't
-    // have to obey it. Server decides now.
-    const pending = await prisma.subOrder.findMany({
-      where: { orderId: order.id, seller: { isHouse: false }, status: { notIn: ["COLLECTED", "CANCELLED"] } },
-      select: { seller: { select: { name: true } } },
-    });
-    if (pending.length > 0) {
-      throw new ValidationError(
-        `Collect from ${pending.map((p) => p.seller.name).join(", ")} first — this order has ` +
-          `${pending.length} pickup stop${pending.length === 1 ? "" : "s"} still to go.`,
-      );
-    }
 
     await assertCashCapOk(userId, order);
 
@@ -591,12 +585,61 @@ router.post("/:id/accept", async (req: FirebaseAuthRequest, res: Response) => {
       if (!claimed) throw new ValidationError("This order was just taken by another delivery partner");
     }
 
-    await prisma.order.update({
-      where: { id: order.id },
-      data: { status: "OUT_FOR_DELIVERY" },
+    res.json({ success: true, data: { orderId: order.id, status: "PACKED", claimed: true } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/delivery/orders/:id/picked-up — goods in the bag, now on the road ───
+// The second half of the old /accept. Only from here does the order become OUT_FOR_DELIVERY, so
+// the customer's "on the way" push and their handover code appear when they're actually true.
+// Multi-seller orders reach OUT_FOR_DELIVERY through /collect/:subOrderId instead (last stop
+// auto-advances), so this refuses while any shop is still uncollected.
+
+router.post("/:id/picked-up", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const userId = req.appUser!.id;
+    const isOwner = req.appUser!.role === "OWNER";
+    const orderId = String(req.params.id ?? "");
+
+    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    if (!order) throw new NotFoundError("Order", orderId);
+    if (!isOwner && order.deliveryBoyId !== userId) {
+      throw new AppError(403, "FORBIDDEN", "Accept this order first");
+    }
+    // Idempotent: tapping twice (or a retry after a dropped response) is a no-op success.
+    if (order.status === "OUT_FOR_DELIVERY") {
+      return res.json({ success: true, data: { orderId: order.id, status: "OUT_FOR_DELIVERY" } });
+    }
+    if (order.status !== "PACKED") throw new ValidationError(`Cannot start delivery from '${order.status}'`);
+
+    const pending = await prisma.subOrder.findMany({
+      where: { orderId: order.id, seller: { isHouse: false }, status: { notIn: ["COLLECTED", "CANCELLED"] } },
+      select: { seller: { select: { name: true } } },
+    });
+    if (pending.length > 0) {
+      throw new ValidationError(
+        `Collect from ${pending.map((p) => p.seller.name).join(", ")} first — this order has ` +
+          `${pending.length} pickup stop${pending.length === 1 ? "" : "s"} still to go.`,
+      );
+    }
+
+    // House stops sit at the dispatch point; taking the bag IS collecting them.
+    await prisma.subOrder.updateMany({
+      where: { orderId: order.id, seller: { isHouse: true }, status: { notIn: ["COLLECTED", "CANCELLED"] } },
+      data: { status: "COLLECTED", collectedAt: new Date(), collectedById: userId },
     });
 
-    notifyOrderStatusChange({ ...order, status: "OUT_FOR_DELIVERY" }).catch((e: unknown) => console.error("[background task failed]", e));
+    const advanced = await prisma.order.updateMany({
+      where: { id: order.id, status: "PACKED" },
+      data: { status: "OUT_FOR_DELIVERY" },
+    });
+    if (advanced.count > 0) {
+      notifyOrderStatusChange({ ...order, status: "OUT_FOR_DELIVERY" }).catch((e: unknown) =>
+        console.error("[background task failed]", e),
+      );
+    }
 
     res.json({ success: true, data: { orderId: order.id, status: "OUT_FOR_DELIVERY" } });
   } catch (e) {

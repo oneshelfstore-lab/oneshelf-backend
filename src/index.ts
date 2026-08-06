@@ -77,6 +77,7 @@ import { initFirebase } from "./lib/firebase.js";
 import { startOrderExpirySweeper } from "./services/orderExpiry.js";
 import { startAbandonedCartSweeper } from "./services/abandonedCart.js";
 import { startSubscriptionSweeper } from "./services/subscriptionEngine.js";
+import { startDeliveryEscalationSweeper } from "./services/deliveryEscalation.js";
 import { startQuotePaymentSweeper } from "./services/quotePayment.js";
 import { startAccountDeletionSweeper } from "./services/accountDeletion.js";
 import prisma from "./lib/prisma.js";
@@ -541,6 +542,9 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   startQuotePaymentSweeper();
   // Permanently purge soft-deleted accounts whose grace window has elapsed (refund wallet + scrub PII).
   startAccountDeletionSweeper();
+  // Tell the owner when a packed order has sat in the shared rider pool with nobody claiming it —
+  // the pool's one failure mode is everybody assuming somebody else took it.
+  startDeliveryEscalationSweeper();
 });
 
 // Guard against slow-rate/low-and-slow DoS (e.g. Slowloris): cap how long a client can take to

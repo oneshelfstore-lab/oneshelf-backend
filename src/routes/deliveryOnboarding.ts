@@ -34,7 +34,7 @@ function virtualDefaultProfile(userId: string): DeliveryProfileRow {
   const now = new Date();
   return {
     id: "", userId, panNumber: null, idDocType: null, idDocUrl: null, selfieUrl: null,
-    vehicleType: null, dlNumber: null, dlDocUrl: null, rcNumber: null, rcDocUrl: null,
+    vehicleType: null, dlNumber: null, dlDocUrl: null, dlExpiry: null, rcNumber: null, rcDocUrl: null,
     insuranceExpiry: null, insuranceDocUrl: null, bankDetails: null, emergencyContactName: null,
     emergencyContactPhone: null, policeVerificationDocUrl: null,
     onboardingStatus: "APPROVED", agreementVersion: null, rejectionReason: null,
@@ -92,6 +92,7 @@ function shapeProfile(p: DeliveryProfileRow, agreementCurrent: boolean) {
     vehicleType: p.vehicleType,
     dlNumber: p.dlNumber,
     dlDocUrl: p.dlDocUrl,
+    dlExpiry: p.dlExpiry,
     rcNumber: p.rcNumber,
     rcDocUrl: p.rcDocUrl,
     insuranceExpiry: p.insuranceExpiry,
@@ -175,6 +176,7 @@ const updateSchema = z.object({
   vehicleType: z.enum(["CYCLE", "SCOOTER", "BIKE"]).optional().nullable(),
   dlNumber: z.string().max(20).optional().nullable(),
   dlDocUrl: z.string().max(500).optional().nullable(),
+  dlExpiry: z.coerce.date().optional().nullable(),
   rcNumber: z.string().max(20).optional().nullable(),
   rcDocUrl: z.string().max(500).optional().nullable(),
   insuranceExpiry: z.coerce.date().optional().nullable(),

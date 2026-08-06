@@ -318,7 +318,8 @@ router.post("/:id/assign", async (req: FirebaseAuthRequest, res: Response) => {
 
     await prisma.order.update({
       where: { id: order.id },
-      data: { deliveryBoyId },
+      // Clear the unclaimed-escalation latch: the owner assigning it by hand IS the resolution.
+      data: { deliveryBoyId, deliveryEscalatedAt: null },
     });
 
     notifyDeliveryAssignment(order, deliveryBoyId).catch((e: unknown) => console.error("[background task failed]", e));

@@ -9,6 +9,7 @@ import {
 import { purgeExpiredDeletions } from "../services/accountDeletion.js";
 import { runAutoSellerPayouts } from "../services/sellerPayout.js";
 import { closeMonthlyReferralPayouts } from "../services/referralRewards.js";
+import { checkRiderDocumentExpiry } from "../services/deliveryEscalation.js";
 
 // Internal automation endpoints — NOT behind Firebase/JWT auth (an external scheduler with no user
 // identity calls them). Protected by a shared secret header instead. Mounted in index.ts BEFORE the
@@ -61,6 +62,10 @@ router.post("/subscriptions/run", async (req: Request, res: Response) => {
     const payout = await runAutoSellerPayouts();
     // Group last month's referral commissions into payouts for the owner's Referral Payouts queue.
     const referralPayouts = await closeMonthlyReferralPayouts();
+    // Warn riders whose licence/insurance is about to lapse, and tell the owner once it has. Rides
+    // the DAILY driver deliberately: warnings fire on exact day-counts (30/7/0), so a half-hourly
+    // driver would push the same rider over and over on the same day.
+    const docWarnings = await checkRiderDocumentExpiry();
     res.json({
       success: true,
       data: {
@@ -71,6 +76,7 @@ router.post("/subscriptions/run", async (req: Request, res: Response) => {
         purged,
         sellersPaidOut: payout.paidCount,
         referralPayoutsCreated: referralPayouts.created,
+        riderDocWarnings: docWarnings,
       },
     });
   } catch (e) {

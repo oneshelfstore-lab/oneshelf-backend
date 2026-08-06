@@ -80,7 +80,7 @@ async function shapeSellerRow(s: {
 
 async function shapeDeliveryRow(p: {
   id: string; userId: string; panNumber: string | null; idDocType: string | null; idDocUrl: string | null;
-  selfieUrl: string | null; vehicleType: string | null; dlNumber: string | null; dlDocUrl: string | null;
+  selfieUrl: string | null; vehicleType: string | null; dlNumber: string | null; dlExpiry: Date | null; dlDocUrl: string | null;
   rcNumber: string | null; rcDocUrl: string | null; insuranceExpiry: Date | null; insuranceDocUrl: string | null;
   emergencyContactName: string | null; emergencyContactPhone: string | null; policeVerificationDocUrl: string | null;
   bankDetails: unknown;
@@ -102,6 +102,10 @@ async function shapeDeliveryRow(p: {
     idDocType: p.idDocType,
     vehicleType: p.vehicleType,
     dlNumber: p.dlNumber,
+    // Both expiries surfaced on the review card: an approved rider with an already-lapsed licence
+    // is blocked from taking work the moment they're approved, which is confusing unless the owner
+    // can see why.
+    dlExpiry: p.dlExpiry,
     rcNumber: p.rcNumber,
     insuranceExpiry: p.insuranceExpiry,
     emergencyContactName: p.emergencyContactName,

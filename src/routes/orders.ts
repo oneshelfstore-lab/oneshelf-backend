@@ -29,6 +29,7 @@ import { generateOtp, orderRequiresOtp, OTP_VISIBLE_STATUSES } from "../lib/otp.
 import { consumeFifo, recordConsumption, restoreConsumption, type ConsumeResult } from "../services/stockBatches.js";
 import { drawFreeGiftStock } from "../services/freeGifts.js";
 import { computeSubOrderTds194o } from "../services/sellerTds194o.js";
+import { haversineKm } from "../lib/distance.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -1015,10 +1016,54 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
       invoiceType: iv.invoiceType,
     }));
 
+    // Live rider position, surfaced as a DISTANCE rather than raw coordinates.
+    //
+    // ⚠️ Deliberately not lat/lng. The customer's question is "how far away is my order"; handing
+    // every customer a rider's exact position is a far larger disclosure than that question needs —
+    // the rider consented to being tracked for delivery, not to being mapped by strangers. Distance
+    // plus freshness answers it and can't be used to follow someone.
+    //
+    // Gated on OUT_FOR_DELIVERY (before that there's no trip; after it the rider is on someone
+    // else's order) and on a position fresher than 15 min, so the app never renders a stale
+    // position as though it were live.
+    let riderStatus: { name: string; distanceKm: number | null; lastSeenAt: Date } | null = null;
+    if (order.status === "OUT_FOR_DELIVERY" && order.deliveryBoyId) {
+      const rider = await prisma.user.findUnique({
+        where: { id: order.deliveryBoyId },
+        select: { name: true, lastLat: true, lastLng: true, lastSeenAt: true },
+      });
+      const fresh = rider?.lastSeenAt != null && Date.now() - rider.lastSeenAt.getTime() < 15 * 60 * 1000;
+      if (rider && fresh && rider.lastLat != null && rider.lastLng != null) {
+        // Read the destination pin directly rather than through order.address: `order`'s inferred
+        // type in this handler has lost its include shape (the same pre-existing wart that makes
+        // `order.items.map((it) =>` implicitly-any a few lines up), so reaching through the relation
+        // doesn't type-check. One extra lookup on a rare path beats an `as any` over the whole row.
+        const dest = order.addressId
+          ? await prisma.address.findUnique({
+              where: { id: order.addressId },
+              select: { lat: true, lng: true },
+            })
+          : null;
+        const destLat = dest?.lat != null ? Number(dest.lat) : null;
+        const destLng = dest?.lng != null ? Number(dest.lng) : null;
+        riderStatus = {
+          name: rider.name,
+          // Null when the delivery address was never pinned — the app then shows "on the way" with
+          // a timestamp instead of inventing a distance.
+          distanceKm:
+            destLat != null && destLng != null
+              ? Math.round(haversineKm(Number(rider.lastLat), Number(rider.lastLng), destLat, destLng) * 10) / 10
+              : null,
+          lastSeenAt: rider.lastSeenAt!,
+        };
+      }
+    }
+
     res.json({
       success: true,
       data: await signOrderMedia({
         ...order, items, freeSampleName: sampleName, freeSampleImageUrl: sampleImage, deliveryOtp, invoices,
+        riderStatus,
       }),
     });
   } catch (e) {

@@ -223,6 +223,49 @@ export async function notifyDeliveryFailed(
   });
 }
 
+// An order has sat in the shared pool with nobody claiming it. The owner IS the fallback here —
+// they can assign it by hand or ride it out themselves — and until this existed the first sign of
+// a stuck order was the customer phoning to ask where their groceries were.
+export async function notifyUnclaimedOrder(order: { id: string; orderNumber: string }, waitingMinutes: number) {
+  await sendToTopic("owner_orders", {
+    type: "delivery_unclaimed",
+    orderId: order.id,
+    orderNumber: order.orderNumber,
+    waitingMinutes: String(waitingMinutes),
+    title: `No rider yet — #${order.orderNumber}`,
+    body: `Packed ${waitingMinutes} min ago and still unassigned. Assign someone or deliver it yourself.`,
+  });
+}
+
+// A rider's licence or insurance is expiring (or has). Tells the RIDER so they can fix it, and the
+// owner once it's actually lapsed — at which point the rider is blocked from taking new work.
+export async function notifyDocumentExpiry(
+  riderId: string,
+  info: { riderName: string; document: string; daysLeft: number },
+) {
+  const expired = info.daysLeft <= 0;
+  const tokens = await getUserTokens(riderId);
+  await sendToTokens(tokens, {
+    type: "document_expiry",
+    document: info.document,
+    daysLeft: String(info.daysLeft),
+    title: expired ? `Your ${info.document} has expired` : `${info.document} expires soon`,
+    body: expired
+      ? `Update your ${info.document} in the app — you can't take new deliveries until it's valid.`
+      : `Your ${info.document} expires in ${info.daysLeft} days. Update it in the app to keep delivering.`,
+  });
+  // The store needs to know the moment it actually lapses — that rider just stopped being able to
+  // pick up work, which is a staffing problem, not just the rider's admin.
+  if (expired) {
+    await sendToTopic("owner_orders", {
+      type: "rider_document_expired",
+      riderId,
+      title: "Rider document expired",
+      body: `${info.riderName}'s ${info.document} has expired — they can't take new deliveries.`,
+    });
+  }
+}
+
 export async function notifyDeliveryArrived(order: { id: string; orderNumber: string; customerId: string }) {
   const tokens = await getUserTokens(order.customerId);
   await sendToTokens(tokens, {

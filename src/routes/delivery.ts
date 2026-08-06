@@ -80,10 +80,19 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     //  • assigned to me (PACKED = accept, OUT_FOR_DELIVERY = active), and
     //  • the shared "Available" pool: any UNASSIGNED, PACKED delivery order. A house order the
     //    co-manager just packed lands here so every agent can see + accept it (first to claim wins).
+    // Offline ⇒ the shared pool disappears, but MY OWN assigned orders stay. Showing a pool an
+    // offline rider is now refused at /accept would just be a wall of error toasts; hiding their own
+    // in-flight work would strand goods they're physically carrying.
+    const me = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { isAvailableForDelivery: true },
+    });
+    const onDuty = req.appUser!.role === "OWNER" || me?.isAvailableForDelivery !== false;
+
     const where: any = {
       OR: [
         { deliveryBoyId: userId, status: { in: ["PACKED", "OUT_FOR_DELIVERY"] } },
-        { deliveryBoyId: null, status: "PACKED", fulfillmentType: "DELIVERY" },
+        ...(onDuty ? [{ deliveryBoyId: null, status: "PACKED" as const, fulfillmentType: "DELIVERY" as const }] : []),
       ],
     };
 
@@ -530,6 +539,47 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
 });
 
 /**
+ * Everything that must be true before a rider takes on NEW work — duty status and document validity.
+ *
+ * ⚠️ Scoped to TAKING ON work (/accept, /collect) and deliberately NOT to /deliver, /delivery-failed
+ * or the feed. A rider who goes offline, or whose licence lapses at midnight, is still holding real
+ * goods for a real customer: blocking them from completing what they already have would strand the
+ * order and help nobody. They just can't pick up anything more.
+ *
+ * ⚠️ OWNER is exempt throughout — they share this router and have no DeliveryProfile.
+ */
+async function assertCanTakeWork(userId: string): Promise<void> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      isAvailableForDelivery: true,
+      deliveryProfile: { select: { dlExpiry: true, insuranceExpiry: true, vehicleType: true } },
+    },
+  });
+  if (!user) throw new NotFoundError("User", userId);
+
+  // Duty status was advisory-only until now: it filtered who got the "new delivery" push and
+  // nothing else, so an offline rider still saw the whole shared pool and could accept from it.
+  if (!user.isAvailableForDelivery) {
+    throw new ValidationError("You're offline. Go online from your Profile tab to take deliveries.");
+  }
+
+  // A cycle rider has no licence or insurance to expire — don't invent a blocker for them.
+  const p = user.deliveryProfile;
+  if (p && p.vehicleType && p.vehicleType !== "CYCLE") {
+    const today = new Date();
+    // Null = not on file. Deliberately does NOT block: most riders predate these fields, and
+    // locking out the store's working riders on deploy is the trap this file keeps flagging.
+    if (p.dlExpiry && p.dlExpiry < today) {
+      throw new ValidationError("Your driving licence has expired. Update it in your profile — the store has been told.");
+    }
+    if (p.insuranceExpiry && p.insuranceExpiry < today) {
+      throw new ValidationError("Your vehicle insurance has expired. Update it in your profile — the store has been told.");
+    }
+  }
+}
+
+/**
  * Cash-in-hand cap. A rider carrying more un-handed-over COD than the store allows can't take on
  * another COD order until they hand it over AND the owner confirms it.
  *
@@ -560,7 +610,9 @@ async function assertCashCapOk(userId: string, order: { paymentMethod: string; t
 async function claimForAgent(orderId: string, userId: string): Promise<boolean> {
   const r = await prisma.order.updateMany({
     where: { id: orderId, deliveryBoyId: null },
-    data: { deliveryBoyId: userId },
+    // Clearing the escalation latch is what lets an order that gets released back to the pool
+    // escalate a SECOND time — otherwise one unclaimed spell would silence the owner alert forever.
+    data: { deliveryBoyId: userId, deliveryEscalatedAt: null },
   });
   return r.count > 0;
 }
@@ -580,6 +632,7 @@ router.post("/:id/accept", async (req: FirebaseAuthRequest, res: Response) => {
     if (!order) throw new NotFoundError("Order", req.params.id!);
     if (order.status !== "PACKED") throw new ValidationError("Can only accept orders in PACKED status");
 
+    await assertCanTakeWork(userId);
     await assertCashCapOk(userId, order);
 
     // Assigned to someone else → hands off. Unassigned (shared pool) → claim it atomically.
@@ -673,8 +726,10 @@ router.post("/:id/collect/:subOrderId", async (req: FirebaseAuthRequest, res: Re
     // Assigned to someone else → forbidden. Unassigned (shared pool) → the agent claims it by
     // starting the collection run. Owner is exempt.
     if (!isOwner) {
-      // Starting a collection run is taking the order on, same as /accept — cap applies here too,
-      // or a capped rider just routes around it by collecting instead of accepting.
+      // Starting a collection run is taking the order on, same as /accept — the duty/document gate
+      // and the cash cap both apply here too, or a blocked rider just routes around them by
+      // collecting instead of accepting.
+      await assertCanTakeWork(userId);
       await assertCashCapOk(userId, order);
       if (order.deliveryBoyId && order.deliveryBoyId !== userId) {
         throw new AppError(403, "FORBIDDEN", "This order was already taken by another delivery partner");
@@ -982,6 +1037,46 @@ router.post("/:id/release", async (req: FirebaseAuthRequest, res: Response) => {
       );
     }
     res.json({ success: true, data: { orderId: order.id, released: released.count > 0 } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/delivery/orders/location — rider heartbeat ───────
+//
+// Overwrites the rider's single position row. There is deliberately NO history table: a trail of
+// where a person has been is data DPDP would make us justify keeping, and nothing needs it — the
+// customer wants "how far away is my order right now", the owner wants "is this rider moving".
+//
+// ⚠️ Refused unless the rider actually has an order OUT_FOR_DELIVERY. That's what keeps this
+// proportionate to the LOCATION_TRACKING consent taken at onboarding — we track during a delivery,
+// not while someone is at home with the app open. The client only sends during a trip too, but the
+// client is not the place to enforce a privacy boundary.
+const locationSchema = z.object({
+  lat: z.number().min(-90).max(90),
+  lng: z.number().min(-180).max(180),
+});
+
+router.post("/location", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = locationSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid location", parsed.error.errors);
+    const userId = req.appUser!.id;
+
+    const active = await prisma.order.count({
+      where: { deliveryBoyId: userId, status: "OUT_FOR_DELIVERY" },
+    });
+    if (active === 0) {
+      // Not an error the rider should see — the app stops posting on its own once the trip ends;
+      // this is the server refusing to store a position it has no purpose for.
+      return res.json({ success: true, data: { stored: false, reason: "no active delivery" } });
+    }
+
+    await prisma.user.update({
+      where: { id: userId },
+      data: { lastLat: parsed.data.lat, lastLng: parsed.data.lng, lastSeenAt: new Date() },
+    });
+    res.json({ success: true, data: { stored: true } });
   } catch (e) {
     sendError(res, e);
   }

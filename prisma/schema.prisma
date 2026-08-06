@@ -360,6 +360,17 @@ model User {
   // true so existing/pre-registered agents are assignable until they turn themselves off.
   isAvailableForDelivery Boolean @default(true)
 
+  // Rider's last reported position, OVERWRITTEN in place — deliberately no history table.
+  // A trail of where a person has been is exactly the kind of data DPDP makes you justify keeping,
+  // and nothing here needs it: the customer wants "how far away is my order right now", the owner
+  // wants "is this rider moving". One row answers both and there is nothing to retain or purge.
+  // Only written while the rider has an active OUT_FOR_DELIVERY order (see routes/delivery.ts) —
+  // this is what finally makes the LOCATION_TRACKING consent collected at onboarding truthful,
+  // instead of a permission we ask for and never exercise.
+  lastLat    Decimal?  @db.Decimal(10, 7)
+  lastLng    Decimal?  @db.Decimal(10, 7)
+  lastSeenAt DateTime?
+
   // Rider payroll: the standing monthly salary the owner pays this delivery agent (0 until set).
   // Delivery riders are salaried employees for now ("then partner" = a future per-delivery model).
   // Lives on User (like isAvailableForDelivery) so it works for every rider whether or not they
@@ -1467,6 +1478,10 @@ model Order {
   deliveryAttempts       Int       @default(0)
   lastDeliveryFailure    String?
   lastDeliveryFailedAt   DateTime?
+  // Set when the unclaimed-order sweeper has already told the owner nobody picked this up. Purely a
+  // "don't nag every 5 minutes" latch — cleared when the order is claimed, so a re-released order
+  // escalates again. See services/deliveryEscalation.ts.
+  deliveryEscalatedAt    DateTime?
   // Honest ETA: placedAt + StoreConfig.avg{Delivery,Pickup}Minutes. Rendered as a range/slot,
   // never a hard minutes-promise. Null = fall back to the store's next-day schedule label.
   estimatedReadyAt    DateTime?
@@ -1885,6 +1900,11 @@ model DeliveryProfile {
   vehicleType     String? // CYCLE | SCOOTER | BIKE
   dlNumber        String?
   dlDocUrl        String?
+  // Licence expiry. insuranceExpiry below has existed since Phase 1 and was read by NOTHING; a DL
+  // had no expiry field at all. Both are now checked before a rider can take on new work — an
+  // expired licence or lapsed insurance on someone riding for the store is a live legal exposure,
+  // not paperwork. Null = not on file, which does NOT block (most existing riders predate this).
+  dlExpiry        DateTime?
   rcNumber        String?
   rcDocUrl        String?
   insuranceExpiry DateTime?

@@ -103,6 +103,13 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         deliveryOtpRequired: true, shippingName: true, shippingPhone: true,
         shippingAddress: true, shippingPincode: true,
         createdAt: true, updatedAt: true,
+        // ⚠️ Load-bearing: the card branches "Accept" vs "Picked up" on whether the order is already
+        // this rider's. Omitting it made every claimed order still render as unclaimed, so Accept
+        // just re-fired and the rider had no way to start the delivery.
+        deliveryBoyId: true,
+        // The real lines. This used to be `_count: { items: true }`, which nothing on the client ever
+        // mapped — so the card read "0 Product Unit(s)" on every order, always.
+        items: { select: { productName: true, quantity: true, lineTotal: true, isLoose: true, stepSize: true, stepUnit: true } },
         // The saved address the customer actually picked on the map. shippingAddress is only the
         // typed text, which geocodes to "somewhere on that street" — the rider needs the exact pin.
         address: { select: { id: true, label: true, addressLine: true, landmark: true, pincode: true, lat: true, lng: true } },
@@ -118,7 +125,6 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         voiceNoteUrl: true,
         // Set when this order was auto-generated from a subscription → the app shows a 🔁 chip.
         subscriptionId: true,
-        _count: { select: { items: true } },
         // Per-seller collection manifest for the Phase-5 collection run. House sub-orders
         // (seller.isHouse) are at the store — shown as "From store", auto-collected; only
         // non-house stops need a physical pickup.

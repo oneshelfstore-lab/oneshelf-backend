@@ -149,7 +149,14 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
 
     if (roleFilter !== "SELLER") {
       const profiles = await prisma.deliveryProfile.findMany({
-        where: statusFilter ? { onboardingStatus: statusFilter } : {},
+        where: {
+          ...(statusFilter ? { onboardingStatus: statusFilter } : {}),
+          // Only people who are actually riders now. DELETE /owner/delivery-agents/:id demotes to
+          // CUSTOMER but leaves the DeliveryProfile behind, so without this an ex-rider sat in the
+          // queue forever with their ID photo and selfie on display — clutter, and a privacy smell:
+          // documents shown to review someone who is no longer being reviewed for anything.
+          user: { role: "DELIVERY" },
+        },
         include: { user: { select: { name: true, phone: true } } },
         orderBy: { createdAt: "desc" },
       });

@@ -1712,6 +1712,12 @@ model StoreConfig {
   // and a non-zero default would start refusing work nobody agreed to refuse. Owner opts in.
   // Counted against CONFIRMED settlements only — a rider can't unblock themselves by declaring.
   maxRiderCashInHand                   Decimal  @default(0) @db.Decimal(12, 2)
+  // Per-delivery incentive paid ON TOP of the standing monthly salary. 0 = off (the default), which
+  // keeps every existing store on pure salary until the owner opts in.
+  // ⚠️ Deliberately NO new ledger table: what a rider earned this month is derivable from orders
+  // they actually delivered (count × rate), and RiderSalaryPayment already records what was paid.
+  // A second ledger would be a second thing to keep in sync with the first for no extra truth.
+  perDeliveryIncentive                 Decimal  @default(0) @db.Decimal(10, 2)
   // Require a proof-of-delivery photo on orders that carry NO handover OTP (i.e. below the OTP
   // threshold). Those are the cheapest orders and today they complete with zero evidence at all.
   // Off by default = existing behaviour unchanged until the owner turns it on.

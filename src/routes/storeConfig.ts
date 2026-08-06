@@ -45,6 +45,10 @@ const updateSchema = z.object({
   // Max un-handed-over COD a rider may hold before they're blocked from taking another cash order.
   // 0 = unenforced (the default). Counted against CONFIRMED handovers only — see routes/delivery.ts.
   maxRiderCashInHand: z.number().min(0).optional(),
+  // Per-delivery incentive on top of the monthly salary. 0 = off (default). ⚠️ Changing this
+  // mid-month re-prices the whole month, since earnings are derived from delivered orders rather
+  // than stamped per delivery — change it at a month boundary.
+  perDeliveryIncentive: z.number().min(0).max(10_000).optional(),
   // Require a proof-of-delivery photo on orders that carry no handover OTP. Off by default.
   requireDeliveryProofPhoto: z.boolean().optional(),
   // Store's own pickup location (owner sets once — GPS or manual pin). Both null = distance-based

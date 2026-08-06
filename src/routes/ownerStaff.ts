@@ -8,7 +8,7 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { istMonthKey } from "../services/referralRewards.js";
-import { computeUnsettledCash, pendingSettlementFor } from "./delivery.js";
+import { computeUnsettledCash, pendingSettlementFor, computeRiderMonth } from "./delivery.js";
 
 // Owner-managed delivery staff. Mounted at /api/app/owner/delivery-agents.
 // A "delivery agent" is just a User with role = DELIVERY. The owner registers one by
@@ -24,9 +24,12 @@ function normalizePhone(input: string): string {
   return input.replace(/\D/g, "").slice(-10);
 }
 
+type RiderMonth = Awaited<ReturnType<typeof computeRiderMonth>>;
+
 function shape(
   a: { id: string; name: string; phone: string | null; firebaseUid: string | null; isAvailableForDelivery: boolean; deliveryMonthlySalary?: unknown },
   paidThisMonth = false,
+  month?: RiderMonth,
 ) {
   return {
     id: a.id,
@@ -41,6 +44,13 @@ function shape(
     // Payroll: the standing monthly salary + whether this (IST) month's salary is already recorded paid.
     monthlySalary: a.deliveryMonthlySalary != null ? Number(a.deliveryMonthlySalary) : 0,
     paidThisMonth,
+    // This month's derived figures — same helper the rider's own screen uses, so the owner and the
+    // rider can never be looking at different numbers for the same month. Zeroed when not loaded
+    // (the register/promote response doesn't need them).
+    monthDeliveredCount: month?.monthDeliveredCount ?? 0,
+    incentiveEarned: month?.incentiveEarned ?? 0,
+    avgRating: month?.avgRating ?? null,
+    ratingCount: month?.ratingCount ?? 0,
   };
 }
 
@@ -59,7 +69,11 @@ router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
       select: { riderId: true },
     });
     const paidSet = new Set(paid.map((p) => p.riderId));
-    res.json({ success: true, data: agents.map((a) => shape(a, paidSet.has(a.id))) });
+    const months = await Promise.all(agents.map((a) => computeRiderMonth(a.id)));
+    res.json({
+      success: true,
+      data: agents.map((a, i) => shape(a, paidSet.has(a.id), months[i])),
+    });
   } catch (e) {
     sendError(res, e);
   }

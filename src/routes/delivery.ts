@@ -105,7 +105,12 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
 
     const orders = await prisma.order.findMany({
       where,
-      orderBy: { createdAt: "desc" },
+      // Grouped by area, then oldest-first within an area. The subscription run has sorted this way
+      // since it shipped; the main feed was newest-first, which is the worst possible order for
+      // someone carrying five bags — it interleaves opposite ends of town. Pincode is a crude proxy
+      // for a route, but it's the one the data actually has (there is no routing API here), and it
+      // beats arrival order. The "Navigate all N stops" button still does the real sequencing.
+      orderBy: [{ shippingPincode: "asc" }, { createdAt: "asc" }],
       select: {
         id: true, orderNumber: true, status: true, fulfillmentType: true,
         paymentMethod: true, paymentStatus: true, totalAmount: true,
@@ -299,6 +304,51 @@ router.post("/cash-settle", async (req: FirebaseAuthRequest, res: Response) => {
   }
 });
 
+/**
+ * This rider's month so far: deliveries completed, what that's worth in incentive, and how the
+ * customers rated them.
+ *
+ * ⚠️ Everything here is DERIVED — there is deliberately no incentive ledger. What a rider earned is
+ * "orders they actually delivered this month × the rate", and RiderSalaryPayment already records
+ * what was paid out. A second table would just be another thing to keep in sync with the first.
+ * The consequence to know: changing perDeliveryIncentive mid-month re-prices the whole month, so
+ * change it at a month boundary.
+ *
+ * Exported for ownerStaff.ts's payroll list — the owner and the rider must never see different
+ * numbers for the same month, which two copies of this arithmetic would eventually guarantee.
+ */
+export async function computeRiderMonth(userId: string) {
+  const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+  const istNow = new Date(Date.now() + IST_OFFSET_MS);
+  const monthStartUtc = new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), 1) - IST_OFFSET_MS);
+
+  const [delivered, config, ratings] = await Promise.all([
+    prisma.order.count({
+      where: { deliveryBoyId: userId, status: "DELIVERED", deliveredAt: { gte: monthStartUtc } },
+    }),
+    prisma.storeConfig.findFirst({ select: { perDeliveryIncentive: true } }),
+    // Same join ownerAnalytics.ts already uses for the owner's per-agent scorecard — the rider has
+    // simply never been shown their own number, which is the one person it's most actionable for.
+    prisma.orderRating.findMany({
+      where: { order: { deliveryBoyId: userId } },
+      select: { stars: true },
+    }),
+  ]);
+
+  const rate = Number(config?.perDeliveryIncentive ?? 0);
+  const avg = ratings.length > 0 ? ratings.reduce((s, r) => s + r.stars, 0) / ratings.length : null;
+
+  return {
+    monthDeliveredCount: delivered,
+    perDeliveryIncentive: rate,
+    incentiveEarned: Math.round(delivered * rate * 100) / 100,
+    // Null until there are enough ratings to mean anything — a single 1-star from a bad day is not
+    // a rating, and showing "1.0 ★" to a rider is demoralising noise rather than feedback.
+    avgRating: ratings.length >= 3 && avg != null ? Math.round(avg * 10) / 10 : null,
+    ratingCount: ratings.length,
+  };
+}
+
 // ─── Shared: start of "today" in IST, expressed in UTC (for deliveredAt filters) ──
 function istTodayStartUtc(): Date {
   const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
@@ -334,6 +384,9 @@ async function buildDeliveryProfile(userId: string) {
     select: { periodMonth: true, amount: true, paidAt: true },
   });
 
+  // This month's deliveries, incentive earned, and the rider's own rating — all derived, no ledger.
+  const month = await computeRiderMonth(userId);
+
   return {
     name: user.name,
     phone: user.phone,
@@ -343,6 +396,7 @@ async function buildDeliveryProfile(userId: string) {
     monthlySalary: Number(user.deliveryMonthlySalary),
     salaryPaidThisMonth: salaryPayments.some((p) => p.periodMonth === currentMonth),
     salaryHistory: salaryPayments.map((p) => ({ periodMonth: p.periodMonth, amount: Number(p.amount) })),
+    ...month,
   };
 }
 

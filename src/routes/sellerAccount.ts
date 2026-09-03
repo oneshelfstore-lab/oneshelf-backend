@@ -67,6 +67,15 @@ function shapeProfile(s: any, agreementCurrent: boolean) {
     // House manager (the store's own catalog) → the app shows the owner-level merchandising toggles
     // + a "goes live now" note in the product editor.
     isHouse: s.isHouse,
+    // "SHOP" | "FOOD". Drives which dashboard the partner app shows: a restaurant gets the Menu tab
+    // (MenuCategory/MenuItem) instead of Inventory (CatalogProduct) — without this the seller app
+    // has no way to know which of the two catalogs it owns.
+    vertical: s.vertical,
+    cuisines: s.cuisines,
+    openTime: s.openTime,
+    closeTime: s.closeTime,
+    avgPrepMinutes: s.avgPrepMinutes,
+    minOrderValue: Number(s.minOrderValue),
     // ─── Onboarding KYC (Phase 1) ──
     fssaiNumber: s.fssaiNumber,
     fssaiExpiry: s.fssaiExpiry,

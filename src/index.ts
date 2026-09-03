@@ -48,6 +48,9 @@ import ownerTds194oRoutes from "./routes/ownerTds194o.js";
 import ownerReportsRoutes from "./routes/ownerReports.js";
 import sellerReportsRoutes from "./routes/sellerReports.js";
 import sellerCatalogRoutes from "./routes/sellerCatalog.js";
+import sellerMenuRoutes from "./routes/sellerMenu.js";
+import foodRoutes from "./routes/food.js";
+import foodOrderRoutes from "./routes/foodOrders.js";
 import sellerOrdersRoutes from "./routes/sellerOrders.js";
 import sellerAccountRoutes from "./routes/sellerAccount.js";
 import sellerComplaintRoutes from "./routes/sellerComplaints.js";
@@ -376,6 +379,9 @@ app.use("/api/app/products", publicCatalogRouter);
 app.use("/api/app/banners", publicBannerRouter);
 app.use("/api/app/deal-collages", publicDealCollageRouter);
 app.use("/api/app/brands", publicBrandRouter);
+// Food browse is PUBLIC, like the grocery catalog — a customer looks at restaurants before signing
+// in. Gated internally by StoreConfig.foodEnabled (returns an empty list while off).
+app.use("/api/app/food", foodRoutes);
 app.use("/api/app/combos", publicComboRouter);
 // Public — submitted from the login page, before the user has an account.
 app.use("/api/app/partner-applications", partnerApplicationRoutes);
@@ -397,6 +403,11 @@ app.use("/api/app/public/product-intake", productIntakeRoutes);
 app.use("/api/app/cart", cartRoutes);
 app.use("/api/app/coupons", appCouponRouter);
 app.use("/api/app/orders", orderRoutes);
+// Authenticated half of /api/app/food (quote + place). Shares the mount path with the PUBLIC browse
+// router above: Express calls next() when a router matches no route, so /restaurants* is served
+// there and /quote + /orders fall through to here. ⚠️ Never add a catch-all to routes/food.ts or
+// these become unreachable.
+app.use("/api/app/food", foodOrderRoutes);
 app.use("/api/app/owner/orders", ownerOrderRoutes);
 app.use("/api/app/owner/catalog", ownerCatalogRoutes);
 app.use("/api/app/owner/delivery-agents", ownerStaffRoutes);
@@ -425,6 +436,7 @@ app.use("/api/app/owner/combos", ownerComboRouter);
 // Owner review queue for the product-intake form (Firebase OWNER auth) — approve/reject/delete.
 app.use("/api/app/owner/product-intake", ownerProductIntakeRoutes);
 app.use("/api/app/seller/catalog", sellerCatalogRoutes);
+app.use("/api/app/seller/menu", sellerMenuRoutes);
 app.use("/api/app/seller/free-gifts", sellerFreeGiftRouter);
 app.use("/api/app/seller/combos", sellerComboRouter);
 app.use("/api/app/seller/brands", sellerBrandRouter);

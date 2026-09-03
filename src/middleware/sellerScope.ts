@@ -8,6 +8,10 @@ export interface SellerRequest extends FirebaseAuthRequest {
   // gets extra powers third-party sellers don't: products go live immediately + owner-only
   // merchandising toggles (₹99 store / free-sample / visibility).
   sellerIsHouse?: boolean;
+  // Which business this seller trades in: "SHOP" (grocery) | "FOOD" (restaurant). Pinned here
+  // rather than re-queried per router so a food-only route (menu editing) can gate on it without a
+  // second round-trip, and so a SHOP seller can never reach the menu editor.
+  sellerVertical?: string;
 }
 
 /**
@@ -24,7 +28,7 @@ export async function resolveSeller(req: SellerRequest, res: Response, next: Nex
     }
     const seller = await prisma.seller.findUnique({
       where: { ownerUserId: userId },
-      select: { id: true, status: true, isActive: true, isHouse: true },
+      select: { id: true, status: true, isActive: true, isHouse: true, vertical: true },
     });
     if (!seller) {
       return res.status(403).json({ success: false, error: { code: "NO_SELLER", message: "No seller account is linked to this login", details: [] } });
@@ -34,6 +38,7 @@ export async function resolveSeller(req: SellerRequest, res: Response, next: Nex
     }
     req.sellerId = seller.id;
     req.sellerIsHouse = seller.isHouse;
+    req.sellerVertical = seller.vertical;
     next();
   } catch (e) {
     console.error("resolveSeller error:", e);

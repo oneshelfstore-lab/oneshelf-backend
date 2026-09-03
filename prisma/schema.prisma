@@ -418,30 +418,30 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  addresses              Address[]
-  cartItems              CartItem[]
-  orders                 Order[]                 @relation("CustomerOrders")
-  deliveryOrders         Order[]                 @relation("DeliveryOrders")
-  fcmTokens              FcmToken[]
-  couponRedemptions      CouponRedemption[]
-  favorites              Favorite[]
-  stockAlerts            StockAlert[]
-  orderRatings           OrderRating[]
-  complaints             Complaint[]
-  quoteRequests          QuoteRequest[]
-  sellerAccount          Seller?                 @relation("SellerOwner")
-  deliveryProfile        DeliveryProfile?
-  cashSettlements        CashSettlement[]
+  addresses                Address[]
+  cartItems                CartItem[]
+  orders                   Order[]                 @relation("CustomerOrders")
+  deliveryOrders           Order[]                 @relation("DeliveryOrders")
+  fcmTokens                FcmToken[]
+  couponRedemptions        CouponRedemption[]
+  favorites                Favorite[]
+  stockAlerts              StockAlert[]
+  orderRatings             OrderRating[]
+  complaints               Complaint[]
+  quoteRequests            QuoteRequest[]
+  sellerAccount            Seller?                 @relation("SellerOwner")
+  deliveryProfile          DeliveryProfile?
+  cashSettlements          CashSettlement[]
   // Settlements this user (the owner) acknowledged receiving — the other half of the two-sided
   // handover. Distinct from cashSettlements above, which is the rider's own side.
-  cashSettlementsConfirmed CashSettlement[]      @relation("CashSettlementConfirmedBy")
-  riderSalaryPayments    RiderSalaryPayment[]
-  walletTxns             WalletTransaction[]
-  walletTopups           WalletTopup[]
-  referralsMade          Referral[]              @relation("Referrer")
-  referralReceived       Referral?               @relation("Referee")
-  subscriptions          Subscription[]
-  subscriptionStatements SubscriptionStatement[]
+  cashSettlementsConfirmed CashSettlement[]        @relation("CashSettlementConfirmedBy")
+  riderSalaryPayments      RiderSalaryPayment[]
+  walletTxns               WalletTransaction[]
+  walletTopups             WalletTopup[]
+  referralsMade            Referral[]              @relation("Referrer")
+  referralReceived         Referral?               @relation("Referee")
+  subscriptions            Subscription[]
+  subscriptionStatements   SubscriptionStatement[]
 
   // Secondary Firebase sign-in credentials (e.g. Google + phone-OTP) that resolve to THIS same
   // row. `firebaseUid` above stays whichever credential claimed the row first/originally; a
@@ -829,15 +829,15 @@ model ProductVariant {
   createdAt         DateTime       @default(now())
   updatedAt         DateTime       @updatedAt
 
-  cartItems       CartItem[]
-  orderItems      OrderItem[]
-  substituteItems OrderItem[]       @relation("SubstituteVariant")
-  invoiceLines    InvoiceLineItem[]
-  subscriptions   Subscription[]
-  stockBatches    StockBatch[]
+  cartItems         CartItem[]
+  orderItems        OrderItem[]
+  substituteItems   OrderItem[]        @relation("SubstituteVariant")
+  invoiceLines      InvoiceLineItem[]
+  subscriptions     Subscription[]
+  stockBatches      StockBatch[]
   purchaseBillLines PurchaseBillLine[]
-  freeGiftAsTrigger FreeGiftOffer?  @relation("FreeGiftTrigger")
-  freeGiftAsReward  FreeGiftOffer[] @relation("FreeGiftReward")
+  freeGiftAsTrigger FreeGiftOffer?     @relation("FreeGiftTrigger")
+  freeGiftAsReward  FreeGiftOffer[]    @relation("FreeGiftReward")
   comboItems        ComboItem[]
   stockAlerts       StockAlert[]
 
@@ -1078,26 +1078,26 @@ model Brand {
 // ─── 7. Address ──────────────────────────────────────────────────────
 
 model Address {
-  id          String   @id @default(cuid())
-  userId      String
-  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  label       String   @default("Home")
-  addressLine String
-  landmark    String?
-  city        String?
-  state       String?
-  pincode     String
-  lat         Decimal? @db.Decimal(10, 7)
-  lng         Decimal? @db.Decimal(10, 7)
-  isDefault   Boolean  @default(false)
+  id                   String   @id @default(cuid())
+  userId               String
+  user                 User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  label                String   @default("Home")
+  addressLine          String
+  landmark             String?
+  city                 String?
+  state                String?
+  pincode              String
+  lat                  Decimal? @db.Decimal(10, 7)
+  lng                  Decimal? @db.Decimal(10, 7)
+  isDefault            Boolean  @default(false)
   // Who to hand the order to at this address — can differ from the account holder (e.g. a
   // relative's flat). Was collected client-side and silently discarded pre-Aug-2026; see
   // addressSchema in appUser.ts.
   receiverName         String?
   receiverPhone        String?
   deliveryInstructions String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 
   orders        Order[]
   subscriptions Subscription[]
@@ -1232,18 +1232,18 @@ model ReferralCommission {
 // rows. No money moves here — this is the "what's owed to whom" queue the owner works from by hand
 // (same manual-ledger pattern as SellerPayout: transfer the money outside the app, then mark paid).
 model ReferralPayout {
-  id                String   @id @default(cuid())
+  id                String    @id @default(cuid())
   referrerId        String
-  referrer          User     @relation("ReferralPayoutsReceived", fields: [referrerId], references: [id])
+  referrer          User      @relation("ReferralPayoutsReceived", fields: [referrerId], references: [id])
   periodMonth       String // the settled month, e.g. "2026-06"
-  amount            Decimal  @db.Decimal(10, 2)
-  status            String   @default("PENDING") // PENDING | PAID
-  method            String   @default("BANK") // BANK (owner settles by transfer) | WALLET (instant store credit)
+  amount            Decimal   @db.Decimal(10, 2)
+  status            String    @default("PENDING") // PENDING | PAID
+  method            String    @default("BANK") // BANK (owner settles by transfer) | WALLET (instant store credit)
   bankAccountName   String? // snapshotted at creation, same "snapshot at the time" convention as Order
   bankAccountNumber String?
   bankIfsc          String?
   paidAt            DateTime?
-  createdAt         DateTime @default(now())
+  createdAt         DateTime  @default(now())
 
   commissions ReferralCommission[]
 
@@ -1466,31 +1466,31 @@ model Order {
   tierDeliveryWaived Decimal @default(0) @db.Decimal(10, 2)
 
   // Delivery
-  deliveryBoyId       String?
-  deliveryBoy         User?     @relation("DeliveryOrders", fields: [deliveryBoyId], references: [id])
-  deliveryOtpRequired Boolean   @default(false)
-  deliveredAt         DateTime?
+  deliveryBoyId        String?
+  deliveryBoy          User?     @relation("DeliveryOrders", fields: [deliveryBoyId], references: [id])
+  deliveryOtpRequired  Boolean   @default(false)
+  deliveredAt          DateTime?
   // Failed-delivery attempts (customer not home, unreachable, refused…). Until these existed the
   // ONLY terminal state a rider could reach was DELIVERED — a failed drop left the order stuck at
   // OUT_FOR_DELIVERY forever, so the rider's realistic options were "lie" or "leave it hanging".
   // ponytail: counter + last reason, not a DeliveryAttempt log. The board only needs "how many
   // tries, and why did the last one fail"; promote to a real per-attempt table if disputes need it.
-  deliveryAttempts       Int       @default(0)
-  lastDeliveryFailure    String?
-  lastDeliveryFailedAt   DateTime?
+  deliveryAttempts     Int       @default(0)
+  lastDeliveryFailure  String?
+  lastDeliveryFailedAt DateTime?
   // Set when the unclaimed-order sweeper has already told the owner nobody picked this up. Purely a
   // "don't nag every 5 minutes" latch — cleared when the order is claimed, so a re-released order
   // escalates again. See services/deliveryEscalation.ts.
-  deliveryEscalatedAt    DateTime?
+  deliveryEscalatedAt  DateTime?
   // Honest ETA: placedAt + StoreConfig.avg{Delivery,Pickup}Minutes. Rendered as a range/slot,
   // never a hard minutes-promise. Null = fall back to the store's next-day schedule label.
-  estimatedReadyAt    DateTime?
+  estimatedReadyAt     DateTime?
   // Free sample (Delight Phase 3B). Rolled at placement; the customer sees the NAMED sample only
   // after the owner confirms it's physically in the bag (freeSamplePacked) — never before.
-  freeSampleVariantId String?
-  freeSampleName      String?
-  freeSampleImageUrl  String?
-  freeSamplePacked    Boolean   @default(false)
+  freeSampleVariantId  String?
+  freeSampleName       String?
+  freeSampleImageUrl   String?
+  freeSamplePacked     Boolean   @default(false)
 
   // Razorpay
   razorpayOrderId   String?
@@ -1508,16 +1508,16 @@ model Order {
   // amountPaid is what the delivery agent collects (0 for fully-paid / pure-COD orders).
   amountPaid     Decimal @default(0) @db.Decimal(12, 2)
 
-  notes          String?
+  notes                 String?
   // Client-supplied key to make order placement idempotent (dedupes double-tap/retry).
-  idempotencyKey String? @unique
+  idempotencyKey        String? @unique
   // Customer-selected delivery window, e.g. "2026-06-08 09:00-12:00". Null = use the
   // store's default next-day schedule.
-  deliverySlot   String?
+  deliverySlot          String?
   // Optional customer-uploaded photo of their home gate/door, shown to the delivery agent.
-  gatePhotoUrl   String?
+  gatePhotoUrl          String?
   // Optional customer-recorded voice note (delivery clarification), played by the delivery agent.
-  voiceNoteUrl   String?
+  voiceNoteUrl          String?
   // Proof-of-delivery photo captured by the rider at handover (e.g. item at the doorstep). Set once,
   // at /deliver — never overwritten. Distinct from gatePhotoUrl (that's the CUSTOMER's own gate photo,
   // uploaded at checkout to help the rider find the address).
@@ -1617,6 +1617,14 @@ model OrderItem {
   // deleted/deactivated.
   isFreeGift      Boolean @default(false)
   freeGiftOfferId String?
+
+  // Food vertical: the menu item this line was ordered from. Sits BESIDE the already-nullable
+  // variantId rather than replacing it — a line resolves to exactly one of the two (grocery →
+  // variantId, food → menuItemId, bulk/courier → neither). Every snapshot field above
+  // (productName / unitPrice / lineTotal) is populated identically whichever it is, so invoices,
+  // the delivery feed and order history need no food-specific branch.
+  menuItemId String?
+  menuItem   MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
 
@@ -1800,6 +1808,18 @@ model StoreConfig {
   // app. NULL = unenforced (default) — set this only when shipping a change an older client can't
   // safely talk to (e.g. a breaking API contract change), not on every release.
   minSupportedVersionCode              Int?
+  // ⚠️ Food vertical kill switch. OFF by default and it must STAY off until the CA has ruled on the
+  // Sec 9(5) question (MULTIVERTICAL_PLAN.md §4.4): restaurant service supplied through an
+  // e-commerce operator makes the PLATFORM liable for 5% GST as if it were the supplier, which is a
+  // different mechanism from the Sec 52 / 1% TCS path every goods order uses. Same discipline as
+  // tds194oEnabled — build it, ship it off, flip it on written sign-off.
+  foodEnabled                          Boolean  @default(false)
+  // DEFAULT commission applied to a NEW restaurant at onboarding (food margins differ from grocery,
+  // whose Seller.commissionPct default is 5). ⚠️ Read at onboarding ONLY — at order time the money
+  // always comes from that restaurant's own Seller.commissionPct, so there is exactly one source of
+  // truth when a payout is computed. Two commission fields consulted at placement is how a payout
+  // silently disagrees with the ledger.
+  foodCommissionPct                    Decimal  @default(15) @db.Decimal(5, 2)
   createdAt                            DateTime @default(now())
   updatedAt                            DateTime @updatedAt
 }
@@ -1811,23 +1831,23 @@ model StoreConfig {
 // NOTE: distinct from the billing `Vendor` (a supplier you buy stock IN from). A Seller sells OUT.
 
 model Seller {
-  id                 String       @id @default(cuid())
-  slug               String       @unique
+  id                 String           @id @default(cuid())
+  slug               String           @unique
   name               String
   logoUrl            String?
   // The SELLER-role User who logs in to manage this shop (null until onboarded/linked by phone).
-  ownerUserId        String?      @unique
-  ownerUser          User?        @relation("SellerOwner", fields: [ownerUserId], references: [id])
+  ownerUserId        String?          @unique
+  ownerUser          User?            @relation("SellerOwner", fields: [ownerUserId], references: [id])
   // Shop / pickup location for the delivery collection run.
   shopAddress        String?
   city               String?
   pincode            String?
-  lat                Decimal?     @db.Decimal(10, 7)
-  lng                Decimal?     @db.Decimal(10, 7)
+  lat                Decimal?         @db.Decimal(10, 7)
+  lng                Decimal?         @db.Decimal(10, 7)
   phone              String?
   // KYC / GST (external shops with their own GSTIN).
-  gstin              String?      @db.VarChar(15)
-  pan                String?      @db.VarChar(10)
+  gstin              String?          @db.VarChar(15)
+  pan                String?          @db.VarChar(10)
   bankDetails        Json? // acct / IFSC / UPI for the manual payout
   // Income Tax Sec 194-O: only a resident INDIVIDUAL/HUF seller with PAN on file gets the ₹5L
   // no-TDS threshold (services/sellerTds194o.ts). Defaults OTHER (no exemption, full-rate TDS from
@@ -1836,12 +1856,12 @@ model Seller {
   // must explicitly reclassify a seller as INDIVIDUAL_HUF once their constitution is verified.
   entityType         SellerEntityType @default(OTHER)
   // Commission the platform keeps on this seller's item subtotal (snapshotted onto each SubOrder).
-  commissionPct      Decimal      @default(5) @db.Decimal(5, 2)
+  commissionPct      Decimal          @default(5) @db.Decimal(5, 2)
   // Running balance the platform owes this seller (manual-ledger settlement).
-  outstandingBalance Decimal      @default(0) @db.Decimal(12, 2)
-  status             SellerStatus @default(PENDING)
-  isHouse            Boolean      @default(false)
-  isActive           Boolean      @default(true)
+  outstandingBalance Decimal          @default(0) @db.Decimal(12, 2)
+  status             SellerStatus     @default(PENDING)
+  isHouse            Boolean          @default(false)
+  isActive           Boolean          @default(true)
 
   // ─── Onboarding KYC (Phase 1, SELLER_DELIVERY_ONBOARDING_PLAN.md) ──
   // Rule 6 disclosure (Consumer Protection E-Commerce Rules 2020) + FSSAI. Document fields hold
@@ -1871,20 +1891,98 @@ model Seller {
   // review), so the lock survives that window instead of quietly lifting. `kycChangeRequested` is
   // the seller's "please let me edit" ask; `kycEditUnlocked` is the owner's one-time yes, consumed
   // by the seller's next sensitive-field write (routes/sellerAccount.ts).
-  everApproved       Boolean @default(false)
-  kycChangeRequested Boolean @default(false)
-  kycEditUnlocked    Boolean @default(false)
+  everApproved              Boolean          @default(false)
+  kycChangeRequested        Boolean          @default(false)
+  kycEditUnlocked           Boolean          @default(false)
+
+  // ─── Vertical (MULTIVERTICAL_PLAN.md §4.1) ──────────────────────────
+  // Which business this seller trades in: "SHOP" (grocery/daily goods) | "FOOD" (restaurant).
+  // ⚠️ @default("SHOP") is the same backward-compat trick as onboardingStatus @default(APPROVED) —
+  // every Seller row that exists today is a shop, so the default backfills them correctly with no
+  // manual pass. A String, not an enum, so adding a vertical later needs no DB enum migration.
+  vertical       String  @default("SHOP")
+  // Restaurant-only. Ignored (and left null) for SHOP sellers.
+  cuisines       String? // comma-separated, e.g. "North Indian,Chinese" — v1 keeps this flat
+  openTime       String? @db.VarChar(5) // "10:00" IST wall clock
+  closeTime      String? @db.VarChar(5) // "23:00"; may be < openTime for a past-midnight close
+  avgPrepMinutes Int     @default(20)
+  // Restaurants can set a floor for their own orders (a ₹40 order isn't worth firing the kitchen).
+  minOrderValue  Decimal @default(0) @db.Decimal(10, 2)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  products  CatalogProduct[]
-  subOrders SubOrder[]
-  payouts   SellerPayout[]
-  complaints Complaint[]
+  products       CatalogProduct[]
+  subOrders      SubOrder[]
+  payouts        SellerPayout[]
+  complaints     Complaint[]
+  menuCategories MenuCategory[]
+  menuItems      MenuItem[]
 
   @@index([status])
   @@index([onboardingStatus])
+  @@index([vertical, isActive])
+}
+
+// ─── 15b. Food vertical (MULTIVERTICAL_PLAN.md §4.1) ─────────────────
+// A restaurant menu is deliberately NOT modelled as CatalogProduct/ProductVariant. Those carry
+// stock, costPrice, StockBatch FIFO consumption, mrp and packageSize — all meaningless for a dish,
+// and a sentinel stock value would be a lie the FIFO engine still reads. Just as important: every
+// customer catalog query would then need `productType != MENU_ITEM`, and this codebase has already
+// paid for that kind of filter-spreading once (SELLER_TRADING across ~12 query sites) — miss one and
+// a biryani appears in grocery search. Separate tables make that impossible by construction.
+
+model MenuCategory {
+  id       String @id @default(cuid())
+  sellerId String
+  seller   Seller @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+
+  name      String // "Starters", "Biryani", "Beverages"
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items MenuItem[]
+
+  @@index([sellerId, isActive])
+}
+
+model MenuItem {
+  id             String       @id @default(cuid())
+  sellerId       String
+  seller         Seller       @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  menuCategoryId String
+  menuCategory   MenuCategory @relation(fields: [menuCategoryId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String?
+  imageUrl    String?
+  price       Decimal @db.Decimal(10, 2)
+  isVeg       Boolean @default(true)
+
+  // ⚠️ TWO different off-switches, and conflating them is the bug to avoid. `isAvailable` is the
+  // "86 it" toggle — sold out for today, back tomorrow, one tap, the single most-used action in a
+  // restaurant's day. `isActive` removes the dish from the menu entirely. A customer-facing query
+  // must require BOTH; the seller's own menu editor shows inactive rows so they can be revived.
+  isAvailable Boolean @default(true)
+  isActive    Boolean @default(true)
+
+  prepMinutes Int     @default(20)
+  // ⚠️ SAC (service accounting code), NOT HSN — restaurant service is a supply of SERVICE. Both the
+  // code and the rate are ⚠️ GST/CA-gated; see MULTIVERTICAL_PLAN.md §4.4 before trusting either.
+  sacCode     String? @db.VarChar(8)
+  gstRate     Decimal @default(5) @db.Decimal(5, 2)
+  sortOrder   Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  orderItems OrderItem[]
+
+  @@index([sellerId, isActive])
+  @@index([menuCategoryId])
 }
 
 // NEW 1:1 profile for delivery riders (Phase 1, SELLER_DELIVERY_ONBOARDING_PLAN.md). Kept off the

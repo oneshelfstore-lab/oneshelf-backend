@@ -9,6 +9,7 @@ import {
 } from "../middleware/firebaseAuth.js";
 import { payoutSeller } from "../services/sellerPayout.js";
 import { isValidGstin } from "../validators/index.js";
+import { parseHhMm, resolveFoodConfig } from "../services/foodMenu.js";
 
 // Owner-managed marketplace sellers. Mounted at /api/app/owner/sellers (Firebase auth + OWNER).
 // Onboard a seller BY PHONE (no UIDs): promote an existing user to SELLER + link, or pre-create a
@@ -52,6 +53,13 @@ function shape(s: any) {
     pan: s.pan,
     entityType: s.entityType,
     city: s.city,
+    // Vertical + restaurant details (null/ignored for a SHOP seller).
+    vertical: s.vertical,
+    cuisines: s.cuisines,
+    openTime: s.openTime,
+    closeTime: s.closeTime,
+    avgPrepMinutes: s.avgPrepMinutes,
+    minOrderValue: Number(s.minOrderValue),
     // The owner transfers payouts by hand, so they need the account to pay INTO — it was collected
     // at onboarding and then returned by nothing, leaving the manual payout with no destination.
     bankDetails: s.bankDetails ?? null,
@@ -254,6 +262,10 @@ const createSchema = z.object({
   phone: z.string().min(8),
   commissionPct: z.number().min(0).max(100).optional(),
   city: z.string().optional(),
+  // "SHOP" (default) | "FOOD". A restaurant is just a Seller with vertical=FOOD — same KYC gate,
+  // same login, same payout ledger. Restaurant-specific fields (hours/cuisines/prep time) are set
+  // AFTER creation via PATCH, matching how the seller editor already works for GSTIN/PAN/bank.
+  vertical: z.enum(["SHOP", "FOOD"]).optional(),
   // Optional (seller may be unregistered) but validated when present so invoices are never issued
   // under a malformed GSTIN (COMPLIANCE_PLAN.md P2-3).
   gstin: z.string().optional().refine(
@@ -280,6 +292,16 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     }
 
     const slug = await uniqueSlug(slugify(name));
+
+    const vertical = parsed.data.vertical ?? "SHOP";
+    // ⚠️ Commission precedence: an explicit value from the owner always wins. Otherwise a FOOD
+    // seller takes the store's food default (StoreConfig.foodCommissionPct, ~15%) and a SHOP seller
+    // takes the grocery default (5%). This is the ONLY place foodCommissionPct is read — at order
+    // time the money always comes from this snapshotted Seller.commissionPct.
+    let commissionPct = parsed.data.commissionPct;
+    if (commissionPct === undefined) {
+      commissionPct = vertical === "FOOD" ? (await resolveFoodConfig()).commissionPct : 5;
+    }
 
     const seller = await prisma.$transaction(async (tx) => {
       // Resolve / create the login user and set role = SELLER. firebaseAuth links a pre-created
@@ -315,7 +337,8 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           // a deliberate tap instead of a silent default.
           status: "PENDING",
           onboardingStatus: "NOT_STARTED",
-          commissionPct: parsed.data.commissionPct ?? 5,
+          commissionPct,
+          vertical,
           city: parsed.data.city ?? null,
           gstin: parsed.data.gstin ?? null,
         },
@@ -331,6 +354,12 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
 
 // PATCH /:id — approve/suspend, set commission, rename. The house store is protected (its status,
 // commission and active flag are fixed — suspending it would break the existing storefront).
+// "" clears an optional HH:MM back to null; anything else must be a real wall clock.
+const hhMm = z
+  .string()
+  .refine((v) => v === "" || parseHhMm(v) != null, "Use HH:MM (24-hour), e.g. 10:00")
+  .optional();
+
 const patchSchema = z.object({
   status: z.enum(["PENDING", "APPROVED", "SUSPENDED"]).optional(),
   commissionPct: z.number().min(0).max(100).optional(),
@@ -341,6 +370,13 @@ const patchSchema = z.object({
   // constitution is verified — it defaults to OTHER (no exemption) on creation, deliberately, so
   // nobody is under-withheld by a wrong default.
   entityType: z.enum(["INDIVIDUAL_HUF", "OTHER"]).optional(),
+  // Restaurant details. Ignored for a SHOP seller — no vertical switch here, because flipping a
+  // seller with a live catalog/menu between the two would strand rows in the wrong model.
+  cuisines: z.string().max(200).optional(),
+  openTime: hhMm,
+  closeTime: hhMm,
+  avgPrepMinutes: z.number().int().min(1).max(240).optional(),
+  minOrderValue: z.number().min(0).max(100000).optional(),
 });
 
 router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
@@ -348,7 +384,8 @@ router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     const id = String(req.params.id ?? "");
     const parsed = patchSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
-    const { status, commissionPct, name, isActive, entityType } = parsed.data;
+    const { status, commissionPct, name, isActive, entityType,
+            cuisines, openTime, closeTime, avgPrepMinutes, minOrderValue } = parsed.data;
 
     const seller = await prisma.seller.findUnique({ where: { id }, select: { id: true, isHouse: true } });
     if (!seller) throw new NotFoundError("Seller", id);
@@ -364,6 +401,11 @@ router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
         ...(name !== undefined ? { name: name.trim() } : {}),
         ...(isActive !== undefined ? { isActive } : {}),
         ...(entityType !== undefined ? { entityType } : {}),
+        ...(cuisines !== undefined ? { cuisines: cuisines.trim() || null } : {}),
+        ...(openTime !== undefined ? { openTime: openTime || null } : {}),
+        ...(closeTime !== undefined ? { closeTime: closeTime || null } : {}),
+        ...(avgPrepMinutes !== undefined ? { avgPrepMinutes } : {}),
+        ...(minOrderValue !== undefined ? { minOrderValue } : {}),
       },
       include: INCLUDE,
     });

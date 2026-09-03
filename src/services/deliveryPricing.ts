@@ -68,24 +68,42 @@ function round1(n: number): number {
 }
 
 /**
- * Distance-based delivery charge for a DELIVERY order. Falls back to the flat
- * `StoreConfig.deliveryCharge` whenever the store's own location or the destination address has no
- * coordinates — so this is a safe drop-in: nothing changes until the owner sets the store's location
- * (Store Settings → "Set store location") AND the customer's address has lat/lng.
+ * Distance-based delivery charge from an ARBITRARY origin. The grocery path's origin is the store;
+ * a food order's origin is the restaurant (MULTIVERTICAL_PLAN.md §4) — the fee must reflect the trip
+ * the rider actually makes, and measuring a restaurant delivery from the store would price a
+ * different journey entirely.
+ *
+ * Falls back to the flat `StoreConfig.deliveryCharge` whenever either end has no coordinates.
+ */
+export async function computeDeliveryForOrigin(
+  originLat: number | null | undefined,
+  originLng: number | null | undefined,
+  destLat: number | null | undefined,
+  destLng: number | null | undefined,
+): Promise<DistanceDeliveryResult> {
+  const cfg = await resolveDeliveryPricingConfig();
+
+  if (originLat == null || originLng == null || destLat == null || destLng == null) {
+    return { charge: cfg.flatCharge, distanceKm: null, outOfRange: false };
+  }
+
+  const distanceKm = haversineKm(originLat, originLng, destLat, destLng);
+  const outOfRange = cfg.deliveryRadius != null && distanceKm > cfg.deliveryRadius;
+  const charge = chargeForDistance(distanceKm, cfg.slabs) ?? cfg.slabs[cfg.slabs.length - 1]!.charge;
+
+  return { charge, distanceKm: round1(distanceKm), outOfRange };
+}
+
+/**
+ * Distance-based delivery charge for a DELIVERY order, measured from the STORE. Falls back to the
+ * flat `StoreConfig.deliveryCharge` whenever the store's own location or the destination address has
+ * no coordinates — so this is a safe drop-in: nothing changes until the owner sets the store's
+ * location (Store Settings → "Set store location") AND the customer's address has lat/lng.
  */
 export async function computeDistanceDelivery(
   addressLat: number | null | undefined,
   addressLng: number | null | undefined,
 ): Promise<DistanceDeliveryResult> {
   const cfg = await resolveDeliveryPricingConfig();
-
-  if (cfg.storeLat == null || cfg.storeLng == null || addressLat == null || addressLng == null) {
-    return { charge: cfg.flatCharge, distanceKm: null, outOfRange: false };
-  }
-
-  const distanceKm = haversineKm(cfg.storeLat, cfg.storeLng, addressLat, addressLng);
-  const outOfRange = cfg.deliveryRadius != null && distanceKm > cfg.deliveryRadius;
-  const charge = chargeForDistance(distanceKm, cfg.slabs) ?? cfg.slabs[cfg.slabs.length - 1]!.charge;
-
-  return { charge, distanceKm: round1(distanceKm), outOfRange };
+  return computeDeliveryForOrigin(cfg.storeLat, cfg.storeLng, addressLat, addressLng);
 }

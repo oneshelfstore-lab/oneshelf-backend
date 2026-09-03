@@ -10,6 +10,7 @@ import {
 } from "../middleware/firebaseAuth.js";
 import { cacheControl, memoCache } from "../lib/httpCache.js";
 import { bustDeliveryPricingConfig } from "../services/deliveryPricing.js";
+import { bustFoodConfig } from "../services/foodMenu.js";
 import { deliverySlabsInputSchema } from "../data/deliveryPricing.js";
 
 const router = Router();
@@ -83,6 +84,11 @@ const updateSchema = z.object({
   tds194oNoPanRatePct: z.number().min(0).max(30).optional(),
   // Force-update gate. null clears it (unenforced); omit to leave unchanged.
   minSupportedVersionCode: z.number().int().min(1).optional().nullable(),
+  // ⚠️ Food vertical master switch. OFF hides every restaurant from customers (/food/restaurants
+  // returns an empty list) — the gate that keeps the vertical dark until the CA has confirmed the
+  // Sec 9(5) position (MULTIVERTICAL_PLAN.md §4.4). Same discipline as tds194oEnabled.
+  foodEnabled: z.boolean().optional(),
+  foodCommissionPct: z.number().min(0).max(100).optional(),
 });
 
 // GET /api/app/config — public, no auth
@@ -132,6 +138,9 @@ router.put(
       // Bust the delivery-pricing cache too — it reads storeLat/storeLng/deliverySlabs/deliveryRadius
       // off this same row, and an owner location/slab edit should apply to the very next quote.
       bustDeliveryPricingConfig();
+      // ⚠️ Load-bearing: resolveFoodConfig memoizes foodEnabled for 30s, so without this an owner
+      // switching food OFF would leave restaurants orderable for up to half a minute afterwards.
+      bustFoodConfig();
       res.json({ success: true, data: config });
     } catch (e) {
       sendError(res, e);

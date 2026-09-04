@@ -16,11 +16,16 @@ publicCategoryRouter.get("/", cacheControl(PUBLIC_TTL_SECONDS), async (_req: Req
       const categories = await prisma.category.findMany({
         where: { isActive: true },
         orderBy: { displayOrder: "asc" },
-        include: { _count: { select: { catalogProducts: true } } },
+        // ⚠️ ACTIVE products only. This is the PUBLIC/customer endpoint, and every customer-facing
+        // catalog query filters `isActive: true` — so counting deactivated rows here reported
+        // shelves that render empty when you open them. Measured on the live catalogue: Dairy,
+        // Beverages and 3 others read non-zero while having nothing a customer could actually see.
+        // The Android category strip hides a zero-count chip, so an inflated count here put dead
+        // chips back on the home screen. The OWNER's own count is a separate endpoint
+        // (ownerCatalog) and deliberately still counts everything — that one is an inventory view.
+        include: { _count: { select: { catalogProducts: { where: { isActive: true } } } } },
       });
-      // Flatten the relation count into a plain productCount the app consumes
-      // (mirrors the admin endpoint's _count include; counts ALL catalog products
-      // in the category — active or not, matching the admin tile counts).
+      // Flatten the relation count into a plain productCount the app consumes.
       return categories.map(({ _count, ...c }) => ({
         ...c,
         productCount: _count.catalogProducts,

@@ -1003,7 +1003,7 @@ model Banner {
   targetCategory String?
   targetProduct  String? // product id — when set, tapping opens the PDP (wins over category)
   targetUrl      String?
-  placement      String    @default("HOME") // HOME | CATEGORY | SPOTLIGHT | BULK — which surface shows this banner
+  placement      String    @default("HOME") // HOME | CATEGORY | SPOTLIGHT | BULK | FOOD — which surface shows this banner
   displayOrder   Int       @default(0)
   isActive       Boolean   @default(true)
   startDate      DateTime?

@@ -12,6 +12,7 @@ import { generateOrderInvoice } from "../services/orderInvoice.js";
 import { notifyNewOrder, notifySubOrderNew } from "../services/fcmNotifier.js";
 import { generateOtp, orderRequiresOtp } from "../lib/otp.js";
 import { isRazorpayConfigured, createRazorpayOrder } from "../services/razorpay.js";
+import { recordOrderEventAsync } from "../services/orderEvents.js";
 
 /**
  * Food quote + order placement (MULTIVERTICAL_PLAN.md §4).
@@ -335,6 +336,24 @@ router.post("/orders", async (req: FirebaseAuthRequest, res: Response) => {
       }
 
       return created;
+    });
+
+    // Opening entry. `estimatedReadyAt` rides in the metadata so the prep-time model can compare the
+    // PREDICTION made at placement against the actual PACKED event later — that predicted-vs-actual
+    // pair is the whole training signal, and it cannot be reconstructed after the fact.
+    recordOrderEventAsync({
+      orderId: order.id,
+      toState: "PLACED",
+      actorType: "CUSTOMER",
+      actorId: userId,
+      metadata: {
+        source: "FOOD",
+        restaurantId: p.restaurant.id,
+        paymentMethod,
+        predictedPrepMinutes: p.prepMinutes,
+        estimatedReadyAt: estimatedReadyAt.toISOString(),
+        totalAmount: p.totals.totalAmount,
+      },
     });
 
     // Razorpay handle for an online order. Degrades exactly like grocery placement: a gateway

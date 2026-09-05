@@ -15,6 +15,7 @@ import { shapeOrderMessage } from "../services/orderMessages.js";
 import { cancelSubOrderAndRefund, reverseSellerLedgerOnCancel } from "../services/subOrderFulfillment.js";
 import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 import { signStoragePath } from "../lib/storageUrls.js";
+import { recordOrderEventAsync } from "../services/orderEvents.js";
 
 // Fixed, translatable reason set the co-manager/seller picks from when rejecting an order — mirrors
 // the shape of the customer-facing "Need help" reason chips (see OrderHelpSheet) so both surfaces feel
@@ -57,6 +58,16 @@ async function maybeAdvanceParentOrder(orderId: string) {
 
   const newStatus = order.fulfillmentType === "PICKUP" ? "READY_FOR_PICKUP" : "PACKED";
   await prisma.order.update({ where: { id: orderId }, data: { status: newStatus } });
+
+  // For a food order this is the "food is ready" moment — the single most valuable timestamp in the
+  // whole log, since it closes the prep interval that started at the seller's ACCEPTED event.
+  recordOrderEventAsync({
+    orderId,
+    fromState: order.status,
+    toState: newStatus,
+    actorType: "SYSTEM",
+    reason: "all sellers ready",
+  });
 
   notifyOrderStatusChange({ ...order, status: newStatus }).catch((e: unknown) => console.error("[background task failed]", e));
   // Now in the shared pool → ping available agents. notifyNewDeliveryAvailable itself decides
@@ -158,6 +169,18 @@ router.patch("/:id/status", async (req: SellerRequest, res: Response) => {
     if (status === "PACKED") data.packedAt = new Date();
 
     const updated = await prisma.subOrder.update({ where: { id }, data, include: ORDER_INCLUDE });
+
+    // ⚠️ THE prep-time signal. For a restaurant, ACCEPTED = "started cooking" and PACKED = "food is
+    // ready"; the interval between these two events is the only ground truth the prep-time model will
+    // ever have, and it exists nowhere else — the parent Order stays PLACED across both.
+    recordOrderEventAsync({
+      orderId: sub.orderId,
+      subOrderId: sub.id,
+      fromState: sub.status,
+      toState: status,
+      actorType: "SELLER",
+      actorId: req.sellerId,
+    });
 
     // Packing a slice may complete the parent order → push it into the delivery pipeline.
     // Best-effort: a hiccup here must never fail the seller's pack action.

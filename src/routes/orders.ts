@@ -30,6 +30,7 @@ import { consumeFifo, recordConsumption, restoreConsumption, type ConsumeResult 
 import { drawFreeGiftStock } from "../services/freeGifts.js";
 import { computeSubOrderTds194o } from "../services/sellerTds194o.js";
 import { haversineKm } from "../lib/distance.js";
+import { recordOrderEventAsync } from "../services/orderEvents.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -472,6 +473,15 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       return created;
     });
 
+    // The opening entry in this order's history. fromState is null — nothing preceded creation.
+    recordOrderEventAsync({
+      orderId: order.id,
+      toState: "PLACED",
+      actorType: "CUSTOMER",
+      actorId: userId,
+      metadata: { paymentMethod, fulfillmentType, totalAmount: totals.totalAmount, source: "APP" },
+    });
+
     // A new order changes the customer's rolling spend → drop their cached loyalty spend so they
     // re-tier promptly (otherwise the memo could serve stale spend for up to its TTL).
     bustUserSpend(userId);
@@ -652,6 +662,15 @@ router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
 
     // Cancelling removes this order from the rolling spend → re-tier the customer promptly.
     bustUserSpend(order.customerId);
+
+    recordOrderEventAsync({
+      orderId: order.id,
+      fromState: order.status,
+      toState: "CANCELLED",
+      actorType: "CUSTOMER",
+      actorId: order.customerId,
+      reason: "cancelled by customer",
+    });
 
     notifyOrderStatusChange({ ...order, status: "CANCELLED" }).catch((e: unknown) => console.error("[background task failed]", e));
     syncInvoicePaymentStatus(order.id).catch((e) => console.error("Invoice sync failed:", e));

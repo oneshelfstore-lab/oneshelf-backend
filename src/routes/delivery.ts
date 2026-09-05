@@ -20,6 +20,71 @@ import { syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { OTP_LOCK_SECONDS } from "../lib/otp.js";
 import { signOrderMedia, signOrderMediaList } from "../lib/storageUrls.js";
 import { getRiderOnboardingStatus, riderBlockedReason } from "./deliveryOnboarding.js";
+import { recordOrderEventAsync } from "../services/orderEvents.js";
+
+// ─── Pre-dispatch: pool a food order WHILE it is still cooking ──────────────────────────────
+//
+// A food order only reaches PACKED when the restaurant marks the food ready, so the shared pool
+// used to hand it out at exactly that moment — which puts the rider's entire trip TO the restaurant
+// in SERIES after the full prep time. Every serious platform dispatches during prep instead, so the
+// rider arrives as the food comes off the pass rather than starting out then.
+//
+// `Order.estimatedReadyAt` has been stored since food shipped and was read by nothing. This is what
+// reads it: an unassigned food order joins the pool once it is within DISPATCH_LEAD_MINUTES of ready.
+//
+// ⚠️ The order's STATUS does not change. The rider only CLAIMS it early; POST /:id/picked-up still
+// refuses anything that is not PACKED, so the restaurant marking the food ready remains the only
+// thing that can put an order on the road. That guard is the safety net for a wrong prep estimate —
+// a too-early claim just means the rider waits, which is the normal failure mode, not a lie to the
+// customer about where their food is.
+//
+// ⚠️ Requires the restaurant's own SubOrder to be ACCEPTED (= actually cooking). Pooling on PLACED
+// would send a rider out for an order the restaurant may still reject.
+//
+// No scheduler is needed: eligibility is a clock comparison and the rider app polls this feed every
+// 30s, so the order simply appears. (The PACKED push in maybeAdvanceParentOrder still fires later.)
+//
+// ponytail: a constant, not a StoreConfig column. The right value is a travel time nobody can know
+// until there is real timing data; promote it to an owner-tunable knob when someone actually wants
+// to vary it per zone. Set to 0 to disable pre-dispatch entirely.
+const DISPATCH_LEAD_MINUTES = 10;
+
+const preDispatchCutoff = () => new Date(Date.now() + DISPATCH_LEAD_MINUTES * 60_000);
+
+// The SAME rule in two forms — a Prisma `where` for the feed, a runtime predicate for /accept.
+// They sit adjacent on purpose: change them together or a rider sees an order they can't claim.
+// (`estimatedReadyAt: { lte }` also excludes NULLs by SQL null semantics — a grocery order with no
+// estimate can never match.)
+const preDispatchPoolWhere = () => ({
+  deliveryBoyId: null,
+  fulfillmentType: "DELIVERY" as const,
+  source: "FOOD",
+  status: { in: ["PLACED", "CONFIRMED"] },
+  estimatedReadyAt: { lte: preDispatchCutoff() },
+  subOrders: { some: { status: "ACCEPTED" as const } },
+  // Never dispatch an online order whose payment hasn't confirmed (mirrors maybeAdvanceParentOrder).
+  NOT: { paymentMethod: { in: ["ONLINE", "UPI"] }, paymentStatus: "PENDING" as const },
+});
+
+export function isPreDispatchEligible(order: {
+  source?: string | null;
+  status: string;
+  fulfillmentType: string;
+  paymentMethod: string;
+  paymentStatus: string;
+  estimatedReadyAt?: Date | null;
+  subOrders?: { status: string }[];
+}): boolean {
+  if (DISPATCH_LEAD_MINUTES <= 0) return false;
+  if (order.source !== "FOOD" || order.fulfillmentType !== "DELIVERY") return false;
+  if (order.status !== "PLACED" && order.status !== "CONFIRMED") return false;
+  if (!order.estimatedReadyAt) return false;
+  if (order.estimatedReadyAt.getTime() > preDispatchCutoff().getTime()) return false;
+  if ((order.paymentMethod === "ONLINE" || order.paymentMethod === "UPI") && order.paymentStatus === "PENDING") {
+    return false;
+  }
+  return (order.subOrders ?? []).some((s) => s.status === "ACCEPTED");
+}
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -62,7 +127,20 @@ router.use(async (req: FirebaseAuthRequest, res: Response, next) => {
  * All three are best-effort and fire-and-forget: a delivery must never fail because a push, a
  * ledger row, or an invoice update did.
  */
-function runDeliveredHooks(order: { id: string; status: string; customerId: string; orderNumber: string }): void {
+function runDeliveredHooks(
+  order: { id: string; status: string; customerId: string; orderNumber: string },
+  actorId?: string,
+): void {
+  // Wired here rather than at the two update sites for the same reason the other three hooks are:
+  // this is the one place both completion paths converge, so the terminal event cannot go missing
+  // from whichever path someone forgets.
+  recordOrderEventAsync({
+    orderId: order.id,
+    fromState: order.status,
+    toState: "DELIVERED",
+    actorType: "DELIVERY",
+    actorId: actorId ?? null,
+  });
   notifyOrderStatusChange({ ...order, status: "DELIVERED" }).catch((e: unknown) => console.error("[background task failed]", e));
   syncInvoicePaymentStatus(order.id).catch((e) => console.error("Invoice sync failed:", e));
   accrueReferralCommission(order.id).catch((e) => console.error("referral commission accrual failed:", e));
@@ -93,6 +171,8 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
       OR: [
         { deliveryBoyId: userId, status: { in: ["PACKED", "OUT_FOR_DELIVERY"] } },
         ...(onDuty ? [{ deliveryBoyId: null, status: "PACKED" as const, fulfillmentType: "DELIVERY" as const }] : []),
+        // Food still cooking but nearly ready — claimable now so the rider travels during prep.
+        ...(onDuty && DISPATCH_LEAD_MINUTES > 0 ? [preDispatchPoolWhere()] : []),
       ],
     };
 
@@ -117,6 +197,10 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         deliveryOtpRequired: true, shippingName: true, shippingPhone: true,
         shippingAddress: true, shippingPincode: true,
         createdAt: true, updatedAt: true,
+        // Pre-dispatch (see DISPATCH_LEAD_MINUTES): a pooled order may still be cooking, so the card
+        // can say "ready in ~6 min" instead of offering a Picked-up button that 400s. (`source` is
+        // already selected further down for the Bulk Express badge — it discriminates FOOD here too.)
+        estimatedReadyAt: true,
         // ⚠️ Load-bearing: the card branches "Accept" vs "Picked up" on whether the order is already
         // this rider's. Omitting it made every claimed order still render as unclaimed, so Accept
         // just re-fired and the rider had no way to start the delivery.
@@ -539,7 +623,7 @@ router.post("/subscription-run/deliver-all", async (req: FirebaseAuthRequest, re
         });
         if (r.count > 0) {
           delivered++;
-          runDeliveredHooks(o);
+          runDeliveredHooks(o, userId);
         }
       } catch (e) {
         console.error("subscription deliver-all: order failed", o.id, e);
@@ -682,9 +766,17 @@ router.post("/:id/accept", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
 
-    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
+    const order = await prisma.order.findUnique({
+      where: { id: req.params.id },
+      // subOrders only so isPreDispatchEligible can require the restaurant to have ACCEPTED.
+      include: { subOrders: { select: { status: true } } },
+    });
     if (!order) throw new NotFoundError("Order", req.params.id!);
-    if (order.status !== "PACKED") throw new ValidationError("Can only accept orders in PACKED status");
+    // PACKED = ready now. A food order still cooking but within the pre-dispatch window is also
+    // claimable, so the rider can start riding during prep — /picked-up still gates on PACKED.
+    if (order.status !== "PACKED" && !isPreDispatchEligible(order)) {
+      throw new ValidationError("Can only accept orders in PACKED status");
+    }
 
     await assertCanTakeWork(userId);
     await assertCashCapOk(userId, order);
@@ -698,7 +790,9 @@ router.post("/:id/accept", async (req: FirebaseAuthRequest, res: Response) => {
       if (!claimed) throw new ValidationError("This order was just taken by another delivery partner");
     }
 
-    res.json({ success: true, data: { orderId: order.id, status: "PACKED", claimed: true } });
+    // Echo the order's ACTUAL status, not a hardcoded "PACKED": a pre-dispatch claim leaves the
+    // order PLACED/CONFIRMED (still cooking), and the card needs to know not to offer Picked-up yet.
+    res.json({ success: true, data: { orderId: order.id, status: order.status, claimed: true } });
   } catch (e) {
     sendError(res, e);
   }
@@ -749,6 +843,7 @@ router.post("/:id/picked-up", async (req: FirebaseAuthRequest, res: Response) =>
       data: { status: "OUT_FOR_DELIVERY" },
     });
     if (advanced.count > 0) {
+      recordOrderEventAsync({ orderId: order.id, fromState: "PACKED", toState: "OUT_FOR_DELIVERY", actorType: "DELIVERY", actorId: userId, reason: "picked up" });
       notifyOrderStatusChange({ ...order, status: "OUT_FOR_DELIVERY" }).catch((e: unknown) =>
         console.error("[background task failed]", e),
       );
@@ -833,6 +928,14 @@ router.post("/:id/collect/:subOrderId", async (req: FirebaseAuthRequest, res: Re
     if (allDone) {
       await prisma.order.update({ where: { id: orderId }, data: { status: "OUT_FOR_DELIVERY" } });
       orderStatus = "OUT_FOR_DELIVERY";
+      recordOrderEventAsync({
+        orderId,
+        fromState: order.status,
+        toState: "OUT_FOR_DELIVERY",
+        actorType: "DELIVERY",
+        actorId: userId,
+        reason: "all stops collected",
+      });
       notifyOrderStatusChange({ ...order, status: "OUT_FOR_DELIVERY" }).catch((e: unknown) => console.error("[background task failed]", e));
     }
 
@@ -970,7 +1073,7 @@ router.post("/:id/deliver", async (req: FirebaseAuthRequest, res: Response) => {
       });
     }
 
-    runDeliveredHooks(order);
+    runDeliveredHooks(order, userId);
 
     res.json({ success: true, data: { orderId: order.id, status: "DELIVERED" } });
   } catch (e) {
@@ -1038,6 +1141,18 @@ router.post("/:id/delivery-failed", async (req: FirebaseAuthRequest, res: Respon
         deliveryProofPhotoUrl: proofPhotoUrl ?? order.deliveryProofPhotoUrl,
       },
       select: { deliveryAttempts: true },
+    });
+
+    // A failed attempt is exactly the kind of thing a dispute turns on later ("nobody ever came"),
+    // and the reason + attempt count live nowhere else once a later attempt overwrites the columns.
+    recordOrderEventAsync({
+      orderId: order.id,
+      fromState: order.status,
+      toState: "PACKED",
+      actorType: "DELIVERY",
+      actorId: userId,
+      reason: detail,
+      metadata: { failedAttempt: updated.deliveryAttempts },
     });
 
     const rider = await prisma.user.findUnique({ where: { id: userId }, select: { name: true } });

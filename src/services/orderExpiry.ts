@@ -3,6 +3,7 @@ import { refundWalletOnCancel } from "./referralRewards.js";
 import { reverseSellerLedgerOnCancel } from "./subOrderFulfillment.js";
 import { reconcileOrderPayment } from "./paymentReconciliation.js";
 import { restoreConsumption } from "./stockBatches.js";
+import { recordOrderEvent } from "./orderEvents.js";
 
 // Online/UPI orders decrement stock at placement (to hold it during payment). If the
 // customer never completes payment (abandons the Razorpay sheet, app crash), that stock
@@ -62,6 +63,15 @@ export async function expireStaleUnpaidOrders(): Promise<number> {
             status: "CANCELLED",
             notes: `${fresh.notes ? fresh.notes + " " : ""}[auto-cancelled: payment not completed]`,
           },
+        });
+        // Inside the transaction: an order cancelled with no record of WHY is the case a customer
+        // is most likely to argue about, and "the sweeper did it" is the answer.
+        await recordOrderEvent(tx, {
+          orderId: order.id,
+          fromState: fresh.status,
+          toState: "CANCELLED",
+          actorType: "SYSTEM",
+          reason: "payment not completed within the window",
         });
         expired++;
       });

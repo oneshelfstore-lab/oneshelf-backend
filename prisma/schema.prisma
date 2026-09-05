@@ -1541,6 +1541,7 @@ model Order {
   scratchReward ScratchReward?
   subOrders     SubOrder[]
   messages      OrderMessage[]
+  events        OrderEvent[]
 
   // The engine can never create two orders for the same subscription on the same date.
   @@unique([subscriptionId, subscriptionDate])
@@ -1555,6 +1556,53 @@ model Order {
   @@index([status, createdAt])
   @@index([subscriptionId])
   @@index([statementId])
+}
+
+// ─── 10b. OrderEvent — the append-only lifecycle log ─────────────────
+//
+// One row per state transition, never mutated, never deleted. It exists for three jobs at once:
+//   1. DEBUGGING — "what actually happened to order #158?" answered from data, not from guessing at
+//      the current row plus four timestamp columns.
+//   2. DISPUTE EVIDENCE — who moved it, when, and why. `Order` only ever holds the LATEST state, so
+//      without this an argument about a cancelled or failed delivery has nothing behind it.
+//   3. TRAINING DATA — the prep-time and ETA models are downstream of this table and cannot be
+//      backfilled. Every day it does not exist is a day of history that is simply gone.
+//
+// ⚠️ SUB-ORDER transitions live here too, and that is the point, not an extra. For a FOOD order the
+// parent Order sits at PLACED for the whole cook — the restaurant's accept/ready signal is a
+// SubOrder transition (PLACED → ACCEPTED → PACKED). An Order-only log would therefore capture
+// nothing at all about prep time, which is the single thing the ETA work most needs.
+//
+// ⚠️ Append-only by convention, not by constraint: there is no updatedAt and nothing in the codebase
+// updates a row. Keep it that way — a mutable audit log is not evidence.
+model OrderEvent {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  // Set when this transition belongs to one seller's slice rather than the whole order.
+  subOrderId String?
+  subOrder   SubOrder? @relation(fields: [subOrderId], references: [id], onDelete: Cascade)
+
+  // Plain strings, not enums: this log spans BOTH OrderStatus and SubOrderStatus, and it must be
+  // able to record a value from a future build without a migration. An audit log that refuses to
+  // record something is worse than one holding an unrecognised string.
+  fromState String?
+  toState   String
+
+  // Who caused it. actorType: CUSTOMER | SELLER | DELIVERY | OWNER | SYSTEM.
+  // SYSTEM covers the sweepers and payment webhooks, which have no human behind them.
+  actorType String
+  actorId   String?
+
+  reason   String?
+  metadata Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId, createdAt])
+  @@index([subOrderId])
+  @@index([toState, createdAt])
 }
 
 // ─── 11. OrderItem (snapshotted at sale time) ────────────────────────
@@ -2080,6 +2128,7 @@ model SubOrder {
   updatedAt        DateTime       @updatedAt
 
   items OrderItem[]
+  events OrderEvent[]
 
   @@index([orderId])
   @@index([sellerId])

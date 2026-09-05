@@ -69,12 +69,39 @@ const HOUSE_SUPPLIER: SupplierSnapshot = {
 };
 
 /**
+ * ⚠️ TWO DIFFERENT QUESTIONS, and conflating them is the bug this pair exists to prevent.
+ *
+ *  • isStoreOwnSupply  — "are these the STORE's own goods?" → drives store REVENUE (the Payment
+ *    RECEIPT and therefore the Daily Summary). An external seller's money is a pass-through
+ *    liability settled via the payout ledger, never store revenue.
+ *
+ *  • isPlatformIssuedInvoice — "who ISSUES the tax invoice, under whose GSTIN?" → drives the
+ *    supplier snapshot, supplier state code, invoice number series and the Company snapshot.
+ *
+ * For a SHOP seller the two answers agree (the seller both owns the supply and issues the invoice),
+ * which is why one `isHouse` flag was enough before food existed. For a RESTAURANT they diverge:
+ * under **GST Sec 9(5)** restaurant service supplied through an e-commerce operator makes the
+ * PLATFORM the deemed supplier — the platform issues the invoice and pays the 5% itself, while the
+ * money is still the restaurant's. That is also why `foodOrders.ts` sets `tcsAmount = 0` on food
+ * sub-orders: Sec 9(5) and the Sec 52 / 1% TCS path are alternatives, not additions.
+ */
+export function isStoreOwnSupply(seller: { isHouse: boolean } | null | undefined): boolean {
+  return !seller || seller.isHouse;
+}
+
+export function isPlatformIssuedInvoice(
+  seller: { isHouse: boolean; vertical?: string | null } | null | undefined,
+): boolean {
+  return isStoreOwnSupply(seller) || seller!.vertical === "FOOD";
+}
+
+/**
  * Snapshots an external seller's identity onto the invoice so the PDF/GSTR-1 are issued under
- * THE SELLER's GSTIN (Phase 6, CA-gated). The house seller returns all-null → the PDF falls back
- * to the store Company (the pre-Phase-6 behaviour, unchanged).
+ * THE SELLER's GSTIN (Phase 6, CA-gated). The house seller — and, per Sec 9(5), any restaurant —
+ * returns all-null → the PDF falls back to the store Company.
  */
 function supplierFromSeller(seller: any | null): SupplierSnapshot {
-  if (!seller || seller.isHouse) return HOUSE_SUPPLIER;
+  if (isPlatformIssuedInvoice(seller)) return HOUSE_SUPPLIER;
   const addr = [seller.shopAddress, seller.city, seller.pincode].filter(Boolean).join(", ") || null;
   return {
     supplierName: seller.name ?? null,
@@ -99,14 +126,16 @@ async function createOneInvoice(opts: {
   applyOrderDiscount: boolean; // only the single-invoice (whole-order) case carries order.discount
 }): Promise<{ id: string; isHouse: boolean }> {
   const { order, customer, items, seller, subOrderId, applyOrderDiscount } = opts;
-  const isHouse = !seller || seller.isHouse;
+  const isHouse = isStoreOwnSupply(seller);
+  const issuedByPlatform = isPlatformIssuedInvoice(seller);
   const supplier = supplierFromSeller(seller);
 
-  // Supplier state = the ISSUING party's state (the store for a house invoice; the seller's own GSTIN
-  // state for an external-seller invoice). Inter-state when the customer's state differs (P0-3): the full
-  // GST rate then goes to IGST instead of CGST+SGST, and place of supply is the customer's state. A B2C
-  // customer (no GSTIN) is treated as intra-state (local delivery).
-  const supplierStateCode = isHouse
+  // Supplier state = the ISSUING party's state (the store for a platform-issued invoice — house goods
+  // or Sec 9(5) restaurant service; the seller's own GSTIN state for an external SHOP seller).
+  // Inter-state when the customer's state differs (P0-3): the full GST rate then goes to IGST instead
+  // of CGST+SGST, and place of supply is the customer's state. A B2C customer (no GSTIN) is treated as
+  // intra-state (local delivery).
+  const supplierStateCode = issuedByPlatform
     ? (await resolveStoreState()).code
     : stateCodeFromGstin(seller?.gstin);
   const customerStateCode = customer.gstin ? stateCodeFromGstin(customer.gstin) : supplierStateCode;
@@ -125,18 +154,19 @@ async function createOneInvoice(opts: {
 
   const totals = calculateInvoiceTotals(lineItemTaxResults);
   // Per-seller invoice numbering: each external seller keeps its own consecutive series under its
-  // GSTIN (a GST requirement); house keeps the shared "INV" series.
-  const seriesPrefix = isHouse ? "INV" : `INV-${seller.slug}`;
+  // GSTIN (a GST requirement). Everything the PLATFORM issues — house goods and Sec 9(5) restaurant
+  // service alike — shares the one "INV" series, because it is all one GSTIN.
+  const seriesPrefix = issuedByPlatform ? "INV" : `INV-${seller.slug}`;
   const invoiceNumber = await getNextInvoiceNumber(seriesPrefix);
   const supplyType = customer.gstin ? "B2B" : "B2CS";
   const allExempt = lineItemTaxResults.every((r) => r.gstRate === 0);
   const invoiceType = allExempt ? "BILL_OF_SUPPLY" : "TAX_INVOICE";
   const isPaid = order.paymentStatus === "PAID";
 
-  // Snapshot the store's OWN Company details at creation time for a house invoice — the same reason
-  // supplierFromSeller snapshots an external seller's identity above, just for the store's own
-  // identity instead (see Invoice.houseCompanySnapshot's doc comment on the schema).
-  const houseCompanySnapshot = isHouse
+  // Snapshot the store's OWN Company details at creation time for anything the platform issues — the
+  // same reason supplierFromSeller snapshots an external seller's identity above, just for the store's
+  // own identity instead (see Invoice.houseCompanySnapshot's doc comment on the schema).
+  const houseCompanySnapshot = issuedByPlatform
     ? await prisma.company.findFirst({
         select: { legalName: true, tradeName: true, gstin: true, pan: true, address: true, phone: true, email: true },
       })
@@ -220,6 +250,12 @@ async function createOneInvoice(opts: {
     // Store revenue is only the house store's own supplies. An external seller's invoice is the
     // seller's revenue (the platform merely collected on their behalf), so no store Payment is
     // recorded for it — the daily summary / payment reports stay the store's own books.
+    // ⚠️ Deliberately keyed on isStoreOwnSupply, NOT issuedByPlatform: a Sec 9(5) food invoice is
+    // issued by the platform but the money is still the restaurant's, settled through the payout
+    // ledger. Recording a receipt would inflate store revenue by the full order value.
+    // ⚠️ GST/CA: 9(5) makes the platform the deemed supplier, so the OUTPUT TAX on that invoice is
+    // the platform's liability even though the revenue is not. Confirm with the CA how that tax is
+    // to be presented in the store's own books before changing this line.
     if (isPaid && isHouse) {
       const paymentMode = order.paymentMethod === "COD" ? "CASH"
         : order.paymentMethod === "UPI" ? "UPI"
@@ -614,21 +650,33 @@ export async function issueCancellationCreditNote(
  * Called when order status changes (e.g. DELIVERED → COD becomes PAID).
  */
 export async function syncInvoicePaymentStatus(orderId: string): Promise<void> {
-  const order = await prisma.order.findUnique({ where: { id: orderId } });
+  const order = await prisma.order.findUnique({
+    where: { id: orderId },
+    include: { subOrders: { select: { id: true, seller: { select: { isHouse: true, vertical: true } } } } },
+  });
   if (!order) return;
 
   const invoices = await prisma.invoice.findMany({ where: { orderId: order.id } });
   if (invoices.length === 0) return;
 
+  // Resolve each invoice back to its seller so the store-revenue test matches createOneInvoice's
+  // exactly. Invoice has no `seller` relation (sellerId is a bare column), so go via the SubOrder.
+  const sellerBySubOrder = new Map(order.subOrders.map((s) => [s.id, s.seller]));
+
   const isPaid = order.paymentStatus === "PAID";
   const isCancelled = order.status === "CANCELLED";
 
   for (const invoice of invoices) {
-    // House/store-issued invoices represent store revenue → record a store Payment on COD→PAID. Use the
-    // supplier snapshot (supplierName IS NULL ⇒ house), NOT sellerId: a marketplace house invoice carries
-    // the *house seller's* id (non-null), so the old `!invoice.sellerId` wrongly skipped the store Payment
-    // and dropped the store's own COD revenue from the Daily Summary (COMPLIANCE_PLAN.md P0-2).
-    const isHouse = invoice.supplierName == null;
+    // The store's OWN supplies represent store revenue → record a store Payment on COD→PAID.
+    // ⚠️ This used to test `invoice.supplierName == null`, which was correct only while "platform
+    // issued it" and "it's the store's own goods" meant the same thing. A Sec 9(5) food invoice is
+    // platform-issued (supplierName IS NULL) but is the RESTAURANT's revenue — that test would have
+    // booked the full value of every food order as store COD revenue in the Daily Summary.
+    // Resolve the real seller instead and reuse the one shared predicate.
+    // (Not `!invoice.sellerId` either: a marketplace house invoice carries the *house seller's* id,
+    // which is the bug that once dropped the store's own COD revenue — COMPLIANCE_PLAN.md P0-2.)
+    const invoiceSeller = invoice.subOrderId ? sellerBySubOrder.get(invoice.subOrderId) ?? null : null;
+    const isHouse = isStoreOwnSupply(invoiceSeller);
     if (isCancelled) {
       if (invoice.gstr1Filed) {
         // Already reported in a filed GSTR-1 → can't cancel; issue a reversing credit note (P0-4).

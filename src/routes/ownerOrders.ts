@@ -19,6 +19,7 @@ import { assertSellersPacked, markSubOrderPackedByOwner, reverseSellerLedgerOnCa
 import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 import { getRiderOnboardingStatus, riderBlockedReason } from "./deliveryOnboarding.js";
 import { signOrderMedia } from "../lib/storageUrls.js";
+import { recordOrderEventAsync } from "../services/orderEvents.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -222,6 +223,14 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
     if (newStatus === "DELIVERED" && !order.invoiceId) {
       generateOrderInvoice(order.id).catch((e) => console.error("Invoice generation failed:", e));
     }
+
+    recordOrderEventAsync({
+      orderId: order.id,
+      fromState: order.status,
+      toState: newStatus,
+      actorType: "OWNER",
+      actorId: req.appUser!.id,
+    });
 
     notifyOrderStatusChange({ ...order, status: newStatus }).catch((e: unknown) => console.error("[background task failed]", e));
     // PACKED is what releases the order into the riders' shared pool — so this is the moment to wake

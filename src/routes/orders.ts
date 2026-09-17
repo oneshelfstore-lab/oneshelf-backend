@@ -1037,15 +1037,30 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
 
     // Live rider position, surfaced as a DISTANCE rather than raw coordinates.
     //
-    // ⚠️ Deliberately not lat/lng. The customer's question is "how far away is my order"; handing
-    // every customer a rider's exact position is a far larger disclosure than that question needs —
-    // the rider consented to being tracked for delivery, not to being mapped by strangers. Distance
-    // plus freshness answers it and can't be used to follow someone.
+    // ⚠️ REVERSED Sep 17 2026 on an explicit owner decision: this now returns lat/lng so the
+    // customer app can draw a live map. The previous rule was "a distance, never coordinates" — the
+    // reasoning was that handing every customer a rider's exact position is a far larger disclosure
+    // than "how far away is my order" needs. That concern is real and has NOT gone away; it was
+    // accepted deliberately, not overlooked. What still contains it:
+    //   • only while the order is OUT_FOR_DELIVERY (no position before the trip or after it),
+    //   • only a fix under 15 min old,
+    //   • only to the ONE customer whose order this is (the handler is already customerId-scoped),
+    //   • still NO history — one overwritten row, so there is no trail to reconstruct.
+    // distanceKm is kept alongside: it is what the UI falls back to when the delivery address has no
+    // pin, which today is EVERY address (see the Sep 17 address fix).
     //
     // Gated on OUT_FOR_DELIVERY (before that there's no trip; after it the rider is on someone
     // else's order) and on a position fresher than 15 min, so the app never renders a stale
     // position as though it were live.
-    let riderStatus: { name: string; distanceKm: number | null; lastSeenAt: Date } | null = null;
+    let riderStatus: {
+      name: string;
+      distanceKm: number | null;
+      lastSeenAt: Date;
+      lat: number;
+      lng: number;
+      destLat: number | null;
+      destLng: number | null;
+    } | null = null;
     if (order.status === "OUT_FOR_DELIVERY" && order.deliveryBoyId) {
       const rider = await prisma.user.findUnique({
         where: { id: order.deliveryBoyId },
@@ -1074,6 +1089,13 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
               ? Math.round(haversineKm(Number(rider.lastLat), Number(rider.lastLng), destLat, destLng) * 10) / 10
               : null,
           lastSeenAt: rider.lastSeenAt!,
+          // The map needs both ends of the line. destLat/destLng are null for an address saved
+          // before the Sep 17 fix, and the app then shows the rider alone without a destination pin
+          // rather than dropping a marker on 0,0 in the Gulf of Guinea.
+          lat: Number(rider.lastLat),
+          lng: Number(rider.lastLng),
+          destLat,
+          destLng,
         };
       }
     }

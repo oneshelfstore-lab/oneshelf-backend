@@ -440,6 +440,251 @@ router.patch("/:id/stock", async (req: SellerRequest, res: Response) => {
   }
 });
 
+// ─── POST /bulk-price — one price rule across many variants ───────
+// Why a dedicated route instead of looping PUT /:id: that endpoint takes the WHOLE product (every
+// field, every variant) so a bulk repricing would round-trip — and risk rewriting — data the seller
+// never touched. This writes exactly two columns, scoped to this seller, and nothing else.
+// A repricing deliberately does NOT flip isActive: unlisting a seller's whole catalog because they
+// ran a sale would be worse than the sale. (If price moderation is ever wanted, that's its own call.)
+const bulkPriceSchema = z.object({
+  variantIds: z.array(z.string().min(1)).min(1).max(500),
+  target: z.enum(["SELLING", "MRP", "BOTH"]).default("SELLING"),
+  mode: z.enum(["PERCENT", "AMOUNT", "SET"]),
+  // PERCENT: -10 ⇒ 10% off. AMOUNT: -5 ⇒ ₹5 off. SET: the new price itself.
+  value: z.number(),
+  roundToRupee: z.boolean().default(false),
+  // Preview only — computes and returns every change/skip without writing. Same shape as the
+  // catalog CSV import's dry run, and it's what the app shows before the seller confirms.
+  dryRun: z.boolean().default(false),
+});
+export type BulkPriceRule = Pick<z.infer<typeof bulkPriceSchema>, "target" | "mode" | "value" | "roundToRupee">;
+
+/**
+ * Apply a price rule to one number. Sellers price in whole rupees far more often than paise, so
+ * `roundToRupee` rounds the number the SELLER sees ("10% off ₹48" ⇒ ₹43, not ₹43.2).
+ */
+export function applyPriceRule(current: number, rule: BulkPriceRule): number {
+  const next =
+    rule.mode === "PERCENT" ? current * (1 + rule.value / 100) :
+    rule.mode === "AMOUNT" ? current + rule.value :
+    rule.value;
+  return rule.roundToRupee ? Math.round(next) : Math.round(next * 100) / 100;
+}
+
+/**
+ * Decide one variant's new prices, or why it's being left alone. Pure (and exported) on purpose:
+ * every failure mode here is SILENT money — a rule that quietly sells below cost, or above the
+ * printed MRP, looks exactly like a rule that worked. Tests pin it; the route just loops it.
+ *
+ * `app` values are in APP format (per-increment for loose) — the numbers the seller wrote the rule
+ * against. A percent is scale-invariant either way, but ₹-amount and set-exact are NOT: "set ₹40"
+ * meaning ₹40/kg, written raw to the per-base-unit column, lands as ₹40 per 100 g step.
+ */
+export type VariantPricing = { sellingPrice: number; mrp: number; costPrice?: number | null; saleFloor?: number | null; bulkPrice?: number | null };
+
+/**
+ * Every rule a new price/MRP pair must clear, in one place. Returns a human reason, or null if the
+ * pair is fine. Shared by the rule-based bulk repricing and the CSV import, which must not be able
+ * to drift apart — a guard that only one of the two enforces is a guard that doesn't exist.
+ */
+export function checkReprice(
+  app: VariantPricing,
+  bulkMinQty: number,
+  newPrice: number,
+  newMrp: number,
+  allowBelowCost: boolean,
+): string | null {
+  if (newPrice <= 0 || newMrp <= 0) return "Price would drop to ₹0 or below.";
+  // MRP is a legal ceiling under Legal Metrology — selling above the printed MRP is an offence, so a
+  // raise that outruns the MRP is refused rather than silently clamped. Deliberately checked HERE and
+  // not inside assertVariantFloors: that helper is shared with create/update, and tightening it could
+  // start rejecting products that already carry this shape in live data.
+  if (newPrice > newMrp) {
+    return `₹${newPrice} is above the MRP (₹${newMrp}) — raise the MRP too.`;
+  }
+  if (bulkMinQty > 0 && app.bulkPrice != null && newPrice <= app.bulkPrice) {
+    return `Your bulk price (₹${app.bulkPrice}) would be higher than the new price — a bulk "discount" that costs more.`;
+  }
+  // The seller's own two-number guardrail (cost / sale floor), reused exactly as the manual editor
+  // uses it. allowBelowCost for the house seller — they may run genuine loss-leaders.
+  const floorErr = assertVariantFloors(
+    { mrp: newMrp, sellingPrice: newPrice, costPrice: app.costPrice ?? null, saleFloor: app.saleFloor ?? null },
+    allowBelowCost,
+  );
+  return floorErr;
+}
+
+export function planVariantReprice(
+  app: VariantPricing,
+  bulkMinQty: number,
+  rule: BulkPriceRule,
+  allowBelowCost: boolean,
+): { ok: true; newPrice: number; newMrp: number } | { ok: false; reason: string } {
+  const newPrice = rule.target === "MRP" ? app.sellingPrice : applyPriceRule(app.sellingPrice, rule);
+  const newMrp = rule.target === "SELLING" ? app.mrp : applyPriceRule(app.mrp, rule);
+  const err = checkReprice(app, bulkMinQty, newPrice, newMrp, allowBelowCost);
+  if (err) return { ok: false, reason: err };
+  if (newPrice === app.sellingPrice && newMrp === app.mrp) return { ok: false, reason: "Already at this price." };
+  return { ok: true, newPrice, newMrp };
+}
+
+router.post("/bulk-price", async (req: SellerRequest, res: Response) => {
+  try {
+    const p = bulkPriceSchema.parse(req.body);
+    if (p.mode === "PERCENT" && (p.value < -90 || p.value > 500)) {
+      throw new ValidationError("Percent change must be between -90% and +500%.");
+    }
+    if (p.mode === "SET" && p.value <= 0) throw new ValidationError("Set a price above ₹0.");
+
+    const variants = await prisma.productVariant.findMany({
+      // Scoped to THIS seller and active only — same rule as PATCH /:id/stock, so a stale client
+      // holding a soft-deleted (or someone else's) variant id can never reprice it.
+      where: { id: { in: p.variantIds }, isActive: true, product: { sellerId: req.sellerId } },
+      include: { product: { select: { name: true, productType: true } } },
+    });
+
+    type Row = { variantId: string; name: string };
+    // oldStock/newStock are carried (equal — a price rule never touches stock) purely so this and
+    // /bulk-update return the ONE shape the app's shared preview list renders.
+    const changes: (Row & { oldPrice: number; newPrice: number; oldMrp: number; newMrp: number; oldStock: number; newStock: number })[] = [];
+    const skipped: (Row & { reason: string })[] = [];
+
+    for (const v of variants) {
+      const app = toAppFormat(v, isLooseType(v.product.productType));
+      const row: Row = { variantId: v.id, name: `${v.product.name} · ${v.sku}` };
+      const plan = planVariantReprice(app, v.bulkMinQty, p, req.sellerIsHouse === true);
+      if (!plan.ok) skipped.push({ ...row, reason: plan.reason });
+      else changes.push({ ...row, oldPrice: app.sellingPrice, newPrice: plan.newPrice, oldMrp: app.mrp, newMrp: plan.newMrp, oldStock: app.stock, newStock: app.stock });
+    }
+
+    // Ids that matched nothing are reported, not swallowed — otherwise a client holding a deleted
+    // product would show "12 updated" for 9 real writes.
+    const found = new Set(variants.map((v) => v.id));
+    for (const id of p.variantIds) {
+      if (!found.has(id)) skipped.push({ variantId: id, name: "—", reason: "No longer in your catalog." });
+    }
+
+    if (!p.dryRun && changes.length > 0) {
+      const byId = new Map(variants.map((v) => [v.id, v]));
+      await prisma.$transaction(
+        changes.map((c) => {
+          const v = byId.get(c.variantId)!;
+          const conv = fromAppFormat(
+            { mrp: c.newMrp, sellingPrice: c.newPrice, stock: 0, packageSize: Number(v.packageSize) },
+            isLooseType(v.product.productType),
+          );
+          // ONLY these two columns. stock/costPrice are the batch ledger's to write (receiveBatch is
+          // the single writer) — fromAppFormat's stock/cost output is deliberately discarded here.
+          return prisma.productVariant.update({
+            where: { id: c.variantId },
+            data: { mrp: conv.mrp, sellingPrice: conv.sellingPrice },
+          });
+        }),
+      );
+    }
+
+    res.json({
+      success: true,
+      data: { dryRun: p.dryRun, updated: p.dryRun ? 0 : changes.length, changes, skipped },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /bulk-update — per-row prices/stock, i.e. an edited CSV coming back in ─────
+// The other half of bulk editing: export the catalogue, change numbers in Excel, send the rows back.
+// Keyed on variantId, which is why the export has to carry it — name+brand (what the CREATE import
+// keys on) can't tell an edit from a new product, so re-uploading a file duplicated the catalogue.
+// An omitted/blank field means "leave this one alone", so a seller who edited five prices doesn't
+// rewrite everything else in the file.
+const bulkUpdateRowSchema = z.object({
+  variantId: z.string().min(1),
+  sellingPrice: z.number().positive().optional().nullable(),
+  mrp: z.number().positive().optional().nullable(),
+  stock: z.number().min(0).optional().nullable(),
+});
+const bulkUpdateSchema = z.object({
+  rows: z.array(bulkUpdateRowSchema).min(1).max(500),
+  dryRun: z.boolean().default(false),
+});
+
+router.post("/bulk-update", async (req: SellerRequest, res: Response) => {
+  try {
+    const p = bulkUpdateSchema.parse(req.body);
+
+    const variants = await prisma.productVariant.findMany({
+      where: { id: { in: p.rows.map((r) => r.variantId) }, isActive: true, product: { sellerId: req.sellerId } },
+      include: { product: { select: { name: true, productType: true } } },
+    });
+    const byId = new Map(variants.map((v) => [v.id, v]));
+
+    type Row = { variantId: string; name: string };
+    const changes: (Row & { oldPrice: number; newPrice: number; oldMrp: number; newMrp: number; oldStock: number; newStock: number })[] = [];
+    const skipped: (Row & { reason: string })[] = [];
+
+    for (const r of p.rows) {
+      const v = byId.get(r.variantId);
+      if (!v) {
+        skipped.push({ variantId: r.variantId, name: "—", reason: "No longer in your catalog — don't edit the variantId column." });
+        continue;
+      }
+      const isLoose = isLooseType(v.product.productType);
+      // App format throughout, same as the rule-based route — the seller typed these numbers into a
+      // sheet exported in app format (per-increment for loose), so they must be read back the same way.
+      const app = toAppFormat(v, isLoose);
+      const row: Row = { variantId: v.id, name: `${v.product.name} · ${v.sku}` };
+
+      const newPrice = r.sellingPrice ?? app.sellingPrice;
+      const newMrp = r.mrp ?? app.mrp;
+      const newStock = r.stock != null ? Math.round(r.stock) : app.stock;
+
+      if (newPrice !== app.sellingPrice || newMrp !== app.mrp) {
+        const err = checkReprice(app, v.bulkMinQty, newPrice, newMrp, req.sellerIsHouse === true);
+        if (err) { skipped.push({ ...row, reason: err }); continue; }
+      }
+      if (newPrice === app.sellingPrice && newMrp === app.mrp && newStock === app.stock) {
+        skipped.push({ ...row, reason: "Already up to date." });
+        continue;
+      }
+      changes.push({ ...row, oldPrice: app.sellingPrice, newPrice, oldMrp: app.mrp, newMrp, oldStock: app.stock, newStock });
+    }
+
+    if (!p.dryRun) {
+      for (const c of changes) {
+        const v = byId.get(c.variantId)!;
+        const isLoose = isLooseType(v.product.productType);
+        const conv = fromAppFormat(
+          { mrp: c.newMrp, sellingPrice: c.newPrice, stock: c.newStock, packageSize: Number(v.packageSize) },
+          isLoose,
+        );
+        // One small transaction PER ROW, deliberately not one big one: a stock change runs the FIFO
+        // batch ledger (receiveBatch / consumeFifo), so 500 rows in a single interactive transaction
+        // is exactly the P2028 timeout CATALOG_TX_OPTIONS exists to paper over. A CSV import is
+        // partial-success by nature anyway — every row reports its own outcome.
+        await prisma.$transaction(async (tx) => {
+          if (c.newPrice !== c.oldPrice || c.newMrp !== c.oldMrp) {
+            await tx.productVariant.update({ where: { id: c.variantId }, data: { mrp: conv.mrp, sellingPrice: conv.sellingPrice } });
+          }
+          // Stock goes through the batch ledger, never a direct write — an increase restocks at the
+          // variant's current weighted-average cost, a decrease is a stocktake correction. Same
+          // treatment as the quick +/- stepper; a genuinely new purchase cost belongs in Restock.
+          if (c.newStock !== c.oldStock) {
+            await applyStockEdit(tx, c.variantId, conv.stock, null, "CSV bulk update");
+          }
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: { dryRun: p.dryRun, updated: p.dryRun ? 0 : changes.length, changes, skipped },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // ─── POST /:id/stock/receive — restock a variant, at whatever cost it actually came in at ──
 // Mirrors ownerCatalog's equivalent endpoint — see its comment for why this is separate from the
 // quick stepper above. The optional vendor-bill link (below) is HOUSE-ONLY — vendors/purchase bills

@@ -30,6 +30,7 @@ import { consumeFifo, recordConsumption, restoreConsumption, type ConsumeResult 
 import { drawFreeGiftStock } from "../services/freeGifts.js";
 import { computeSubOrderTds194o } from "../services/sellerTds194o.js";
 import { haversineKm } from "../lib/distance.js";
+import { getRiderRoute } from "../services/riderRoute.js";
 import { recordOrderEventAsync } from "../services/orderEvents.js";
 
 const router = Router();
@@ -1060,6 +1061,8 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
       lng: number;
       destLat: number | null;
       destLng: number | null;
+      routePolyline: string | null;
+      etaMinutes: number | null;
     } | null = null;
     if (order.status === "OUT_FOR_DELIVERY" && order.deliveryBoyId) {
       const rider = await prisma.user.findUnique({
@@ -1080,6 +1083,13 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
           : null;
         const destLat = dest?.lat != null ? Number(dest.lat) : null;
         const destLng = dest?.lng != null ? Number(dest.lng) : null;
+        // The real road route + ETA, cached per order so the app's 30s poll doesn't bill a Routes
+        // call every time. Null whenever ROUTES_API_KEY is unset or Google is unhappy — the app
+        // then draws the dashed straight line it drew before this existed.
+        const route =
+          destLat != null && destLng != null
+            ? await getRiderRoute(order.id, Number(rider.lastLat), Number(rider.lastLng), destLat, destLng)
+            : null;
         riderStatus = {
           name: rider.name,
           // Null when the delivery address was never pinned — the app then shows "on the way" with
@@ -1096,6 +1106,10 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
           lng: Number(rider.lastLng),
           destLat,
           destLng,
+          routePolyline: route?.polyline ?? null,
+          // A real driving ETA beats the straight-line distance for answering "how long until my
+          // order is here" — but it is still only as fresh as the rider's last position fix.
+          etaMinutes: route?.etaMinutes ?? null,
         };
       }
     }

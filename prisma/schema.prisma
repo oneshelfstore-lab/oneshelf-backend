@@ -1469,6 +1469,11 @@ model Order {
   deliveryBoyId        String?
   deliveryBoy          User?     @relation("DeliveryOrders", fields: [deliveryBoyId], references: [id])
   deliveryOtpRequired  Boolean   @default(false)
+  // When a rider CLAIMED this order (POST /accept). Distinct from deliveredAt and from
+  // updatedAt — updatedAt is bumped by every unrelated write, so it cannot answer "how long has
+  // this rider been on their way to the shop", which is the only thing the rider's own card uses
+  // it for. Null for every order claimed before this column existed, and for unclaimed orders.
+  acceptedAt           DateTime?
   deliveredAt          DateTime?
   // Failed-delivery attempts (customer not home, unreachable, refused…). Until these existed the
   // ONLY terminal state a rider could reach was DELIVERED — a failed drop left the order stuck at
@@ -2120,6 +2125,11 @@ model SubOrder {
   settled          Boolean        @default(false)
   payoutId         String?
   payout           SellerPayout?  @relation(fields: [payoutId], references: [id], onDelete: SetNull)
+  // Seller's photo of the packed order, taken at pack time. A Storage object PATH, not a URL —
+  // signed on read like every other order media (see lib/storageUrls). Its job is to settle
+  // "this isn't what I ordered" disputes: the rider can check the bag they're handed matches, and
+  // the owner has evidence of what left the shop.
+  packPhotoUrl     String?
   // Fulfillment (collection run — Phase 5).
   packedAt         DateTime?
   collectedAt      DateTime?

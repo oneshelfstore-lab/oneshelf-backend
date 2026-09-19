@@ -8,7 +8,8 @@ import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js"
 import { notifyOrderStatusChange, notifyNewDeliveryAvailable, notifyNewComplaint, notifySubOrderPacked, notifyOrderMessage } from "../services/fcmNotifier.js";
 import { bustUserSpend } from "../services/loyalty.js";
 import { refundPayment } from "../services/razorpay.js";
-import { syncInvoicePaymentStatus } from "../services/orderInvoice.js";
+import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orderInvoice.js";
+import { generateInvoicePdf } from "../services/pdfGenerator.js";
 import { refundWalletOnCancel } from "../services/referralRewards.js";
 import { restoreConsumption } from "../services/stockBatches.js";
 import { shapeOrderMessage } from "../services/orderMessages.js";
@@ -108,6 +109,8 @@ async function shape(so: any) {
     // items needs them too (clarifies item names STT mangles), not just the delivery agent.
     notes: so.order?.notes ?? null,
     voiceNoteUrl: await signStoragePath(so.order?.voiceNoteUrl),
+    // Signed on read — the column stores a bare Storage object path, which is not loadable.
+    packPhotoUrl: await signStoragePath(so.packPhotoUrl),
     items: (so.items ?? []).map((it: any) => ({
       id: it.id,
       productName: it.productName,
@@ -384,6 +387,74 @@ router.post("/:id/flag-unavailable", async (req: SellerRequest, res: Response) =
     }).catch((e: unknown) => console.error("[background task failed]", e));
 
     res.status(201).json({ success: true, data: { complaintId: complaint.id } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /:id/pack-photo — seller attaches a photo of the packed order ──────────────────────
+// Deliberately its own one-field route rather than a field on PATCH /:id/status: the photo is taken
+// while packing, BEFORE the seller taps packed, and a status route that also wrote media would let a
+// retry of one silently rewrite the other. Idempotent — re-posting just replaces the photo.
+router.post("/:id/pack-photo", async (req: SellerRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const parsed = z.object({ photoUrl: z.string().trim().min(1).max(500).nullable() }).safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("photoUrl is required");
+
+    const sub = await prisma.subOrder.findFirst({ where: { id, sellerId: req.sellerId, ...PAYMENT_SETTLED } });
+    if (!sub) throw new NotFoundError("SubOrder", id);
+    // A collected or cancelled slice has already left the shop — a "photo of what we packed" added
+    // after the fact is evidence of nothing, so refuse rather than store a misleading record.
+    if (sub.status === "COLLECTED" || sub.status === "CANCELLED") {
+      throw new ValidationError("This order has already left the shop");
+    }
+
+    const updated = await prisma.subOrder.update({
+      where: { id },
+      data: { packPhotoUrl: parsed.data.photoUrl },
+      include: ORDER_INCLUDE,
+    });
+    res.json({ success: true, data: await shape(updated) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── GET /:id/invoice/pdf — the seller's own copy, to print and put in the bag ────────────────
+// Marketplace Phase 6 already issues ONE Invoice per SubOrder, under that seller's own GSTIN, so
+// there is nothing new to generate here — this is the seller-scoped door to a document that already
+// existed and that only the customer could reach. Ownership is re-checked on BOTH the sub-order and
+// the invoice, so a seller can never pull another seller's slice of the same order.
+router.get("/:id/invoice/pdf", async (req: SellerRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const sub = await prisma.subOrder.findFirst({
+      where: { id, sellerId: req.sellerId, ...PAYMENT_SETTLED },
+      select: { id: true, orderId: true },
+    });
+    if (!sub) throw new NotFoundError("SubOrder", id);
+
+    let invoice = await prisma.invoice.findUnique({
+      where: { subOrderId: sub.id },
+      select: { id: true, invoiceNumber: true },
+    });
+    // Invoices are generated at placement/payment, but an older order (or one whose generation hit a
+    // transient error) can be missing one. Generate on demand rather than handing the seller a 404
+    // they cannot act on — the same fallback the customer's own invoice route already uses.
+    if (!invoice) {
+      await generateOrderInvoice(sub.orderId);
+      invoice = await prisma.invoice.findUnique({
+        where: { subOrderId: sub.id },
+        select: { id: true, invoiceNumber: true },
+      });
+    }
+    if (!invoice) throw new NotFoundError("Invoice", sub.id);
+
+    const pdfBuffer = await generateInvoicePdf(invoice.id);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename="Invoice-${invoice.invoiceNumber.replace(/[/]/g, "-")}.pdf"`);
+    res.send(pdfBuffer);
   } catch (e) {
     sendError(res, e);
   }

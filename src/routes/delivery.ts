@@ -205,6 +205,9 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         // this rider's. Omitting it made every claimed order still render as unclaimed, so Accept
         // just re-fired and the rider had no way to start the delivery.
         deliveryBoyId: true,
+        // Powers the rider card's "accepted N min ago" — how long they have been en route to the
+        // shop. updatedAt cannot stand in: every unrelated write bumps it.
+        acceptedAt: true,
         // The real lines. This used to be `_count: { items: true }`, which nothing on the client ever
         // mapped — so the card read "0 Product Unit(s)" on every order, always.
         items: { select: { productName: true, quantity: true, lineTotal: true, isLoose: true, stepSize: true, stepUnit: true } },
@@ -790,6 +793,14 @@ router.post("/:id/accept", async (req: FirebaseAuthRequest, res: Response) => {
       if (!claimed) throw new ValidationError("This order was just taken by another delivery partner");
     }
 
+    // When the rider took the job. Written here rather than inside claimForAgent so it also covers
+    // the "already mine" path (a re-tapped Accept), and guarded on acceptedAt: null so a re-tap can
+    // never reset the clock the rider's own "accepted N min ago" line is counting.
+    await prisma.order.updateMany({
+      where: { id: order.id, deliveryBoyId: userId, acceptedAt: null },
+      data: { acceptedAt: new Date() },
+    });
+
     // Echo the order's ACTUAL status, not a hardcoded "PACKED": a pre-dispatch claim leaves the
     // order PLACED/CONFIRMED (still cooking), and the card needs to know not to offer Picked-up yet.
     res.json({ success: true, data: { orderId: order.id, status: order.status, claimed: true } });
@@ -1198,7 +1209,7 @@ router.post("/:id/release", async (req: FirebaseAuthRequest, res: Response) => {
 
     const released = await prisma.order.updateMany({
       where: { id: order.id, deliveryBoyId: userId, status: "PACKED" },
-      data: { deliveryBoyId: null },
+      data: { deliveryBoyId: null, acceptedAt: null },
     });
     if (released.count > 0) {
       notifyNewDeliveryAvailable({ ...order, deliveryBoyId: null }).catch((e: unknown) =>

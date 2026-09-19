@@ -1055,6 +1055,7 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     // position as though it were live.
     let riderStatus: {
       name: string;
+      phone: string | null;
       distanceKm: number | null;
       lastSeenAt: Date;
       lat: number;
@@ -1067,7 +1068,7 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     if (order.status === "OUT_FOR_DELIVERY" && order.deliveryBoyId) {
       const rider = await prisma.user.findUnique({
         where: { id: order.deliveryBoyId },
-        select: { name: true, lastLat: true, lastLng: true, lastSeenAt: true },
+        select: { name: true, phone: true, lastLat: true, lastLng: true, lastSeenAt: true },
       });
       const fresh = rider?.lastSeenAt != null && Date.now() - rider.lastSeenAt.getTime() < 15 * 60 * 1000;
       if (rider && fresh && rider.lastLat != null && rider.lastLng != null) {
@@ -1092,6 +1093,15 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
             : null;
         riderStatus = {
           name: rider.name,
+          // The rider's own number, so a customer can ring them when the gate is locked or the
+          // lane is unmarked. It is the single most-asked-for action on a live tracking screen
+          // and the app had no way to do it at all.
+          // ⚠️ This is a REAL personal number, not a masked proxy line. It rides the exact same
+          // gate as the coordinates above — OUT_FOR_DELIVERY, a fix under 15 min, and only the one
+          // customer who owns this order — which is what stops it becoming a directory of your
+          // riders. Masking needs a Twilio-style proxy; at 2-5 in-house riders that is more
+          // machinery than the problem. Revisit if riders are ever third-party.
+          phone: rider.phone,
           // Null when the delivery address was never pinned — the app then shows "on the way" with
           // a timestamp instead of inventing a distance.
           distanceKm:

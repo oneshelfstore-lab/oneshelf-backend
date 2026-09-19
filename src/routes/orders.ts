@@ -876,16 +876,35 @@ router.get("/:id/celebration", async (req: FirebaseAuthRequest, res: Response) =
       where: { id: req.params.id, customerId: userId },
       select: {
         id: true, status: true, fulfillmentType: true, deliverySlot: true,
-        savedAmount: true, totalAmount: true, estimatedReadyAt: true,
+        savedAmount: true, totalAmount: true, walletApplied: true, estimatedReadyAt: true,
         freeSampleName: true, freeSampleImageUrl: true, freeSamplePacked: true,
+        // What was ordered and where it is going. This screen used to show an order id and a
+        // payment id and nothing else — it is the one moment a wrong address is free to catch,
+        // and it gave the customer nothing to catch it with.
+        shippingAddress: true, addressId: true,
       },
     });
     if (!order) throw new NotFoundError("Order", req.params.id!);
 
-    const [savings, eta, scratch] = await Promise.all([
+    const [savings, eta, scratch, items, addr] = await Promise.all([
       computeUserSavings(userId),
       computeOrderEta(order.fulfillmentType, order.deliverySlot),
       getScratchForCelebration(order.id),
+      // ⚠️ Read as their own queries rather than `items:`/`address:` branches of the select above.
+      // Prisma's inference for `order` in this handler collapses to the bare Order row — the same
+      // pre-existing wart that makes `order.items.map(...)` implicitly-any elsewhere in this file —
+      // so a nested relation does not type-check. The rider-status block further down already works
+      // around it exactly this way. Two extra indexed reads beat an `as any` over the whole row.
+      prisma.orderItem.findMany({
+        where: { orderId: order.id },
+        select: { productName: true, imageUrl: true, quantity: true, lineTotal: true },
+        // Biggest lines first: only the first few are shown, and the expensive items are the
+        // recognisable ones. Alphabetical would lead with whatever happens to start with "A".
+        orderBy: { lineTotal: "desc" },
+      }),
+      order.addressId
+        ? prisma.address.findUnique({ where: { id: order.addressId }, select: { label: true } })
+        : null,
     ]);
 
     res.json({
@@ -896,6 +915,25 @@ router.get("/:id/celebration", async (req: FirebaseAuthRequest, res: Response) =
         savedAmount: Number(order.savedAmount),
         yearSavings: savings.yearToDate,
         etaLabel: eta.etaLabel,
+        // ⚠️ `totalAmount` is what was left to CHARGE, already net of store credit — a fully
+        // wallet-paid order carries 0 in it. The order is still worth what it is worth, so the
+        // headline figure adds the credit back, exactly as the order-detail bill does.
+        total: Number(order.totalAmount) + Number(order.walletApplied),
+        amountCharged: Number(order.totalAmount),
+        fulfillmentType: order.fulfillmentType,
+        // Two parts, not one pre-joined line: the app renders this in two languages, and the label
+        // is the half worth emphasising.
+        addressLabel: addr?.label ?? null,
+        addressLine: order.shippingAddress ?? null,
+        // The whole basket's count, but only the first few rows. This is a reassurance glance
+        // ("yes, that is my order"), not the itemised bill — order detail already carries that.
+        itemCount: items.length,
+        items: items.slice(0, 4).map((it) => ({
+          name: it.productName,
+          imageUrl: it.imageUrl,
+          quantity: Number(it.quantity),
+          lineTotal: Number(it.lineTotal),
+        })),
         // Display-only trust card — confidence shown, not claimed. The real claim flow is Phase 4.
         refundPromiseShown: true,
         // Scratch card (Phase 3A): UNSCRATCHED hides the outcome until revealed via POST /scratch.

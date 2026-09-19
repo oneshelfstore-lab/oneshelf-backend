@@ -9,14 +9,22 @@ async function getUserTokens(userId: string): Promise<string[]> {
   return tokens.map(t => t.token);
 }
 
-async function sendToTokens(tokens: string[], data: Record<string, string>) {
+async function sendToTokens(
+  tokens: string[],
+  data: Record<string, string>,
+  // ⚠️ "high" wakes the device out of Doze. That is right for a new order and wrong for a
+  // once-a-minute ETA refresh — a stream of high-priority pushes is exactly the pattern FCM
+  // throttles, and it would cost the customer battery to be told something they are not looking at.
+  // Everything except the live tracker keeps the old behaviour by default.
+  priority: "high" | "normal" = "high",
+) {
   if (!isFirebaseInitialized() || tokens.length === 0) return;
 
   try {
     await admin.messaging().sendEachForMulticast({
       tokens,
       data,
-      android: { priority: "high" },
+      android: { priority },
     });
   } catch (e) {
     console.error("FCM send failed:", e);
@@ -264,6 +272,53 @@ export async function notifyDocumentExpiry(
       body: `${info.riderName}'s ${info.document} has expired — they can't take new deliveries.`,
     });
   }
+}
+
+/**
+ * Live delivery progress, for the ongoing notification the customer sees without opening the app.
+ *
+ * ⚠️ Sends the NUMBERS as well as a composed title, and the app prefers the numbers. The composed
+ * strings here are English, and this is the one push a customer may see a dozen times per delivery —
+ * re-composing it client-side is what lets it come out in Hindi. title/body stay because the app
+ * refuses to display a push without them, and they are the honest fallback for an older build.
+ *
+ * ⚠️ `fixAt` is not decoration. The rider's phone posts a position only while their app is in
+ * the foreground, so these pushes can simply stop, leaving whatever was last posted frozen on the
+ * lock screen. A notification cannot re-render itself, so the app turns this into an ABSOLUTE clock
+ * time ("as of 4:32 PM") rather than the relative "updated N min ago" it shows in-app — an absolute
+ * time stays true however long the card sits there. Dropping this field re-introduces the lie.
+ */
+export async function notifyRiderEta(info: {
+  orderId: string;
+  orderNumber: string;
+  customerId: string;
+  riderName: string;
+  etaMinutes: number | null;
+  distanceKm: number | null;
+  fixAt: number;
+}) {
+  const tokens = await getUserTokens(info.customerId);
+  const headline =
+    info.etaMinutes != null
+      ? `Arriving in ${info.etaMinutes} min`
+      : info.distanceKm != null
+        ? `${info.distanceKm} km away`
+        : "On the way";
+  await sendToTokens(
+    tokens,
+    {
+      type: "rider_eta",
+      orderId: info.orderId,
+      orderNumber: info.orderNumber,
+      title: headline,
+      body: `${info.riderName} is bringing your order`,
+      riderName: info.riderName,
+      etaMinutes: info.etaMinutes != null ? String(info.etaMinutes) : "",
+      distanceKm: info.distanceKm != null ? String(info.distanceKm) : "",
+      fixAt: String(info.fixAt),
+    },
+    "normal",
+  );
 }
 
 export async function notifyDeliveryArrived(order: { id: string; orderNumber: string; customerId: string }) {

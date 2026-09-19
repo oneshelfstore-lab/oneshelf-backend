@@ -14,6 +14,7 @@ import {
   notifyDeliveryFailed,
   notifyNewDeliveryAvailable,
 } from "../services/fcmNotifier.js";
+import { pushRiderEta } from "../services/riderEtaPush.js";
 import { accrueReferralCommission, istMonthKey } from "../services/referralRewards.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { syncInvoicePaymentStatus } from "../services/orderInvoice.js";
@@ -1252,11 +1253,23 @@ router.post("/location", async (req: FirebaseAuthRequest, res: Response) => {
       return res.json({ success: true, data: { stored: false, reason: "no active delivery" } });
     }
 
-    await prisma.user.update({
+    const fixAt = new Date();
+    const rider = await prisma.user.update({
       where: { id: userId },
-      data: { lastLat: parsed.data.lat, lastLng: parsed.data.lng, lastSeenAt: new Date() },
+      data: { lastLat: parsed.data.lat, lastLng: parsed.data.lng, lastSeenAt: fixAt },
+      select: { name: true },
     });
     res.json({ success: true, data: { stored: true } });
+
+    // Tell the waiting customers where their order has got to, so the ongoing notification on their
+    // lock screen keeps up without the app being open.
+    //
+    // ⚠️ Fired AFTER the response and never awaited: this is the rider's 60-second heartbeat, and
+    // a slow or failed push must never show up on their screen as a location that would not store.
+    // The service throttles itself — see services/riderEtaPush.ts — so this is not one push per beat.
+    pushRiderEta(userId, rider.name, parsed.data.lat, parsed.data.lng, fixAt.getTime()).catch(
+      (e: unknown) => console.error("[background task failed]", e),
+    );
   } catch (e) {
     sendError(res, e);
   }

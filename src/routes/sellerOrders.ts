@@ -451,7 +451,11 @@ router.get("/:id/invoice/pdf", async (req: SellerRequest, res: Response) => {
     }
     if (!invoice) throw new NotFoundError("Invoice", sub.id);
 
-    const pdfBuffer = await generateInvoicePdf(invoice.id);
+    // ⚠️ Thermal, not A4 — this copy is printed and stuck on the bag, so an A4 sheet per order is
+    // most of a page wasted every time. The CUSTOMER's and the dashboard's copies stay A4 on
+    // purpose: those are read on a phone and filed for GST, where a narrow slip is worse.
+    // Identical document and identical Rule-46 particulars either way, just a different sheet.
+    const pdfBuffer = await generateInvoicePdf(invoice.id, "thermal80");
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `inline; filename="Invoice-${invoice.invoiceNumber.replace(/[/]/g, "-")}.pdf"`);
     res.send(pdfBuffer);

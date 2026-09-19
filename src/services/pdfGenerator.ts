@@ -4,7 +4,7 @@ import { stateNameFromCode, stateCodeFromGstin } from "../lib/stateCodes.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
-interface InvoiceData {
+export interface InvoiceData {
   // Company
   companyName: string;
   companyAddress: string;
@@ -406,9 +406,208 @@ function drawInvoice(doc: PDFKit.PDFDocument, data: InvoiceData): void {
   );
 }
 
+// ─── 80mm thermal receipt layout ─────────────────────────────────────
+
+/** 80mm roll = 226.77pt. Thermal printers can't print the outer ~2mm, hence the side margins. */
+const THERMAL_WIDTH_PT = 226.77;
+const THERMAL_MARGIN_PT = 10;
+
+/**
+ * The SAME tax invoice, rendered onto an 80mm thermal roll — the seller's copy that goes on the bag.
+ * Returns the final y so the caller can size the page to its content (see generateInvoicePdf).
+ *
+ * ⚠️ A separate renderer rather than a narrower A4, on purpose: drawInvoice's line-item table is 13
+ * columns and 526pt wide, and there is no font size at which that survives a ~207pt roll. Same
+ * particulars, STACKED instead of tabled — which is what every retail and restaurant thermal
+ * invoice already does.
+ *
+ * ⚠️ This is still a full Rule-46 TAX INVOICE, not a delivery note. Supplier name/address/GSTIN,
+ * invoice number and date, recipient, per-line HSN + qty + rate + taxable value, CGST/SGST rate AND
+ * amount, place of supply and reverse-charge status are all retained. Roll is cheap; a defective
+ * tax invoice is not — do not drop fields here to shorten the slip.
+ */
+function drawThermalInvoice(doc: PDFKit.PDFDocument, data: InvoiceData): number {
+  const L = doc.page.margins.left;
+  const W = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+  let y = doc.page.margins.top;
+
+  // Every writer goes through these three, so the vertical rhythm can't drift between sections.
+  const write = (
+    text: string,
+    opts: { size?: number; bold?: boolean; align?: Align; color?: string; width?: number; gap?: number } = {},
+  ): void => {
+    const size = opts.size ?? 7;
+    const width = opts.width ?? W;
+    const align = opts.align ?? "left";
+    doc.font(opts.bold ? "Helvetica-Bold" : "Helvetica").fontSize(size).fillColor(opts.color ?? DARK);
+    const h = doc.heightOfString(text, { width, align });
+    doc.text(text, L, y, { width, align });
+    y += h + (opts.gap ?? 0);
+  };
+
+  // A label/amount pair sharing one baseline. BOTH columns are measured and the taller wins, so an
+  // item name that wraps to three lines can never overlap the amount beside it.
+  const pair = (
+    left: string,
+    right: string,
+    opts: { size?: number; bold?: boolean; color?: string; leftRatio?: number } = {},
+  ): void => {
+    const size = opts.size ?? 7;
+    const lw = W * (opts.leftRatio ?? 0.62);
+    const rw = W - lw;
+    doc.font(opts.bold ? "Helvetica-Bold" : "Helvetica").fontSize(size).fillColor(opts.color ?? DARK);
+    const lh = doc.heightOfString(left, { width: lw });
+    const rh = doc.heightOfString(right, { width: rw, align: "right" });
+    doc.text(left, L, y, { width: lw });
+    doc.text(right, L + lw, y, { width: rw, align: "right" });
+    y += Math.max(lh, rh);
+  };
+
+  const rule = (opts: { heavy?: boolean; gap?: number } = {}): void => {
+    y += 3;
+    doc.moveTo(L, y).lineTo(L + W, y)
+      .lineWidth(opts.heavy ? 1 : 0.5)
+      .strokeColor(opts.heavy ? "#555555" : "#CCCCCC")
+      .stroke();
+    y += opts.gap ?? 4;
+  };
+
+  // ── Supplier ───────────────────────────────────────────────────
+  write(data.companyName, { size: 11, bold: true, align: "center", color: GREEN, gap: 1 });
+  write(data.companyAddress, { size: 6.5, align: "center", color: GREY, gap: 1 });
+  if (data.companyGstin) write("GSTIN: " + data.companyGstin, { size: 7, bold: true, align: "center" });
+  const contact = [data.companyPhone, data.companyEmail].filter(Boolean).join("  ·  ");
+  if (contact) write(contact, { size: 6.5, align: "center", color: GREY });
+
+  rule({ heavy: true });
+  write(data.invoiceTitle, { size: 9, bold: true, align: "center", color: GREEN, gap: 2 });
+  pair("No.", data.invoiceNumber, { size: 7, bold: true });
+  pair("Date", data.invoiceDate, { size: 7 });
+  if (data.originalInvoiceNumber) pair("Against invoice", data.originalInvoiceNumber, { size: 7 });
+
+  // ── Recipient ──────────────────────────────────────────────────
+  rule();
+  write("BILL TO", { size: 6.5, bold: true, color: GREY, gap: 1 });
+  write(data.customerName, { size: 8, bold: true });
+  if (data.customerAddress) write(data.customerAddress, { size: 6.5, color: GREY });
+  if (data.customerGstin) write("GSTIN: " + data.customerGstin, { size: 6.5 });
+  pair("Place of supply", data.placeOfSupply, { size: 6.5, color: GREY });
+  pair("Reverse charge", data.isReverseCharge ? "Yes" : "No", { size: 6.5, color: GREY });
+
+  // ── Line items ─────────────────────────────────────────────────
+  rule({ heavy: true });
+  for (const li of data.lineItems) {
+    write(li.sno + ". " + li.description, { size: 7.5, bold: true });
+    // Qty × rate on the left, line total on the right — the two numbers a packer actually checks.
+    const qty = [li.qty, li.unit].filter(Boolean).join(" ");
+    pair("   " + qty + " x " + li.rate, li.total, { size: 7.5, bold: true, leftRatio: 0.58 });
+    // The tax particulars Rule 46 requires, kept small: read by an accountant, not by the packer.
+    const hsn = li.hsnCode ? "HSN " + li.hsnCode + "  ·  " : "";
+    write(
+      "   " + hsn + "Taxable " + li.taxableValue +
+        "  ·  CGST " + li.cgstRate + " " + li.cgstAmount +
+        "  ·  SGST " + li.sgstRate + " " + li.sgstAmount,
+      { size: 6, color: GREY, gap: 2 },
+    );
+  }
+
+  // ── Totals ─────────────────────────────────────────────────────
+  rule();
+  pair("Taxable value", data.subtotal, { size: 7.5 });
+  pair("CGST", data.totalCgst, { size: 7.5 });
+  pair("SGST", data.totalSgst, { size: 7.5 });
+  if (num(data.totalCess) !== 0) pair("Cess", data.totalCess, { size: 7.5 });
+  if (num(data.roundOff) !== 0) pair("Round off", data.roundOff, { size: 7.5 });
+  rule({ heavy: true });
+  pair("TOTAL", "Rs. " + data.grandTotal, { size: 11, bold: true, color: GREEN, leftRatio: 0.45 });
+  rule({ heavy: true });
+  write("Amount in words: " + data.amountInWords, { size: 6, color: GREY, gap: 2 });
+
+  // ── Rate-wise tax summary ──────────────────────────────────────
+  // One line per GST rate. Redundant with the per-line figures on a single-rate order, kept anyway
+  // so the slip carries the same summary the A4 copy does and nobody re-adds it by hand.
+  if (data.taxBreakup.length > 0) {
+    rule();
+    write("TAX SUMMARY", { size: 6.5, bold: true, color: GREY, gap: 1 });
+    for (const tb of data.taxBreakup) {
+      pair(
+        tb.rate + "  on " + tb.taxable,
+        "CGST " + tb.cgst + "   SGST " + tb.sgst,
+        { size: 6, color: GREY, leftRatio: 0.42 },
+      );
+    }
+  }
+
+  // ── Footer ─────────────────────────────────────────────────────
+  rule();
+  write("1. Goods once sold will not be taken back or exchanged.", { size: 5.5, color: GREY });
+  write("2. Interest @ 18% p.a. on overdue payments.", { size: 5.5, color: GREY });
+  write("3. Subject to " + data.companyState + " jurisdiction only.", { size: 5.5, color: GREY, gap: 5 });
+  write("For " + data.companyName, { size: 7, bold: true, align: "center", gap: 2 });
+  // ⚠️ No blank signature box, unlike the A4 copy: the line below already states the invoice is
+  // computer-generated, so ruling off empty roll for a signature nobody adds is pure waste.
+  write("Computer-generated invoice — no physical signature required.", {
+    size: 5.5, align: "center", color: "#AAAAAA",
+  });
+
+  return y;
+}
+
 // ─── PDF Generation ──────────────────────────────────────────────────
 
-export async function generateInvoicePdf(invoiceId: string): Promise<Buffer> {
+/**
+ * Renders [data] onto a single continuous 80mm slip sized to exactly fit its content.
+ *
+ * ⚠️ Two passes, and that is the whole point. A receipt roll is continuous but pdfkit still needs a
+ * fixed page height, and picking a generous one would spit out a long tail of blank roll on every
+ * order — precisely the waste this format exists to stop. So: draw once into a throwaway tall
+ * document purely to learn the content height, then create the real page at that height and draw
+ * again. drawThermalInvoice is pure layout with no side effects, so both passes are identical.
+ *
+ * Exported so the page geometry can be asserted without a database — see pdfThermal.test.ts. Both
+ * failure modes here are SILENT on a printer: a slip that runs onto a second, blank page, or one
+ * rendered at the wrong width that the printer then scales.
+ */
+export async function renderThermalInvoice(data: InvoiceData): Promise<Buffer> {
+  const margins = {
+    top: THERMAL_MARGIN_PT, bottom: THERMAL_MARGIN_PT,
+    left: THERMAL_MARGIN_PT, right: THERMAL_MARGIN_PT,
+  };
+
+  const probe = new PDFDocument({ size: [THERMAL_WIDTH_PT, 20000], margins });
+  const contentBottom = drawThermalInvoice(probe, data);
+  probe.end(); // never piped anywhere — it exists only to be measured
+
+  // +2pt of slack: a page height exactly equal to the content can round the last baseline onto a
+  // second page, which on a roll prints as an extra, entirely blank slip.
+  const height = contentBottom + THERMAL_MARGIN_PT + 2;
+
+  return await new Promise<Buffer>((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: [THERMAL_WIDTH_PT, height], margins });
+      const chunks: Buffer[] = [];
+      doc.on("data", (chunk: Buffer) => chunks.push(chunk));
+      doc.on("end", () => resolve(Buffer.concat(chunks)));
+      doc.on("error", reject);
+      drawThermalInvoice(doc, data);
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+/**
+ * Paper the invoice is rendered onto. "a4" is the filing/archive copy (customer, owner, dashboard);
+ * "thermal80" is the seller's 80mm roll slip that goes on the bag. Same document and the same
+ * Rule-46 particulars either way — only the sheet differs.
+ */
+export type InvoiceFormat = "a4" | "thermal80";
+
+export async function generateInvoicePdf(
+  invoiceId: string,
+  format: InvoiceFormat = "a4",
+): Promise<Buffer> {
   // Fetch invoice with all data
   const invoice = await prisma.invoice.findUnique({
     where: { id: invoiceId },
@@ -559,6 +758,8 @@ export async function generateInvoicePdf(invoiceId: string): Promise<Buffer> {
   };
 
   // ── Render with pdfkit (pure JS — no Chromium/Puppeteer needed) ──
+  if (format === "thermal80") return await renderThermalInvoice(data);
+
   return await new Promise<Buffer>((resolve, reject) => {
     try {
       const doc = new PDFDocument({

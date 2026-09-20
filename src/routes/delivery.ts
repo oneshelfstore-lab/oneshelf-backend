@@ -1244,11 +1244,19 @@ router.post("/location", async (req: FirebaseAuthRequest, res: Response) => {
     if (!parsed.success) throw new ValidationError("Invalid location", parsed.error.errors);
     const userId = req.appUser!.id;
 
+    // ⚠⚠ WIDENED Sep 20 2026 to include PACKED, and the whole pickup-leg feature is inert without
+    // it. A claimed order sits at PACKED until the rider taps "picked up", so an OUT_FOR_DELIVERY-only
+    // check refused every fix while they were riding TO the shop — which is precisely the window the
+    // customer's map now draws. The gate would have shipped looking correct and rendering nothing.
+    //
+    // ⚠️ This is still narrow, and the narrowness is the point: deliveryBoyId: userId means only
+    // orders THIS rider has already claimed. A PACKED order sitting in the shared pool belongs to
+    // nobody and buys no one the right to store their position. This is not a general rider feed.
     const active = await prisma.order.count({
-      where: { deliveryBoyId: userId, status: "OUT_FOR_DELIVERY" },
+      where: { deliveryBoyId: userId, status: { in: ["PACKED", "OUT_FOR_DELIVERY"] } },
     });
     if (active === 0) {
-      // Not an error the rider should see — the app stops posting on its own once the trip ends;
+      // Not an error the rider should see — the app stops posting on its own once the work ends;
       // this is the server refusing to store a position it has no purpose for.
       return res.json({ success: true, data: { stored: false, reason: "no active delivery" } });
     }

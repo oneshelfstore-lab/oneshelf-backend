@@ -1100,12 +1100,38 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
       lng: number;
       destLat: number | null;
       destLng: number | null;
+      // Which half of the journey the rider is on: fetching the goods, or bringing them.
+      leg: "TO_PICKUP" | "TO_CUSTOMER";
+      // The shop they collect from. Sent on BOTH legs so the customer can always see where their
+      // order is coming from; null for a seller who has never marked their pickup point.
+      pickupLat: number | null;
+      pickupLng: number | null;
+      pickupName: string | null;
       routePolyline: string | null;
       etaMinutes: number | null;
     } | null = null;
-    if (order.status === "OUT_FOR_DELIVERY" && order.deliveryBoyId) {
+
+    // ⚠️ WIDENED Sep 20 2026 to cover the PICKUP leg as well as the delivery one, so the customer
+    // can watch the rider fetch their order rather than having it appear on the road already.
+    //
+    // PACKED with a rider assigned means exactly that: since the two-step accept/pickup change, a
+    // claimed order SITS at PACKED until the rider taps "picked up", so this window is the rider
+    // travelling to the shop.
+    //
+    // ⚠️ This releases the rider's coordinates roughly 10-20 minutes earlier than before. That is
+    // a real extension of the disclosure this file already documents, made deliberately on the
+    // owner's request, not an oversight. Every other containment is untouched: coordinates still go
+    // only to the one customer who owns the order (this handler is customerId-scoped), still only
+    // with a fix under 15 minutes old, and still with NO position history written anywhere.
+    // Held as its own const so the null check below narrows it. Testing a boolean alias instead
+    // leaves order.deliveryBoyId as string|null at the findUnique, which is what the old inline
+    // "status === X && order.deliveryBoyId" condition had been quietly doing for us.
+    const riderId = order.deliveryBoyId;
+    const onPickupLeg = riderId != null && order.status === "PACKED";
+    const onDeliveryLeg = riderId != null && order.status === "OUT_FOR_DELIVERY";
+    if (riderId && (onPickupLeg || onDeliveryLeg)) {
       const rider = await prisma.user.findUnique({
-        where: { id: order.deliveryBoyId },
+        where: { id: riderId },
         select: { name: true, phone: true, lastLat: true, lastLng: true, lastSeenAt: true },
       });
       const fresh = rider?.lastSeenAt != null && Date.now() - rider.lastSeenAt.getTime() < 15 * 60 * 1000;
@@ -1122,12 +1148,46 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
           : null;
         const destLat = dest?.lat != null ? Number(dest.lat) : null;
         const destLng = dest?.lng != null ? Number(dest.lng) : null;
+
+        // Where the goods are collected from. Read as its own query for the same reason the
+        // address is: this handler's inferred type for `order` has lost its include shape.
+        //
+        // ⚠️ The stop that matters is the first one NOT yet collected. A multi-seller order has
+        // several, and pointing at the first in the list would keep showing a shop the rider has
+        // already been to. Cancelled slices are skipped for the same reason.
+        //
+        // ⚠️ House stops count here, unlike in the rider's own pickupStops. A house-only order
+        // still has a physical counter the rider walks to, and the customer is owed a pin for it.
+        const stops = await prisma.subOrder.findMany({
+          where: { orderId: order.id },
+          select: {
+            status: true,
+            seller: { select: { name: true, lat: true, lng: true } },
+          },
+          orderBy: { createdAt: "asc" },
+        });
+        const nextStop =
+          stops.find(
+            (st) => st.status !== "COLLECTED" && st.status !== "CANCELLED" && st.seller?.lat != null,
+          ) ?? stops.find((st) => st.seller?.lat != null);
+        const pickupLat = nextStop?.seller?.lat != null ? Number(nextStop.seller.lat) : null;
+        const pickupLng = nextStop?.seller?.lng != null ? Number(nextStop.seller.lng) : null;
+        const pickupName = nextStop?.seller?.name ?? null;
+
+        // On the pickup leg the rider is driving to the SHOP, so that is what the route and the ETA
+        // have to be measured to. Routing to the customer's door while the rider is heading the
+        // other way would show a line going backwards and an arrival time that is simply wrong.
+        const targetLat = onPickupLeg ? pickupLat : destLat;
+        const targetLng = onPickupLeg ? pickupLng : destLng;
+
         // The real road route + ETA, cached per order so the app's 30s poll doesn't bill a Routes
         // call every time. Null whenever ROUTES_API_KEY is unset or Google is unhappy — the app
         // then draws the dashed straight line it drew before this existed.
+        // ⚠️ The cache keys on the destination too, so the handover from shop to doorstep
+        // re-fetches on its own rather than serving the leftover leg-one line.
         const route =
-          destLat != null && destLng != null
-            ? await getRiderRoute(order.id, Number(rider.lastLat), Number(rider.lastLng), destLat, destLng)
+          targetLat != null && targetLng != null
+            ? await getRiderRoute(order.id, Number(rider.lastLat), Number(rider.lastLng), targetLat, targetLng)
             : null;
         riderStatus = {
           name: rider.name,
@@ -1140,11 +1200,12 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
           // riders. Masking needs a Twilio-style proxy; at 2-5 in-house riders that is more
           // machinery than the problem. Revisit if riders are ever third-party.
           phone: rider.phone,
-          // Null when the delivery address was never pinned — the app then shows "on the way" with
-          // a timestamp instead of inventing a distance.
+          // Distance to whatever the rider is actually driving at right now — the shop on the
+          // pickup leg, the doorstep after. Null when that end has no pin, and the app then shows
+          // "on the way" with a timestamp rather than inventing a number.
           distanceKm:
-            destLat != null && destLng != null
-              ? Math.round(haversineKm(Number(rider.lastLat), Number(rider.lastLng), destLat, destLng) * 10) / 10
+            targetLat != null && targetLng != null
+              ? Math.round(haversineKm(Number(rider.lastLat), Number(rider.lastLng), targetLat, targetLng) * 10) / 10
               : null,
           lastSeenAt: rider.lastSeenAt!,
           // The map needs both ends of the line. destLat/destLng are null for an address saved
@@ -1154,6 +1215,10 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
           lng: Number(rider.lastLng),
           destLat,
           destLng,
+          leg: onPickupLeg ? ("TO_PICKUP" as const) : ("TO_CUSTOMER" as const),
+          pickupLat,
+          pickupLng,
+          pickupName,
           routePolyline: route?.polyline ?? null,
           // A real driving ETA beats the straight-line distance for answering "how long until my
           // order is here" — but it is still only as fresh as the rider's last position fix.

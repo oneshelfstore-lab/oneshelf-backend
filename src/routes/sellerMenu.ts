@@ -39,6 +39,12 @@ const categorySchema = z.object({
   isActive: z.boolean().optional(),
 });
 
+/** "HH:MM" 24h, or absent/blank meaning "no window". Shared by both window fields. */
+const hhMm = z.preprocess(
+  (v) => (typeof v === "string" && v.trim() === "" ? null : v),
+  z.string().regex(/^([01]d|2[0-3]):[0-5]d$/, "Use HH:MM").optional().nullable(),
+);
+
 const itemSchema = z.object({
   menuCategoryId: z.string().min(1),
   name: z.string().trim().min(1).max(120),
@@ -53,6 +59,10 @@ const itemSchema = z.object({
   sacCode: z.string().trim().max(8).optional().nullable(),
   gstRate: z.number().min(0).max(28).optional(),
   sortOrder: z.number().int().min(0).max(999).optional(),
+  // Serving window, "HH:MM" 24h IST. ⚠️ "" normalises to null (= no window) so clearing one half
+  // of a partially-filled form CLEARS it instead of 400-ing — the app sends both fields every save.
+  availableFrom: hhMm,
+  availableTo: hhMm,
 });
 
 function shapeItem(i: any) {
@@ -67,6 +77,8 @@ function shapeItem(i: any) {
     isAvailable: i.isAvailable,
     isActive: i.isActive,
     prepMinutes: i.prepMinutes,
+    availableFrom: i.availableFrom,
+    availableTo: i.availableTo,
     sacCode: i.sacCode,
     gstRate: Number(i.gstRate),
     sortOrder: i.sortOrder,

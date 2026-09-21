@@ -1961,6 +1961,12 @@ model Seller {
   avgPrepMinutes Int     @default(20)
   // Restaurants can set a floor for their own orders (a ₹40 order isn't worth firing the kitchen).
   minOrderValue  Decimal @default(0) @db.Decimal(10, 2)
+  // Busy mode. Until this fix, a slammed kitchen's ONLY way to say so was rejecting an order the
+  // customer had already placed (sellerOrders.ts TOO_BUSY) — the worst possible version.
+  // ⚠️ busyUntil is an AUTO-EXPIRY, and that is the load-bearing half: a restaurant that taps
+  // "busy" and forgets would otherwise look slow forever and quietly lose orders. Past = not busy.
+  busyUntil         DateTime?
+  busyExtraMinutes  Int       @default(0) // minutes added to the prep estimate while busy
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2023,6 +2029,13 @@ model MenuItem {
   isActive    Boolean @default(true)
 
   prepMinutes Int     @default(20)
+  // Per-item serving window, "HH:MM" IST wall clock — same shape and same parser as the restaurant's
+  // own openTime/closeTime (services/foodMenu.ts isWithinWindow), so a close BEFORE the open is a
+  // past-midnight window, and BOTH null means "whenever the restaurant is open".
+  // ⚠️ This is a THIRD off-switch alongside isAvailable (86'd today) and isActive (de-listed).
+  // Out-of-window is not sold out: the customer is told when it comes back, not that it ran out.
+  availableFrom String? @db.VarChar(5)
+  availableTo   String? @db.VarChar(5)
   // ⚠️ SAC (service accounting code), NOT HSN — restaurant service is a supply of SERVICE. Both the
   // code and the rate are ⚠️ GST/CA-gated; see MULTIVERTICAL_PLAN.md §4.4 before trusting either.
   sacCode     String? @db.VarChar(8)

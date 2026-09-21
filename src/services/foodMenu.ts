@@ -54,6 +54,39 @@ export function isRestaurantOpen(
     : nowMin >= open || nowMin < close;
 }
 
+/**
+ * A per-item serving window ("breakfast until 11:00"). Deliberately the SAME function as the
+ * restaurant’s own hours — the semantics are identical, including a close BEFORE the open meaning a
+ * past-midnight window, and both-null meaning "no window, always". Aliased rather than copied so
+ * the two can never drift.
+ */
+export const isWithinWindow = isRestaurantOpen;
+
+/**
+ * Busy mode. A kitchen that is slammed extends its own prep estimate instead of rejecting orders it
+ * has already accepted (which was previously its ONLY way to signal this).
+ *
+ * ⚠️ Requires busyUntil to be in the FUTURE. That auto-expiry is the point: a restaurant that taps
+ * busy at the dinner rush and never taps it off would otherwise be permanently ranked slow and
+ * quietly starved of orders. There is no cron and none is needed — "busy" is a clock comparison.
+ */
+export function isSellerBusy(busyUntil: Date | null | undefined, now: Date = new Date()): boolean {
+  return busyUntil != null && busyUntil.getTime() > now.getTime();
+}
+
+/**
+ * The prep estimate a customer is actually quoted. Every surface that shows or stores a prep time
+ * MUST go through this, or the restaurant list advertises a speed the order flow does not honour.
+ */
+export function effectivePrepMinutes(
+  basePrepMinutes: number,
+  busyUntil: Date | null | undefined,
+  busyExtraMinutes: number,
+  now: Date = new Date(),
+): number {
+  return isSellerBusy(busyUntil, now) ? basePrepMinutes + Math.max(0, busyExtraMinutes) : basePrepMinutes;
+}
+
 // ─── Config ─────────────────────────────────────────────────────────────────────────────────────
 
 const CONFIG_TTL_MS = 30 * 1000;

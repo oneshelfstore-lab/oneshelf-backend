@@ -3,8 +3,12 @@ import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, type FirebaseAuthRequest } from "../middleware/firebaseAuth.js";
-import { resolveFoodConfig, isRestaurantOpen, RESTAURANT_TRADING } from "../services/foodMenu.js";
+import {
+  resolveFoodConfig, isRestaurantOpen, RESTAURANT_TRADING,
+  isWithinWindow, effectivePrepMinutes,
+} from "../services/foodMenu.js";
 import { computeFoodOrderTotals, type FoodLineInput } from "../services/foodPricing.js";
+import { resolveCoupon, redeemCouponInTx } from "../services/coupons.js";
 import { computeDeliveryForOrigin } from "../services/deliveryPricing.js";
 import { computeSubOrderTds194o } from "../services/sellerTds194o.js";
 import { getNextOrderNumber } from "../services/orderNumbering.js";
@@ -46,6 +50,7 @@ const quoteSchema = z.object({
   restaurantId: z.string().min(1),
   items: itemsSchema,
   addressId: z.string().min(1).optional(),
+  couponCode: z.string().trim().max(40).optional().nullable(),
 });
 
 const placeSchema = quoteSchema.extend({
@@ -86,6 +91,7 @@ async function priceOrder(
     select: {
       id: true, name: true, commissionPct: true, minOrderValue: true, lat: true, lng: true,
       openTime: true, closeTime: true, avgPrepMinutes: true,
+      busyUntil: true, busyExtraMinutes: true,
       ownerUserId: true, isHouse: true, pan: true, entityType: true,
     },
   });
@@ -99,6 +105,7 @@ async function priceOrder(
     select: {
       id: true, name: true, imageUrl: true, price: true, gstRate: true,
       sacCode: true, prepMinutes: true, isAvailable: true,
+      availableFrom: true, availableTo: true,
     },
   });
 
@@ -108,6 +115,19 @@ async function priceOrder(
   const unavailable = rows.filter((r) => !r.isAvailable).map((r) => r.name);
   if (unavailable.length > 0) {
     throw new ValidationError(`Sold out right now: ${unavailable.join(", ")}`);
+  }
+  // ⚠️ Separate check and a DIFFERENT message: an item outside its serving window has not run
+  // out. Told "sold out", a customer gives up; told the window, they come back at breakfast.
+  // Enforced here as well as hidden on the menu, because a client with a stale menu (the browse
+  // response is Cache-Control’d for 30s, and a backgrounded app holds it far longer) will happily
+  // post a 9pm idli order.
+  const offMenuNow = rows.filter((r) => !isWithinWindow(r.availableFrom, r.availableTo));
+  if (offMenuNow.length > 0) {
+    throw new ValidationError(
+      offMenuNow
+        .map((r) => `${r.name} is only available ${r.availableFrom}–${r.availableTo}`)
+        .join("; "),
+    );
   }
 
   const lines: FoodLineInput[] = rows.map((r) => ({
@@ -128,6 +148,19 @@ async function priceOrder(
         select: { id: true, addressLine: true, pincode: true, lat: true, lng: true },
       })
     : null;
+
+  // Coupon — the SAME validator grocery uses (cartPricing.resolveCoupon), so the expiry window,
+  // usage caps and per-user limit cannot drift between the two checkouts.
+  //
+  // ⚠️ FREE_DELIVERY is refused on food, deliberately. Grocery can waive delivery because it has a
+  // free-delivery threshold and a compulsory-fee floor built around it; food delivery is priced by
+  // distance FROM THE KITCHEN with no such floor, so waiving it is an uncapped loss. Refused loudly
+  // rather than silently ignored — a coupon that appears to apply and does nothing is worse.
+  const subtotalForCoupon = lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
+  const coupon = await resolveCoupon(input.couponCode, subtotalForCoupon, userId);
+  if (coupon.isFreeDelivery) {
+    throw new ValidationError("Free-delivery offers don’t apply to food orders.");
+  }
 
   // ⚠️ Measured RESTAURANT → customer, not store → customer. The rider's trip starts at the kitchen.
   const delivery = await computeDeliveryForOrigin(
@@ -151,9 +184,15 @@ async function priceOrder(
       pan: restaurant.pan,
       entityType: restaurant.entityType,
     },
-    totals: computeFoodOrderTotals(lines, delivery.charge),
+    totals: computeFoodOrderTotals(lines, delivery.charge, coupon.discount, coupon.code),
     // The kitchen is only ready when its SLOWEST dish is — a biryani doesn't finish when the raita does.
-    prepMinutes: Math.max(restaurant.avgPrepMinutes, ...rows.map((r) => r.prepMinutes)),
+    // Then busy mode extends it: this is the number the customer is quoted AND the number
+    // estimatedReadyAt (and therefore rider pre-dispatch) is built from, so all three agree.
+    prepMinutes: effectivePrepMinutes(
+      Math.max(restaurant.avgPrepMinutes, ...rows.map((r) => r.prepMinutes)),
+      restaurant.busyUntil,
+      restaurant.busyExtraMinutes,
+    ),
     distanceKm: delivery.distanceKm,
     outOfRange: delivery.outOfRange,
     address: address
@@ -163,6 +202,57 @@ async function priceOrder(
 }
 
 /** Price preview. Surfaces blockers as flags rather than errors so the cart can explain them. */
+/**
+ * Restaurants this customer has ordered from, most recent first — the source for the Food home's
+ * "Order again" rail. Food is far more repeat-driven than grocery, so this is the highest-value
+ * retention surface on the customer side.
+ *
+ * ⚠️ Returns IDs ONLY, deliberately. The app already holds the live restaurant list (name, logo,
+ * open/closed, prep, distance), so the rail renders from that and this endpoint just supplies the
+ * order. Three things fall out of it for free: a renamed kitchen shows its current name, a suspended
+ * or de-listed one disappears without any filtering here, and no DTO needs new fields.
+ *
+ * ⚠️ Deliberately NOT dish-level. OrderItem snapshots the dish name but the app never receives
+ * `menuItemId`, and re-adding specific dishes would need every one of them to still be on the menu —
+ * a reorder that silently drops half the basket is worse than none.
+ *
+ * ⚠️ Lives here, not in routes/orders.ts, because this is a food-only read and orders.ts is the most
+ * contended file in the repo.
+ */
+router.get("/reorder", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const cfg = await resolveFoodConfig();
+    // Same shape as the browse list: an empty rail while the vertical is gated off, not an error.
+    if (!cfg.enabled) return res.json({ success: true, data: { restaurantIds: [] } });
+
+    const rows = await prisma.order.findMany({
+      where: {
+        customerId: req.appUser!.id,
+        source: "FOOD",
+        // An order that never arrived is not evidence the customer liked the food.
+        status: { not: "CANCELLED" },
+      },
+      orderBy: { createdAt: "desc" },
+      // Enough history to find a few distinct kitchens without scanning a heavy customer's lifetime.
+      take: 30,
+      select: { subOrders: { select: { sellerId: true } } },
+    });
+
+    // Distinct, preserving recency. A food order is scoped to exactly ONE restaurant (placement
+    // prices every line against a single sellerId), so the first sub-order IS the kitchen.
+    const seen = new Set<string>();
+    for (const o of rows) {
+      const sellerId = o.subOrders[0]?.sellerId;
+      if (sellerId) seen.add(sellerId);
+      if (seen.size >= 8) break;
+    }
+
+    res.json({ success: true, data: { restaurantIds: [...seen] } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 router.post("/quote", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const cfg = await resolveFoodConfig();
@@ -257,7 +347,8 @@ router.post("/orders", async (req: FirebaseAuthRequest, res: Response) => {
           shippingAddress: p.address!.addressLine,
           shippingPincode: p.address!.pincode,
           subtotal: p.totals.subtotal,
-          discount: 0,
+          discount: p.totals.discount,
+          couponCode: p.totals.appliedCoupon,
           deliveryCharge: p.totals.deliveryCharge,
           taxableValue: p.totals.taxableValue,
           totalTax: p.totals.totalTax,
@@ -328,6 +419,14 @@ router.post("/orders", async (req: FirebaseAuthRequest, res: Response) => {
         where: { id: { in: created.items.map((i) => i.id) } },
         data: { subOrderId: subOrder.id },
       });
+
+      // Burn the redemption inside the SAME transaction as the order, so a failed placement can
+      // never consume a single-use code. Shared with grocery — the statement order inside is
+      // load-bearing against a race; see services/coupons.ts.
+      //
+      // ⚠️ Note SubOrder.subtotal above is the GROSS, pre-coupon figure and netPayable derives from
+      // it, which is what makes the discount platform-funded: it can never reduce a restaurant payout.
+      await redeemCouponInTx(tx, p.totals.appliedCoupon, userId, created.id);
       if (!p.restaurant.isHouse) {
         await tx.seller.update({
           where: { id: p.restaurant.id },

@@ -444,6 +444,56 @@ router.get("/onboarding/consent", async (req: SellerRequest, res: Response) => {
 });
 
 // ─── GET /earnings — gross / commission / net + payout history ────
+/**
+ * Busy mode on/off. Its own one-field route for the same reason "86 it" has one: it is tapped mid-
+ * rush with flour on your hands, and must not require loading and re-saving the whole profile.
+ *
+ * Body: { extraMinutes, durationMinutes } to go busy, or { clear: true } to stop.
+ *
+ * ⚠️ Going busy ALWAYS sets an expiry. There is deliberately no "busy until I say so" — a
+ * restaurant that taps this at 8pm and goes home would otherwise be ranked slow and starved of
+ * orders indefinitely, and would blame the platform, not the toggle. Extending is one more tap.
+ */
+router.post("/busy", async (req: SellerRequest, res: Response) => {
+  try {
+    const parsed = z
+      .object({
+        clear: z.boolean().optional(),
+        // Bounded: past ~2h of "we are behind" the honest answer is to close, not to quote 3 hours.
+        extraMinutes: z.number().int().min(5).max(120).optional(),
+        durationMinutes: z.number().int().min(15).max(480).optional(),
+      })
+      .safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid busy settings");
+
+    const { clear, extraMinutes, durationMinutes } = parsed.data;
+    const data =
+      clear || extraMinutes == null
+        // Clearing zeroes the extra too, so a later "busy" that somehow arrives without a value
+        // cannot silently inherit last night's +45.
+        ? { busyUntil: null, busyExtraMinutes: 0 }
+        : {
+            busyUntil: new Date(Date.now() + (durationMinutes ?? 60) * 60_000),
+            busyExtraMinutes: extraMinutes,
+          };
+
+    const seller = await prisma.seller.update({
+      where: { id: req.sellerId! },
+      data,
+      select: { busyUntil: true, busyExtraMinutes: true },
+    });
+    res.json({
+      success: true,
+      data: {
+        busyUntil: seller.busyUntil ? seller.busyUntil.toISOString() : null,
+        busyExtraMinutes: seller.busyExtraMinutes,
+      },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 router.get("/earnings", async (req: SellerRequest, res: Response) => {
   try {
     const seller = await prisma.seller.findUnique({

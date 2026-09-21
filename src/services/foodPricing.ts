@@ -29,6 +29,9 @@ export interface FoodOrderTotals {
   taxableValue: number;
   totalTax: number;
   deliveryCharge: number;
+  /** Platform-funded coupon discount. 0 when none applied. */
+  discount: number;
+  appliedCoupon: string | null;
   totalAmount: number;
 }
 
@@ -63,21 +66,39 @@ export function priceFoodLines(lines: FoodLineInput[]): FoodLineTotals[] {
  * subtotal + delivery. ⚠️ GST/CA: confirm whether the delivery leg should carry its own GST line
  * once the Sec 9(5) position is settled (MULTIVERTICAL_PLAN.md §4.4).
  */
+/**
+ * ⚠️ GST/CA: menu prices are GST-INCLUSIVE and tax is backed OUT, so `taxableValue` is derived from
+ * the pre-discount subtotal and a coupon reduces only the amount DUE. That mirrors how grocery treats
+ * an order-level discount (CBIC Circular 92/11/2019 precedent, as used for BOGO) — but food is
+ * Sec 9(5), where the PLATFORM is the deemed supplier of the service, so confirm the treatment with
+ * the CA before this carries real money. The code is small either way; the tax position is not.
+ *
+ * ⚠️ The discount is PLATFORM-funded and never reaches the restaurant: SubOrder.subtotal is written
+ * gross (pre-coupon) and netPayable = subtotal − commission − tcs, so a coupon cannot reduce a
+ * seller payout. Verified, not assumed.
+ */
 export function computeFoodOrderTotals(
   lines: FoodLineInput[],
   deliveryCharge: number,
+  discountInput = 0,
+  appliedCoupon: string | null = null,
 ): FoodOrderTotals {
   const priced = priceFoodLines(lines);
   const subtotal = round2(priced.reduce((s, l) => s + l.lineTotal, 0));
   const taxableValue = round2(priced.reduce((s, l) => s + l.taxableValue, 0));
   const totalTax = round2(subtotal - taxableValue);
   const delivery = round2(deliveryCharge);
+  // Clamped to the food subtotal: a coupon must never eat the delivery fee (the rider is paid for
+  // that trip either way) and can never drive the order negative.
+  const discount = round2(Math.min(Math.max(0, discountInput), subtotal));
   return {
     lines: priced,
     subtotal,
     taxableValue,
     totalTax,
     deliveryCharge: delivery,
-    totalAmount: round2(subtotal + delivery),
+    discount,
+    appliedCoupon: discount > 0 ? appliedCoupon : null,
+    totalAmount: round2(subtotal - discount + delivery),
   };
 }

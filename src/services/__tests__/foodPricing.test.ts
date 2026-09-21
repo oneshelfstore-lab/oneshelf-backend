@@ -70,3 +70,35 @@ describe("computeFoodOrderTotals", () => {
     expect(t).toMatchObject({ subtotal: 0, taxableValue: 0, totalTax: 0, totalAmount: 0 });
   });
 });
+
+describe("computeFoodOrderTotals — coupon discount", () => {
+  const line = { menuItemId: "m1", name: "Biryani", imageUrl: null, unitPrice: 200, quantity: 2, gstRate: 5, sacCode: null };
+
+  it("reduces the amount due but NOT the taxable value", () => {
+    const plain = computeFoodOrderTotals([line], 30);
+    const withCoupon = computeFoodOrderTotals([line], 30, 50, "SAVE50");
+    // Menu prices are GST-inclusive and tax is backed out of the pre-discount subtotal — an
+    // order-level discount reduces what is DUE, not what was supplied. ⚠️ GST/CA-gated.
+    expect(withCoupon.taxableValue).toBe(plain.taxableValue);
+    expect(withCoupon.totalTax).toBe(plain.totalTax);
+    expect(withCoupon.subtotal).toBe(plain.subtotal);
+    expect(withCoupon.totalAmount).toBe(plain.totalAmount - 50);
+    expect(withCoupon.discount).toBe(50);
+    expect(withCoupon.appliedCoupon).toBe("SAVE50");
+  });
+
+  it("never lets a coupon eat the delivery fee or go negative", () => {
+    // The rider is paid for the trip whether or not a coupon applied, so the discount is clamped
+    // to the food subtotal — an oversized coupon must not fund the delivery.
+    const huge = computeFoodOrderTotals([line], 30, 99999, "TOOBIG");
+    expect(huge.discount).toBe(400);
+    expect(huge.totalAmount).toBe(30);
+  });
+
+  it("ignores a negative discount and reports no coupon when nothing was taken off", () => {
+    const neg = computeFoodOrderTotals([line], 30, -100, "WEIRD");
+    expect(neg.discount).toBe(0);
+    expect(neg.appliedCoupon).toBeNull();
+    expect(neg.totalAmount).toBe(430);
+  });
+});

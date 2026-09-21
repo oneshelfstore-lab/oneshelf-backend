@@ -1443,27 +1443,36 @@ model Order {
   shippingPincode String?
 
   // Pricing
-  subtotal           Decimal @db.Decimal(12, 2)
-  discount           Decimal @default(0) @db.Decimal(10, 2)
-  deliveryCharge     Decimal @default(0) @db.Decimal(10, 2)
-  taxableValue       Decimal @default(0) @db.Decimal(12, 2)
-  totalTax           Decimal @default(0) @db.Decimal(10, 2)
-  totalAmount        Decimal @db.Decimal(12, 2)
+  subtotal           Decimal  @db.Decimal(12, 2)
+  discount           Decimal  @default(0) @db.Decimal(10, 2)
+  deliveryCharge     Decimal  @default(0) @db.Decimal(10, 2)
+  // The delivery fee split into its own taxable base and GST (runbook step 15). Delivery is the
+  // PLATFORM's own supply to the customer, not the seller's, so it is invoiced separately under
+  // its own SAC — which is why the split has to exist on the order rather than in the goods total.
+  // ⚠️ Deliberately NOT @default(0): every existing order charged a real delivery fee that was
+  // never split, so a zero here would assert the fee carried no tax. Null says "never split".
+  // ⚠️ Step 15 is INCLUSIVE — deliveryTaxable + deliveryGst must equal deliveryCharge exactly, so
+  // that ₹30 stays ₹30 to the customer and no order total moves.
+  deliveryTaxable    Decimal? @db.Decimal(10, 2)
+  deliveryGst        Decimal? @db.Decimal(10, 2)
+  taxableValue       Decimal  @default(0) @db.Decimal(12, 2)
+  totalTax           Decimal  @default(0) @db.Decimal(10, 2)
+  totalAmount        Decimal  @db.Decimal(12, 2)
   // Total the customer saved on this order vs MRP (Σ (mrp−price)×qty + coupon discount
   // + delivery waived). Snapshotted at placement so the celebration screen + year counter
   // are immutable and truthful. 0 for pre-migration orders.
-  savedAmount        Decimal @default(0) @db.Decimal(12, 2)
+  savedAmount        Decimal  @default(0) @db.Decimal(12, 2)
   couponCode         String?
   // Store credit applied as a payment tender (Phase 2): reduces the amount DUE after GST, does NOT
   // change taxableValue/totalTax. Refunded to the wallet if the order is cancelled.
-  walletApplied      Decimal @default(0) @db.Decimal(10, 2)
+  walletApplied      Decimal  @default(0) @db.Decimal(10, 2)
   // Loyalty (membership) attribution, snapshotted at placement so the owner's cost dashboard is
   // honest & immutable. loyaltyDiscount = the standing member % this order gave (already folded into
   // `discount`); tierDeliveryWaived = the delivery fee this order avoided SPECIFICALLY because of the
   // member free-delivery perk (0 if it was free anyway via threshold/coupon/pickup). 0 for
   // pre-migration orders and orders placed by non-members.
-  loyaltyDiscount    Decimal @default(0) @db.Decimal(10, 2)
-  tierDeliveryWaived Decimal @default(0) @db.Decimal(10, 2)
+  loyaltyDiscount    Decimal  @default(0) @db.Decimal(10, 2)
+  tierDeliveryWaived Decimal  @default(0) @db.Decimal(10, 2)
 
   // Delivery
   deliveryBoyId        String?
@@ -1637,10 +1646,24 @@ model OrderItem {
   costPriceSnapshot Decimal? @db.Decimal(10, 2)
   quantity          Decimal  @db.Decimal(14, 6)
   gstRate           Decimal  @default(0) @db.Decimal(5, 2)
+  // ⚠️ This @default(0) is the reason the columns added alongside it are nullable instead. One live
+  // row (ONS/2627/00028) carries lineTotal 200 against taxableValue 0, because it predates the
+  // column — and a 0 here is indistinguishable from a genuinely zero-rated line. Runbook step 07
+  // moves commission onto this base, so that row must be backfilled before it ships or its
+  // commission silently collapses to nil.
   taxableValue      Decimal  @default(0) @db.Decimal(12, 2)
   cgst              Decimal  @default(0) @db.Decimal(10, 2)
   sgst              Decimal  @default(0) @db.Decimal(10, 2)
   lineTotal         Decimal  @db.Decimal(12, 2)
+
+  // Per-line commission, snapshotted at placement (runbook step 08). A seller can negotiate a
+  // different rate on a specific product where their margin is thin, so the rate that applied to
+  // THIS line is not recoverable from the seller's current rate — it has to be stored.
+  // ⚠️ SubOrder.commissionPct then holds the BLENDED effective rate across the slice, not "the
+  // seller's agreed rate". Anything displaying it as the latter becomes subtly wrong that day.
+  // Null on every existing row: they predate per-line resolution and carry the seller default.
+  commissionPct    Decimal? @db.Decimal(5, 2)
+  commissionAmount Decimal? @db.Decimal(12, 2)
 
   // Loose item metadata
   isLoose     Boolean  @default(false)
@@ -1953,20 +1976,20 @@ model Seller {
   // ⚠️ @default("SHOP") is the same backward-compat trick as onboardingStatus @default(APPROVED) —
   // every Seller row that exists today is a shop, so the default backfills them correctly with no
   // manual pass. A String, not an enum, so adding a vertical later needs no DB enum migration.
-  vertical       String  @default("SHOP")
+  vertical         String    @default("SHOP")
   // Restaurant-only. Ignored (and left null) for SHOP sellers.
-  cuisines       String? // comma-separated, e.g. "North Indian,Chinese" — v1 keeps this flat
-  openTime       String? @db.VarChar(5) // "10:00" IST wall clock
-  closeTime      String? @db.VarChar(5) // "23:00"; may be < openTime for a past-midnight close
-  avgPrepMinutes Int     @default(20)
+  cuisines         String? // comma-separated, e.g. "North Indian,Chinese" — v1 keeps this flat
+  openTime         String?   @db.VarChar(5) // "10:00" IST wall clock
+  closeTime        String?   @db.VarChar(5) // "23:00"; may be < openTime for a past-midnight close
+  avgPrepMinutes   Int       @default(20)
   // Restaurants can set a floor for their own orders (a ₹40 order isn't worth firing the kitchen).
-  minOrderValue  Decimal @default(0) @db.Decimal(10, 2)
+  minOrderValue    Decimal   @default(0) @db.Decimal(10, 2)
   // Busy mode. Until this fix, a slammed kitchen's ONLY way to say so was rejecting an order the
   // customer had already placed (sellerOrders.ts TOO_BUSY) — the worst possible version.
   // ⚠️ busyUntil is an AUTO-EXPIRY, and that is the load-bearing half: a restaurant that taps
   // "busy" and forgets would otherwise look slow forever and quietly lose orders. Past = not busy.
-  busyUntil         DateTime?
-  busyExtraMinutes  Int       @default(0) // minutes added to the prep estimate while busy
+  busyUntil        DateTime?
+  busyExtraMinutes Int       @default(0) // minutes added to the prep estimate while busy
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2028,7 +2051,7 @@ model MenuItem {
   isAvailable Boolean @default(true)
   isActive    Boolean @default(true)
 
-  prepMinutes Int     @default(20)
+  prepMinutes   Int     @default(20)
   // Per-item serving window, "HH:MM" IST wall clock — same shape and same parser as the restaurant's
   // own openTime/closeTime (services/foodMenu.ts isWithinWindow), so a close BEFORE the open is a
   // past-midnight window, and BOTH null means "whenever the restaurant is open".
@@ -2038,9 +2061,9 @@ model MenuItem {
   availableTo   String? @db.VarChar(5)
   // ⚠️ SAC (service accounting code), NOT HSN — restaurant service is a supply of SERVICE. Both the
   // code and the rate are ⚠️ GST/CA-gated; see MULTIVERTICAL_PLAN.md §4.4 before trusting either.
-  sacCode     String? @db.VarChar(8)
-  gstRate     Decimal @default(5) @db.Decimal(5, 2)
-  sortOrder   Int     @default(0)
+  sacCode       String? @db.VarChar(8)
+  gstRate       Decimal @default(5) @db.Decimal(5, 2)
+  sortOrder     Int     @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2122,35 +2145,55 @@ model ConsentRecord {
 // Per-(order, seller) split. One parent Order → N SubOrders (one per seller in the cart). A
 // single-seller (house-only) order produces exactly one SubOrder, so the existing flow is unchanged.
 model SubOrder {
-  id               String         @id @default(cuid())
-  orderId          String
-  order            Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  sellerId         String
-  seller           Seller         @relation(fields: [sellerId], references: [id])
-  status           SubOrderStatus @default(PLACED)
+  id                  String         @id @default(cuid())
+  orderId             String
+  order               Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  sellerId            String
+  seller              Seller         @relation(fields: [sellerId], references: [id])
+  status              SubOrderStatus @default(PLACED)
   // Money, snapshotted at placement.
-  subtotal         Decimal        @db.Decimal(12, 2) // seller's gross for this order
-  commissionPct    Decimal        @db.Decimal(5, 2) // snapshot of Seller.commissionPct
-  commissionAmount Decimal        @db.Decimal(12, 2) // = subtotal × pct (the platform's cut)
-  tcsAmount        Decimal        @default(0) @db.Decimal(12, 2) // GST Sec-52 TCS (accrued for later)
-  tdsAmount        Decimal        @default(0) @db.Decimal(12, 2) // Income Tax Sec 194-O TDS (accrued for later)
-  netPayable       Decimal        @db.Decimal(12, 2) // = subtotal − commission − tcs − tds (owed to seller)
-  settled          Boolean        @default(false)
-  payoutId         String?
-  payout           SellerPayout?  @relation(fields: [payoutId], references: [id], onDelete: SetNull)
+  //
+  // ⚠️ The nullable columns below are nullable ON PURPOSE, not for lack of a sensible zero. A money
+  // column that defaults to 0 cannot tell "this was computed and came to nothing" from "this was
+  // never computed" — which is exactly how OrderItem.taxableValue @default(0) left one live row
+  // reading 0 against a real ₹200 of goods. Null says "not computed"; a number says "computed".
+  subtotal            Decimal        @db.Decimal(12, 2) // seller's gross for this order
+  // GST-exclusive base of `subtotal`, summed from this slice's OrderItem.taxableValue. It is what
+  // TCS is charged on, and (from runbook step 07) what commission will be charged on.
+  taxableValue        Decimal?       @db.Decimal(12, 2)
+  commissionPct       Decimal        @db.Decimal(5, 2) // snapshot of Seller.commissionPct
+  commissionAmount    Decimal        @db.Decimal(12, 2) // = subtotal × pct (the platform's cut)
+  // GST the PLATFORM charges the SELLER on that commission — 18%, SAC 998599, billed monthly as its
+  // own COMMISSION invoice (runbook step 17). Nothing computes these yet.
+  commissionGstPct    Decimal?       @db.Decimal(5, 2)
+  commissionGstAmount Decimal?       @db.Decimal(12, 2)
+  tcsAmount           Decimal        @default(0) @db.Decimal(12, 2) // GST Sec-52 TCS (accrued for later)
+  // ⚠️ The rate tcsAmount was ACTUALLY computed at, snapshotted so a later rate change cannot
+  // rewrite history. ownerGstr8.ts and reports.ts currently recover a row's liable value as
+  // tcsAmount ÷ the CURRENT constant, which silently assumes every row was written at today's rate.
+  // The moment TCS moves off 1% (runbook step 06) those reports must read this column instead, or
+  // every pre-existing row's liable value doubles in a filed return.
+  tcsRatePct          Decimal?       @db.Decimal(5, 2)
+  tdsAmount           Decimal        @default(0) @db.Decimal(12, 2) // Income Tax Sec 194-O TDS (accrued for later)
+  // Null means 194-O was not enabled when this order was placed — which is true of every row today.
+  tdsRatePct          Decimal?       @db.Decimal(5, 2)
+  netPayable          Decimal        @db.Decimal(12, 2) // = subtotal − commission − tcs − tds (owed to seller)
+  settled             Boolean        @default(false)
+  payoutId            String?
+  payout              SellerPayout?  @relation(fields: [payoutId], references: [id], onDelete: SetNull)
   // Seller's photo of the packed order, taken at pack time. A Storage object PATH, not a URL —
   // signed on read like every other order media (see lib/storageUrls). Its job is to settle
   // "this isn't what I ordered" disputes: the rider can check the bag they're handed matches, and
   // the owner has evidence of what left the shop.
-  packPhotoUrl     String?
+  packPhotoUrl        String?
   // Fulfillment (collection run — Phase 5).
-  packedAt         DateTime?
-  collectedAt      DateTime?
-  collectedById    String?
-  createdAt        DateTime       @default(now())
-  updatedAt        DateTime       @updatedAt
+  packedAt            DateTime?
+  collectedAt         DateTime?
+  collectedById       String?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
 
-  items OrderItem[]
+  items  OrderItem[]
   events OrderEvent[]
 
   @@index([orderId])
@@ -2284,6 +2327,18 @@ model Invoice {
   invoiceDate   DateTime
   invoiceType   InvoiceType
   supplyType    SupplyType
+  // WHOSE supply this documents, which is a different question from invoiceType (TAX_INVOICE vs
+  // CREDIT_NOTE) and from supplyType (B2B vs B2C). GOODS = a seller supplying a customer.
+  // COMMISSION = the platform billing a seller for its service. DELIVERY = the platform supplying
+  // the customer. Getting these into one GSTR-1 would put someone else's income in a filed return.
+  // ⚠️ @default("GOODS") is LOAD-BEARING and must not become nullable: every invoice that exists
+  // today genuinely is a goods invoice, so the default is a true statement about all 374 of them
+  // and backfills the column correctly with no script. That is the one case on this migration where
+  // a default is honest — the other columns added here are nullable precisely because their zero
+  // would not be.
+  // A String, not an enum, so adding a kind later needs no DB enum migration (same reasoning as
+  // Seller.vertical).
+  invoiceKind   String      @default("GOODS")
 
   customerId      String
   customer        Customer @relation(fields: [customerId], references: [id])

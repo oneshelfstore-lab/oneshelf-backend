@@ -131,3 +131,56 @@ export async function signUserPhoto<T extends { photoUrl?: string | null }>(user
   const signed = await signStoragePath(user.photoUrl, USER_PHOTO_TTL_MS);
   return { ...user, photoUrl: signed };
 }
+
+/**
+ * 1h — the shortest window that still lets the owner work through a review queue in one sitting.
+ *
+ * KYC documents are the most sensitive media this system holds: a photo of someone's PAN card, of
+ * their driving licence, of a bank passbook. Unlike a gate photo, one of these leaking is identity
+ * theft rather than an embarrassment, so it gets a tighter TTL than order media's 6h and the user
+ * photo's 24h — and unlike those, nothing caches it across a session, because a document is looked
+ * at once during review.
+ */
+const KYC_DOC_TTL_MS = 60 * 60 * 1000;
+
+/**
+ * Sign the named document fields on a KYC row.
+ *
+ * ⚠️ WHY THIS IS NOT OPTIONAL. The two KYC buckets have had correct storage.rules since July 2026 —
+ * read only by the uploader or the owner — and those rules have been doing NOTHING, because the app
+ * uploaded with `ref.downloadUrl`, which mints a permanent `?token=` URL that bypasses rules
+ * entirely. Every seller PAN card and rider licence uploaded so far is fetchable by anyone holding
+ * the link, signed out, forever. Rules cannot contain a leaked download token; only not minting one
+ * can, which is the other half of this change (the app now stores the bare object path).
+ *
+ * Generic over the field list because the seller row and the rider row carry different documents,
+ * and hardcoding two near-identical helpers is how one of them later gains a field the other's
+ * reviewer forgets to sign.
+ */
+export async function signDocFields<T extends Record<string, unknown>>(
+  row: T,
+  fields: readonly (keyof T & string)[],
+): Promise<T> {
+  const out = { ...row };
+  await Promise.all(
+    fields.map(async (f) => {
+      if (!(f in row)) return;
+      const signed = await signStoragePath(row[f] as string | null | undefined, KYC_DOC_TTL_MS);
+      (out as Record<string, unknown>)[f] = signed;
+    }),
+  );
+  return out;
+}
+
+/** The seller's own KYC documents. */
+export const SELLER_KYC_DOC_FIELDS = ["fssaiDocUrl", "gstinDocUrl", "panDocUrl", "bankProofUrl"] as const;
+
+/** A delivery rider's. `selfieUrl` is in here too — it is a face, held for identity verification. */
+export const DELIVERY_KYC_DOC_FIELDS = [
+  "idDocUrl",
+  "selfieUrl",
+  "dlDocUrl",
+  "rcDocUrl",
+  "insuranceDocUrl",
+  "policeVerificationDocUrl",
+] as const;

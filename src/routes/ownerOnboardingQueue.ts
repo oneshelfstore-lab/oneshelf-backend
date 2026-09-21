@@ -8,6 +8,7 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { notifyPartnerApproved } from "../services/fcmNotifier.js";
+import { signDocFields, SELLER_KYC_DOC_FIELDS, DELIVERY_KYC_DOC_FIELDS } from "../lib/storageUrls.js";
 
 // Owner's onboarding review queue (Phase 1, SELLER_DELIVERY_ONBOARDING_PLAN.md). Mounted at
 // /api/app/owner/onboarding-queue (Firebase auth + OWNER, mirrors ownerPartnerApplications).
@@ -65,12 +66,18 @@ async function shapeSellerRow(s: {
     grievanceOfficerName: s.grievanceOfficerName,
     grievanceOfficerPhone: s.grievanceOfficerPhone,
     grievanceOfficerEmail: s.grievanceOfficerEmail,
-    documents: {
-      fssaiDocUrl: s.fssaiDocUrl,
-      gstinDocUrl: s.gstinDocUrl,
-      panDocUrl: s.panDocUrl,
-      bankProofUrl: s.bankProofUrl,
-    },
+    // This is the one place these documents are actually LOOKED at — the owner working through a
+    // KYC packet. Signed at read, so the link that ends up in their browser history dies within the
+    // hour instead of being a permanent handle on someone's PAN card.
+    documents: await signDocFields(
+      {
+        fssaiDocUrl: s.fssaiDocUrl,
+        gstinDocUrl: s.gstinDocUrl,
+        panDocUrl: s.panDocUrl,
+        bankProofUrl: s.bankProofUrl,
+      },
+      SELLER_KYC_DOC_FIELDS,
+    ),
     onboardingStatus: s.onboardingStatus,
     rejectionReason: s.onboardingRejectionReason,
     createdAt: s.createdAt,
@@ -111,14 +118,20 @@ async function shapeDeliveryRow(p: {
     emergencyContactName: p.emergencyContactName,
     emergencyContactPhone: p.emergencyContactPhone,
     bankDetails: p.bankDetails ?? null,
-    documents: {
-      idDocUrl: p.idDocUrl,
-      selfieUrl: p.selfieUrl,
-      dlDocUrl: p.dlDocUrl,
-      rcDocUrl: p.rcDocUrl,
-      insuranceDocUrl: p.insuranceDocUrl,
-      policeVerificationDocUrl: p.policeVerificationDocUrl,
-    },
+    // Same treatment as the seller packet above. A rider's ID document and selfie are the most
+    // re-identifiable pair in this system; a permanent link to them is not something to leave lying
+    // in a reviewer's history.
+    documents: await signDocFields(
+      {
+        idDocUrl: p.idDocUrl,
+        selfieUrl: p.selfieUrl,
+        dlDocUrl: p.dlDocUrl,
+        rcDocUrl: p.rcDocUrl,
+        insuranceDocUrl: p.insuranceDocUrl,
+        policeVerificationDocUrl: p.policeVerificationDocUrl,
+      },
+      DELIVERY_KYC_DOC_FIELDS,
+    ),
     onboardingStatus: p.onboardingStatus,
     rejectionReason: p.rejectionReason,
     createdAt: p.createdAt,

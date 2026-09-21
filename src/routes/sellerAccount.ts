@@ -13,6 +13,7 @@ import {
   ifscSchema,
 } from "../validators/index.js";
 import { PARTNER_AGREEMENT_VERSION } from "../data/onboardingAgreements.js";
+import { signDocFields, SELLER_KYC_DOC_FIELDS } from "../lib/storageUrls.js";
 
 // A GSTIN is optional (a seller may be unregistered) but, when present, must be well-formed +
 // checksum-valid so invoices are never issued under a malformed GSTIN (COMPLIANCE_PLAN.md P2-3).
@@ -41,8 +42,13 @@ router.use(firebaseAuthMiddleware as any);
 router.use(requireAppRole("SELLER") as any);
 router.use(resolveSeller as any);
 
-function shapeProfile(s: any, agreementCurrent: boolean) {
-  return {
+async function shapeSellerProfile(s: any, agreementCurrent: boolean) {
+  // ⚠️ signDocFields is not cosmetic. The KYC buckets have had correct storage.rules since July
+  // 2026 and those rules were doing nothing, because the app uploaded with ref.downloadUrl — a
+  // permanent token that bypasses rules entirely. The app now stores the bare object path and this
+  // mints a 1h signed URL at read time. Legacy rows holding a full https:// URL pass through
+  // untouched (classifyStoredMedia), so no backfill is needed and no existing document 404s.
+  return signDocFields({
     id: s.id,
     slug: s.slug,
     name: s.name,
@@ -99,7 +105,7 @@ function shapeProfile(s: any, agreementCurrent: boolean) {
     // A seller who's never consented at all (pre-dates Phase 1 entirely) reads as true — nothing
     // to re-prompt for someone who was never asked in the first place.
     agreementCurrent,
-  };
+  }, SELLER_KYC_DOC_FIELDS);
 }
 
 // True once the seller's latest granted PARTNER_AGREEMENT consent matches the CURRENT version.
@@ -117,7 +123,7 @@ router.get("/", async (req: SellerRequest, res: Response) => {
     const seller = await prisma.seller.findUnique({ where: { id: req.sellerId } });
     if (!seller) throw new NotFoundError("Seller", req.sellerId ?? "");
     const agreementCurrent = await isAgreementCurrent(seller.id);
-    res.json({ success: true, data: shapeProfile(seller, agreementCurrent) });
+    res.json({ success: true, data: await shapeSellerProfile(seller, agreementCurrent) });
   } catch (e) {
     sendError(res, e);
   }
@@ -202,7 +208,7 @@ router.post("/kyc-change-request", async (req: SellerRequest, res: Response) => 
     const seller = isKycLocked(current) && !current.kycEditUnlocked
       ? await prisma.seller.update({ where: { id: req.sellerId }, data: { kycChangeRequested: true } })
       : await prisma.seller.findUniqueOrThrow({ where: { id: req.sellerId } });
-    res.json({ success: true, data: shapeProfile(seller, await isAgreementCurrent(seller.id)) });
+    res.json({ success: true, data: await shapeSellerProfile(seller, await isAgreementCurrent(seller.id)) });
   } catch (e) {
     sendError(res, e);
   }
@@ -266,7 +272,7 @@ router.put("/", async (req: SellerRequest, res: Response) => {
           : {}),
       },
     });
-    res.json({ success: true, data: shapeProfile(updated, await isAgreementCurrent(updated.id)) });
+    res.json({ success: true, data: await shapeSellerProfile(updated, await isAgreementCurrent(updated.id)) });
   } catch (e) {
     sendError(res, e);
   }
@@ -318,7 +324,7 @@ router.put("/bank-details", async (req: SellerRequest, res: Response) => {
           : {}),
       },
     });
-    res.json({ success: true, data: shapeProfile(updated, await isAgreementCurrent(updated.id)) });
+    res.json({ success: true, data: await shapeSellerProfile(updated, await isAgreementCurrent(updated.id)) });
   } catch (e) {
     sendError(res, e);
   }
@@ -341,7 +347,7 @@ router.post("/onboarding/submit", async (req: SellerRequest, res: Response) => {
     const seller = await prisma.seller.findUnique({ where: { id: req.sellerId } });
     if (!seller) throw new NotFoundError("Seller", req.sellerId ?? "");
     if (seller.onboardingStatus === "APPROVED") {
-      return res.json({ success: true, data: shapeProfile(seller, await isAgreementCurrent(seller.id)) });
+      return res.json({ success: true, data: await shapeSellerProfile(seller, await isAgreementCurrent(seller.id)) });
     }
 
     const missing = REQUIRED_ONBOARDING_FIELDS.filter(([field]) => {
@@ -388,7 +394,7 @@ router.post("/onboarding/submit", async (req: SellerRequest, res: Response) => {
       where: { id: seller.id },
       data: { onboardingStatus: "PENDING_REVIEW", onboardingRejectionReason: null },
     });
-    res.json({ success: true, data: shapeProfile(updated, true) });
+    res.json({ success: true, data: await shapeSellerProfile(updated, true) });
   } catch (e) {
     sendError(res, e);
   }
@@ -775,7 +781,7 @@ router.get("/sellers", async (req: SellerRequest, res: Response) => {
   try {
     if (!requireHouseManager(req, res)) return;
     const sellers = await prisma.seller.findMany({ orderBy: [{ isHouse: "desc" }, { createdAt: "desc" }] });
-    const data = await Promise.all(sellers.map(async (s) => shapeProfile(s, await isAgreementCurrent(s.id))));
+    const data = await Promise.all(sellers.map(async (s) => await shapeSellerProfile(s, await isAgreementCurrent(s.id))));
     res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);
@@ -788,7 +794,7 @@ router.get("/sellers/:id", async (req: SellerRequest, res: Response) => {
     const id = String(req.params.id ?? "");
     const seller = await prisma.seller.findUnique({ where: { id } });
     if (!seller) throw new NotFoundError("Seller", id);
-    res.json({ success: true, data: shapeProfile(seller, await isAgreementCurrent(seller.id)) });
+    res.json({ success: true, data: await shapeSellerProfile(seller, await isAgreementCurrent(seller.id)) });
   } catch (e) {
     sendError(res, e);
   }
@@ -815,7 +821,7 @@ router.put("/sellers/:id", async (req: SellerRequest, res: Response) => {
     }
 
     const updated = await prisma.seller.update({ where: { id }, data: parsed.data });
-    res.json({ success: true, data: shapeProfile(updated, await isAgreementCurrent(updated.id)) });
+    res.json({ success: true, data: await shapeSellerProfile(updated, await isAgreementCurrent(updated.id)) });
   } catch (e) {
     sendError(res, e);
   }

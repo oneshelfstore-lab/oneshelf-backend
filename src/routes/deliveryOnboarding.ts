@@ -10,6 +10,7 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { DELIVERY_AGREEMENT_VERSION } from "../data/onboardingAgreements.js";
+import { signDocFields, DELIVERY_KYC_DOC_FIELDS } from "../lib/storageUrls.js";
 
 // Delivery-rider self-service KYC (Phase 1, SELLER_DELIVERY_ONBOARDING_PLAN.md). Mounted at
 // /api/app/delivery/onboarding (Firebase auth + DELIVERY role). Distinct from delivery.ts's
@@ -82,8 +83,11 @@ async function getOrCreateProfile(userId: string): Promise<DeliveryProfileRow> {
   return prisma.deliveryProfile.create({ data: { userId } });
 }
 
-function shapeProfile(p: DeliveryProfileRow, agreementCurrent: boolean) {
-  return {
+async function shapeDeliveryProfile(p: DeliveryProfileRow, agreementCurrent: boolean) {
+  // See the note in sellerAccount.ts — same exposure, same fix. A rider hands over a photo of
+  // their driving licence and their own face; a permanent download token on those is identity
+  // theft waiting to be forwarded, not an embarrassment.
+  return signDocFields({
     id: p.id,
     panNumber: p.panNumber,
     idDocType: p.idDocType,
@@ -105,7 +109,7 @@ function shapeProfile(p: DeliveryProfileRow, agreementCurrent: boolean) {
     rejectionReason: p.rejectionReason,
     // ─── Consent-version re-prompt (Phase 2) — see the identical note in sellerAccount.ts ──
     agreementCurrent,
-  };
+  }, DELIVERY_KYC_DOC_FIELDS);
 }
 
 // True once this rider's latest granted PARTNER_AGREEMENT consent matches the CURRENT version.
@@ -123,7 +127,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     if (!req.appUser) throw new NotFoundError("User", "");
     const existing = await prisma.deliveryProfile.findUnique({ where: { userId: req.appUser.id } });
     const agreementCurrent = existing ? await isAgreementCurrent(req.appUser.id) : true;
-    res.json({ success: true, data: shapeProfile(existing ?? virtualDefaultProfile(req.appUser.id), agreementCurrent) });
+    res.json({ success: true, data: await shapeDeliveryProfile(existing ?? virtualDefaultProfile(req.appUser.id), agreementCurrent) });
   } catch (e) {
     sendError(res, e);
   }
@@ -227,7 +231,7 @@ router.put("/", async (req: FirebaseAuthRequest, res: Response) => {
         ...(existing.onboardingStatus === "PENDING_REVIEW" ? { onboardingStatus: "IN_PROGRESS" as const } : {}),
       },
     });
-    res.json({ success: true, data: shapeProfile(updated, await isAgreementCurrent(req.appUser.id)) });
+    res.json({ success: true, data: await shapeDeliveryProfile(updated, await isAgreementCurrent(req.appUser.id)) });
   } catch (e) {
     sendError(res, e);
   }
@@ -239,7 +243,7 @@ router.post("/submit", async (req: FirebaseAuthRequest, res: Response) => {
     if (!req.appUser) throw new NotFoundError("User", "");
     const profile = await getOrCreateProfile(req.appUser.id);
     if (profile.onboardingStatus === "APPROVED") {
-      return res.json({ success: true, data: shapeProfile(profile, await isAgreementCurrent(req.appUser.id)) });
+      return res.json({ success: true, data: await shapeDeliveryProfile(profile, await isAgreementCurrent(req.appUser.id)) });
     }
 
     const missing: string[] = [];
@@ -281,7 +285,7 @@ router.post("/submit", async (req: FirebaseAuthRequest, res: Response) => {
       where: { userId: req.appUser.id },
       data: { onboardingStatus: "PENDING_REVIEW", rejectionReason: null },
     });
-    res.json({ success: true, data: shapeProfile(updated, true) });
+    res.json({ success: true, data: await shapeDeliveryProfile(updated, true) });
   } catch (e) {
     sendError(res, e);
   }

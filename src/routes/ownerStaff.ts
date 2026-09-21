@@ -159,12 +159,20 @@ router.post("/settlements/:id/confirm", async (req: FirebaseAuthRequest, res: Re
 router.post("/settlements/:id/reject", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const id = String(req.params.id ?? "");
-    const settlement = await prisma.cashSettlement.findUnique({ where: { id } });
-    if (!settlement) throw new NotFoundError("Cash settlement", id);
-    if (settlement.status === "CONFIRMED") {
+    // ⚠️ The delete is its own guard — a conditional deleteMany, not findUnique-then-delete.
+    // This destroys a financial record, and the old read-then-delete could destroy the WRONG one:
+    // a confirm committing between the read and the delete meant this erased an ALREADY-CONFIRMED
+    // handover. Because computeUnsettledCash (routes/delivery.ts) measures a rider's debt from
+    // their last CONFIRMED settlement, deleting one silently resurrects cash they had already
+    // handed over and the store had already acknowledged.
+    const { count } = await prisma.cashSettlement.deleteMany({ where: { id, status: "PENDING" } });
+    if (count === 0) {
+      // Either no such row, or it is no longer PENDING. Tell them apart so "already confirmed"
+      // doesn't read as "doesn't exist".
+      const existing = await prisma.cashSettlement.findUnique({ where: { id }, select: { status: true } });
+      if (!existing) throw new NotFoundError("Cash settlement", id);
       throw new ValidationError("This handover is already confirmed — it can't be rejected.");
     }
-    await prisma.cashSettlement.delete({ where: { id } });
     res.json({ success: true, data: { id, rejected: true } });
   } catch (e) {
     sendError(res, e);

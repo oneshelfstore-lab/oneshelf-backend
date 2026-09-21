@@ -2,6 +2,7 @@ import prisma from "../lib/prisma.js";
 import ExcelJS from "exceljs";
 import { resolveStoreState, stateLabel, stateCodeFromGstin } from "../lib/stateCodes.js";
 import { isValidGstin } from "../validators/index.js";
+import { TCS_RATE_PCT } from "../data/taxRates.js";
 
 // ─── Invoice scope (house vs external seller) — COMPLIANCE_PLAN.md P0-2 ───────────────────────────
 //
@@ -830,8 +831,6 @@ export async function getGstHealth(period: string) {
 }
 
 // ─── Marketplace maturity (P2) ───────────────────────────────────────
-
-const TCS_RATE_PCT = 1; // Sec-52 (0.5% CGST + 0.5% SGST) — must match routes/orders.ts + ownerGstr8.ts
 
 /**
  * Per-seller TCS collected in a month (period MMYYYY) — the seller's own TCS statement (P2-2). The

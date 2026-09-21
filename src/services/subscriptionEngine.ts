@@ -14,6 +14,7 @@ import { consumeFifo, recordConsumption, type ConsumeResult } from "./stockBatch
 import { AppError } from "../lib/errors.js";
 import { computeSubOrderTds194o } from "./sellerTds194o.js";
 import { computeSellerSplit } from "./sellerSplit.js";
+import { TCS_RATE_PCT } from "../data/taxRates.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Subscriptions engine (milk / newspaper / recurring deliveries).
@@ -33,10 +34,6 @@ import { computeSellerSplit } from "./sellerSplit.js";
 
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const MS_DAY = 24 * 60 * 60 * 1000;
-
-// GST Sec-52 TCS the platform collects on EXTERNAL sellers' net taxable supplies (house = 0).
-// Mirrors routes/orders.ts:29. ⚠️ GST/CA — confirm before launch.
-const TCS_RATE_PCT = 1;
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;

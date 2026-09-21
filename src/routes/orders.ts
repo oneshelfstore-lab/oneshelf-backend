@@ -30,6 +30,7 @@ import { consumeFifo, recordConsumption, restoreConsumption, type ConsumeResult 
 import { drawFreeGiftStock } from "../services/freeGifts.js";
 import { computeSubOrderTds194o } from "../services/sellerTds194o.js";
 import { sumSellerLines, computeSellerSplit } from "../services/sellerSplit.js";
+import { TCS_RATE_PCT } from "../data/taxRates.js";
 import { haversineKm } from "../lib/distance.js";
 import { getRiderRoute } from "../services/riderRoute.js";
 import { recordOrderEventAsync } from "../services/orderEvents.js";
@@ -39,10 +40,6 @@ const router = Router();
 router.use(firebaseAuthMiddleware as any);
 
 function isLooseType(t: string) { return t === "LOOSE" || t === "PRODUCE"; }
-
-// GST Sec-52 TCS rate the platform (e-commerce operator) collects on external sellers' net taxable
-// supplies. ⚠️ CA-gated — confirm before launch. 1% total = 0.5% CGST + 0.5% SGST (intra-state).
-const TCS_RATE_PCT = 1;
 
 // ─── POST /api/app/orders — place order ─────────────────────────────
 

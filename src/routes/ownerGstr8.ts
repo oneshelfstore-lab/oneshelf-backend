@@ -6,6 +6,7 @@ import {
   requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
+import { TCS_RATE_PCT } from "../data/taxRates.js";
 
 // ⚠️ GST/CA (Phase 6): GSTR-8 is the monthly TCS return a GST e-commerce operator files (Sec-52).
 // This endpoint produces the per-seller TCS summary the owner / CA needs to file it. It does NOT
@@ -13,9 +14,6 @@ import {
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
 router.use(requireAppRole("OWNER") as any);
-
-// TCS rate the operator collected (must match the placement-time rate in routes/orders.ts).
-const TCS_RATE_PCT = 1;
 
 // GET /?period=YYYY-MM — per-seller TCS for the calendar month. Defaults to the current month.
 router.get("/", async (req: FirebaseAuthRequest, res: Response) => {

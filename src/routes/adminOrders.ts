@@ -6,8 +6,7 @@ import { requireRole } from "../middleware/auth.js";
 import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orderInvoice.js";
 import { accrueReferralCommission, refundWalletOnCancel } from "../services/referralRewards.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
-import { restoreConsumption } from "../services/stockBatches.js";
-import { assertSellersPacked, reverseSellerLedgerOnCancel } from "../services/subOrderFulfillment.js";
+import { assertSellersPacked, reverseSellerLedgerOnCancel, cancelOrder } from "../services/subOrderFulfillment.js";
 import { signOrderMedia, signOrderMediaList } from "../lib/storageUrls.js";
 import { notifyNewDeliveryAvailable } from "../services/fcmNotifier.js";
 
@@ -102,7 +101,7 @@ router.put("/:id/status", requireRole("OWNER", "ACCOUNTANT", "BILLING_CLERK") as
     if (!parsed.success) throw new ValidationError("Invalid status", parsed.error.errors);
     const { status: newStatus } = parsed.data;
 
-    const order = await prisma.order.findUnique({ where: { id: req.params.id }, include: { items: true } });
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
     if (!order) throw new NotFoundError("Order", req.params.id!);
 
     const allowed = VALID_TRANSITIONS[order.status];
@@ -115,13 +114,13 @@ router.put("/:id/status", requireRole("OWNER", "ACCOUNTANT", "BILLING_CLERK") as
     if (newStatus === "PACKED") await assertSellersPacked(order.id);
 
     if (newStatus === "CANCELLED") {
-      await prisma.$transaction(async (tx) => {
-        for (const item of order.items) {
-          if (!item.variantId) continue;
-          await restoreConsumption(tx, { orderItemId: item.id });
-        }
-        await tx.order.update({ where: { id: order.id }, data: { status: newStatus } });
-      });
+      // Shared compare-and-swap — see services/subOrderFulfillment.ts. This back-office route can
+      // cancel the same order the customer's app is cancelling, so it needs the same guard: the old
+      // read-then-write let both restore the same stock.
+      const outcome = await cancelOrder(order.id, [order.status]);
+      if (outcome === "NOT_CANCELLABLE") {
+        throw new ValidationError("This order just changed status — reload and try again.");
+      }
     } else {
       const data: any = { status: newStatus };
       if (newStatus === "DELIVERED") {

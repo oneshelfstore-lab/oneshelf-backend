@@ -208,8 +208,19 @@ async function creditLegacyRestore(tx: Prisma.TransactionClient, variantId: stri
 /**
  * Reverse everything drawn against one sale record (an OrderItem or InvoiceLineItem) — used on
  * cancel/reject/expiry. Adds each drawn qty back onto its originating batch, then bumps the
- * variant's stock rollup once per affected variant. Deletes the consumption rows it just reversed,
- * so a duplicate/defensive second call becomes a safe no-op instead of a double-restore — this
+ * variant's stock rollup once per affected variant.
+ *
+ * ⚠️⚠️ THIS IS NOT IDEMPOTENT, despite what this comment used to claim. It deletes the consumption
+ * rows it reverses, and the "no rows recorded" branch below cannot tell "already restored" from
+ * "pre-migration sale" — so a SECOND call falls into the legacy fallback and credits the stock all
+ * over again. Calling it twice for one sale record silently inflates inventory.
+ *
+ * The CALLER owns the exactly-once guarantee, because the caller holds the only signal that
+ * distinguishes those two cases: the order's status. Every whole-order cancel path goes through
+ * cancelOrderInTx (services/subOrderFulfillment.ts), which compare-and-swaps the status to CANCELLED
+ * and restores stock only if it won that swap. Don't add a caller without an equivalent guard.
+ *
+ * Deleting the reversed rows still does one useful thing — this
  * also lets substitution reuse the SAME orderItemId for two different products in sequence
  * (restore the original's batches, then record the substitute's draw under that same id).
  *
@@ -229,8 +240,20 @@ export async function restoreConsumption(tx: Prisma.TransactionClient, ref: Cons
   });
 
   if (consumptions.length === 0) {
-    // Nothing recorded — either a pre-migration sale (fall back below) or this ref was already
-    // restored once (deleteMany below makes a second call a safe no-op either way).
+    // Nothing recorded — either a genuine pre-migration sale (restored from the snapshot qty below) or
+    // this ref was ALREADY restored and its rows deleted. Indistinguishable from here, which is
+    // exactly why callers must guarantee exactly-once (see the doc comment above).
+    //
+    // Logged because the legacy case should be effectively extinct: only OrderItems predating the
+    // batch engine (July 2026) lack consumption rows, and nothing that old is still in a cancellable
+    // state. In practice a line here means a caller lost its guard and just double-credited stock.
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        msg: "restoreConsumption: no consumption rows — legacy fallback, or a DOUBLE restore",
+        ref,
+      }),
+    );
     if ("orderItemId" in ref) {
       const item = await tx.orderItem.findUnique({
         where: { id: ref.orderItemId },

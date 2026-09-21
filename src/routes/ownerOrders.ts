@@ -13,9 +13,9 @@ import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orde
 import { markSamplePacked } from "../services/freeSample.js";
 import { accrueReferralCommission, refundWalletOnCancel } from "../services/referralRewards.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
-import { restoreConsumption } from "../services/stockBatches.js";
+
 import { shapeOrderMessage } from "../services/orderMessages.js";
-import { assertSellersPacked, markSubOrderPackedByOwner, reverseSellerLedgerOnCancel } from "../services/subOrderFulfillment.js";
+import { assertSellersPacked, markSubOrderPackedByOwner, reverseSellerLedgerOnCancel, cancelOrder } from "../services/subOrderFulfillment.js";
 import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 import { getRiderOnboardingStatus, riderBlockedReason } from "./deliveryOnboarding.js";
 import { signOrderMedia } from "../lib/storageUrls.js";
@@ -176,10 +176,7 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
     if (!parsed.success) throw new ValidationError("Invalid status", parsed.error.errors);
     const { status: newStatus } = parsed.data;
 
-    const order = await prisma.order.findUnique({
-      where: { id: req.params.id },
-      include: { items: true },
-    });
+    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
     if (!order) throw new NotFoundError("Order", req.params.id!);
     assertPaymentSettled(order);
 
@@ -195,15 +192,15 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
 
     const updateData: any = { status: newStatus };
 
-    // Handle cancellation — restore stock
+    // Handle cancellation — restore stock. One shared compare-and-swap so this can't double-restore
+    // when it races the customer's own cancel, a seller reject, or the expiry sweeper. The transition
+    // table above already restricted which statuses get here, so CANCELLABLE_STATUSES isn't narrowed
+    // further — the CAS is about who wins, not what's legal. See services/subOrderFulfillment.ts.
     if (newStatus === "CANCELLED") {
-      await prisma.$transaction(async (tx) => {
-        for (const item of order.items) {
-          if (!item.variantId) continue;
-          await restoreConsumption(tx, { orderItemId: item.id });
-        }
-        await tx.order.update({ where: { id: order.id }, data: updateData });
-      });
+      const outcome = await cancelOrder(order.id, [order.status]);
+      if (outcome === "NOT_CANCELLABLE") {
+        throw new ValidationError("This order just changed status — reload the board and try again.");
+      }
     } else {
       // Handle delivery completion
       if (newStatus === "DELIVERED") {

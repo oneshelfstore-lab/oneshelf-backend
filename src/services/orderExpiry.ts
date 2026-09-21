@@ -2,7 +2,7 @@ import prisma from "../lib/prisma.js";
 import { refundWalletOnCancel } from "./referralRewards.js";
 import { reverseSellerLedgerOnCancel } from "./subOrderFulfillment.js";
 import { reconcileOrderPayment } from "./paymentReconciliation.js";
-import { restoreConsumption } from "./stockBatches.js";
+import { cancelOrderInTx } from "./subOrderFulfillment.js";
 import { recordOrderEvent } from "./orderEvents.js";
 
 // Online/UPI orders decrement stock at placement (to hold it during payment). If the
@@ -29,7 +29,7 @@ export async function expireStaleUnpaidOrders(): Promise<number> {
       razorpayPaymentId: null, // never verified a payment
       createdAt: { lt: cutoff },
     },
-    include: { items: true },
+    select: { id: true, razorpayOrderId: true },
   });
 
   let expired = 0;
@@ -52,15 +52,16 @@ export async function expireStaleUnpaidOrders(): Promise<number> {
           return;
         }
 
-        for (const item of order.items) {
-          if (!item.variantId) continue;
-          await restoreConsumption(tx, { orderItemId: item.id });
-        }
+        // The shared compare-and-swap does the status flip AND the stock restore, for exactly one
+        // caller — so a sweep that overlaps the customer tapping Cancel can't double-restore. This
+        // route re-read inside the transaction (which is why it was the one path already safe against
+        // itself), but that alone didn't protect it from the OTHER cancel paths.
+        // See services/subOrderFulfillment.ts.
+        if ((await cancelOrderInTx(tx, order.id, ["PLACED"])) !== "CANCELLED") return;
 
         await tx.order.update({
           where: { id: order.id },
           data: {
-            status: "CANCELLED",
             notes: `${fresh.notes ? fresh.notes + " " : ""}[auto-cancelled: payment not completed]`,
           },
         });

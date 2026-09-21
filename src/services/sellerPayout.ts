@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError } from "../lib/errors.js";
 import { quarterFor } from "./sellerTds194o.js";
@@ -18,69 +19,99 @@ export async function payoutSeller(
   if (!seller) throw new NotFoundError("Seller", sellerId);
   if (seller.isHouse) throw new ValidationError("The house store has no commission ledger to pay out.");
 
-  return prisma.$transaction(async (tx) => {
-    const unsettled = await tx.subOrder.findMany({
-      // Never pay for goods that were never delivered. Two filters, deliberately:
-      //   - the slice itself CANCELLED (seller rejected it),
-      //   - the parent ORDER cancelled, which also catches orders cancelled BEFORE the ledger
-      //     reversal existed — their slices were left active, so filtering on slice status alone
-      //     would keep paying them out and would need a data-repair pass instead.
-      // reverseSellerLedgerOnCancel / cancelSubOrderAndRefund back the accrual out of
-      // outstandingBalance at cancel time; this is what keeps the payout itself honest.
-      where: {
-        sellerId,
-        settled: false,
-        status: { not: "CANCELLED" },
-        order: { status: { not: "CANCELLED" } },
-      },
-      select: { id: true, subtotal: true, commissionAmount: true, tcsAmount: true, tdsAmount: true, netPayable: true },
-    });
-    if (unsettled.length === 0) throw new ValidationError("Nothing to pay out — no unsettled orders.");
+  return prisma.$transaction((tx) => payoutSellerInTx(tx, sellerId, seller, opts));
+}
 
-    const gross = +unsettled.reduce((s, o) => s + Number(o.subtotal), 0).toFixed(2);
-    const commission = +unsettled.reduce((s, o) => s + Number(o.commissionAmount), 0).toFixed(2);
-    const tcs = +unsettled.reduce((s, o) => s + Number(o.tcsAmount), 0).toFixed(2);
-    const tds = +unsettled.reduce((s, o) => s + Number(o.tdsAmount), 0).toFixed(2);
-    const net = +unsettled.reduce((s, o) => s + Number(o.netPayable), 0).toFixed(2);
-
-    const payout = await tx.sellerPayout.create({
-      data: {
-        sellerId, grossAmount: gross, commission, tcs, tds, netPaid: net,
-        mode: opts.mode ?? null, reference: opts.reference ?? null, note: opts.note ?? null,
-      },
-    });
-    await tx.subOrder.updateMany({ where: { id: { in: unsettled.map((o) => o.id) } }, data: { settled: true, payoutId: payout.id } });
-    await tx.seller.update({ where: { id: sellerId }, data: { outstandingBalance: { decrement: net } } });
-
-    // Feed the existing manual TDS register (routes/tdsRecords.ts) so a Sec 194-O withholding shows
-    // up alongside vendor/salary TDS instead of being invisible outside the SubOrder rows. One row
-    // per payout batch (not per SubOrder — a batch can cover many small orders, and the register is
-    // meant for quarter-level filing, not order-level noise). `tdsRate` here is the EFFECTIVE rate
-    // for this batch (tds / gross) — it can differ from StoreConfig.tds194oRatePct when the batch
-    // straddles the ₹5L threshold, so treat it as a derived figure for the register, not a legal rate.
-    if (tds > 0) {
-      const now = new Date();
-      await tx.tdsRecord.create({
-        data: {
-          deducteeType: "SELLER",
-          deducteeId: sellerId,
-          deducteeName: seller.name,
-          deducteePan: seller.pan,
-          section: "194O",
-          paymentDate: now,
-          paymentAmount: gross,
-          tdsRate: +((tds / gross) * 100).toFixed(2),
-          tdsAmount: tds,
-          depositedToGovt: false,
-          quarter: quarterFor(now),
-          financialYear: getCurrentFinancialYear(now),
-          returnFiled: false,
-        },
-      });
-    }
-
-    return { payout, count: unsettled.length };
+/**
+ * The ledger write itself, with the transaction injected.
+ *
+ * Split out from [payoutSeller] only so the exactly-once claim below can be exercised directly —
+ * every way it can be wrong moves real money and is silent on every screen.
+ */
+export async function payoutSellerInTx(
+  tx: Prisma.TransactionClient,
+  sellerId: string,
+  seller: { id: string; name: string; pan: string | null },
+  opts: { mode?: string | null; reference?: string | null; note?: string | null } = {},
+) {
+  const unsettled = await tx.subOrder.findMany({
+    // Never pay for goods that were never delivered. Two filters, deliberately:
+    //   - the slice itself CANCELLED (seller rejected it),
+    //   - the parent ORDER cancelled, which also catches orders cancelled BEFORE the ledger
+    //     reversal existed — their slices were left active, so filtering on slice status alone
+    //     would keep paying them out and would need a data-repair pass instead.
+    // reverseSellerLedgerOnCancel / cancelSubOrderAndRefund back the accrual out of
+    // outstandingBalance at cancel time; this is what keeps the payout itself honest.
+    where: {
+      sellerId,
+      settled: false,
+      status: { not: "CANCELLED" },
+      order: { status: { not: "CANCELLED" } },
+    },
+    select: { id: true, subtotal: true, commissionAmount: true, tcsAmount: true, tdsAmount: true, netPayable: true },
   });
+  if (unsettled.length === 0) throw new ValidationError("Nothing to pay out — no unsettled orders.");
+
+  const gross = +unsettled.reduce((s, o) => s + Number(o.subtotal), 0).toFixed(2);
+  const commission = +unsettled.reduce((s, o) => s + Number(o.commissionAmount), 0).toFixed(2);
+  const tcs = +unsettled.reduce((s, o) => s + Number(o.tcsAmount), 0).toFixed(2);
+  const tds = +unsettled.reduce((s, o) => s + Number(o.tdsAmount), 0).toFixed(2);
+  const net = +unsettled.reduce((s, o) => s + Number(o.netPayable), 0).toFixed(2);
+
+  const payout = await tx.sellerPayout.create({
+    data: {
+      sellerId, grossAmount: gross, commission, tcs, tds, netPaid: net,
+      mode: opts.mode ?? null, reference: opts.reference ?? null, note: opts.note ?? null,
+    },
+  });
+  // ⚠️ COMPARE-AND-SWAP — `settled: false` is what makes a payout exactly-once, and its absence is
+  // how one set of orders got paid twice. The read above is an MVCC snapshot, so two concurrent
+  // payouts for one seller (the owner tapping "Pay out" while the daily runAutoSellerPayouts cron is
+  // mid-run — or simply a retried cron ping) both saw the same unsettled list. Filtering the update
+  // on id ALONE meant the second one, once it unblocked on the first's row locks, re-matched every
+  // row and wrote them again, then decremented outstandingBalance a SECOND time: two SellerPayout
+  // rows for one set of orders, and the seller short by the payout amount.
+  //
+  // A short claim means someone else settled part of this set first, so the totals computed above are
+  // already wrong. Throwing rolls the whole payout back — the owner clicks again, or the cron picks it
+  // up next run. For money, a clean retryable error beats recording a partly-correct transfer.
+  const claimed = await tx.subOrder.updateMany({
+    where: { id: { in: unsettled.map((o) => o.id) }, settled: false },
+    data: { settled: true, payoutId: payout.id },
+  });
+  if (claimed.count !== unsettled.length) {
+    throw new ValidationError("Another payout just settled some of these orders — re-check the balance and try again.");
+  }
+  await tx.seller.update({ where: { id: sellerId }, data: { outstandingBalance: { decrement: net } } });
+
+  // Feed the existing manual TDS register (routes/tdsRecords.ts) so a Sec 194-O withholding shows
+  // up alongside vendor/salary TDS instead of being invisible outside the SubOrder rows. One row
+  // per payout batch (not per SubOrder — a batch can cover many small orders, and the register is
+  // meant for quarter-level filing, not order-level noise). `tdsRate` here is the EFFECTIVE rate
+  // for this batch (tds / gross) — it can differ from StoreConfig.tds194oRatePct when the batch
+  // straddles the ₹5L threshold, so treat it as a derived figure for the register, not a legal rate.
+  if (tds > 0) {
+    const now = new Date();
+    await tx.tdsRecord.create({
+      data: {
+        deducteeType: "SELLER",
+        deducteeId: sellerId,
+        deducteeName: seller.name,
+        deducteePan: seller.pan,
+        section: "194O",
+        paymentDate: now,
+        paymentAmount: gross,
+        tdsRate: +((tds / gross) * 100).toFixed(2),
+        tdsAmount: tds,
+        depositedToGovt: false,
+        quarter: quarterFor(now),
+        financialYear: getCurrentFinancialYear(now),
+        returnFiled: false,
+      },
+    });
+  }
+
+  return { payout, count: claimed.count };
 }
 
 // Auto-payout run: gated by StoreConfig.autoSellerPayoutEnabled (off by default — manual payout, as

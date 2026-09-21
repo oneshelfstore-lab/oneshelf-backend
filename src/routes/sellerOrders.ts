@@ -11,9 +11,8 @@ import { refundPayment } from "../services/razorpay.js";
 import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orderInvoice.js";
 import { generateInvoicePdf } from "../services/pdfGenerator.js";
 import { refundWalletOnCancel } from "../services/referralRewards.js";
-import { restoreConsumption } from "../services/stockBatches.js";
 import { shapeOrderMessage } from "../services/orderMessages.js";
-import { cancelSubOrderAndRefund, reverseSellerLedgerOnCancel } from "../services/subOrderFulfillment.js";
+import { cancelSubOrderAndRefund, reverseSellerLedgerOnCancel, cancelOrder, claimRefund } from "../services/subOrderFulfillment.js";
 import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 import { signStoragePath } from "../lib/storageUrls.js";
 import { recordOrderEventAsync } from "../services/orderEvents.js";
@@ -259,19 +258,24 @@ router.post("/:id/reject", async (req: SellerRequest, res: Response) => {
     const cancelWholeOrder =
       isLastActiveSeller && (sub.order.status === "PLACED" || sub.order.status === "CONFIRMED");
 
-    // Stock first — restoreConsumption needs the item rows, and it's the same either way.
-    await prisma.$transaction(async (tx) => {
-      for (const item of sub.items) {
-        if (!item.variantId) continue;
-        await restoreConsumption(tx, { orderItemId: item.id });
+    // ⚠️ Cancel the ORDER only, never the slice here: reverseSellerLedgerOnCancel (below) reverses
+    // exactly the slices it finds still active, so pre-cancelling this one would make it skip the
+    // rejecting seller and leave them accrued for the order they just refused.
+    //
+    // The whole-order branch goes through the shared compare-and-swap so a reject racing the
+    // customer's own cancel (or the expiry sweeper) can't restore the same stock twice — it flips the
+    // status and restores stock together, for exactly one caller. See services/subOrderFulfillment.ts.
+    if (cancelWholeOrder) {
+      const outcome = await cancelOrder(sub.order.id, [sub.order.status]);
+      if (outcome === "NOT_CANCELLABLE") {
+        throw new ValidationError("This order just changed status — refresh and try again.");
       }
-      if (cancelWholeOrder) {
-        // ⚠️ Cancel the ORDER only, never the slice here: reverseSellerLedgerOnCancel (below) reverses
-        // exactly the slices it finds still active, so pre-cancelling this one would make it skip the
-        // rejecting seller and leave them accrued for the order they just refused.
-        await tx.order.update({ where: { id: sub.order.id }, data: { status: "CANCELLED" } });
-      }
-    });
+      // ALREADY_CANCELLED ⇒ someone else cancelled it (and restored its stock) first; the slice
+      // reversal + complaint below still run so the rejection is recorded against this seller.
+    }
+    // Order survives ⇒ cancelSubOrderAndRefund (below) unwinds just this slice: it claims the slice,
+    // restores ITS stock, reverses the accrual and refunds — all inside one transaction, so a
+    // concurrent reject of the same slice can't double any of it.
 
     // Order survives ⇒ unwind just this slice: mark it CANCELLED, back its accrual out of the seller's
     // balance, refund the customer its share and drop the order's total by that much.
@@ -312,9 +316,15 @@ router.post("/:id/reject", async (req: SellerRequest, res: Response) => {
     if (cancelWholeOrder) {
       // Whole order is now cancelled — same refund/notify path as a customer-initiated cancel.
       bustUserSpend(sub.order.customerId);
-      if (sub.order.paymentStatus === "PAID" && sub.order.razorpayPaymentId) {
+      // claimRefund is the CAS that decides who calls the gateway — this path, the customer's own
+      // cancel and reconcileOrderPayment's orphan-capture refund could otherwise all read PAID and
+      // each fire a full refund. See services/subOrderFulfillment.ts.
+      if (
+        sub.order.paymentStatus === "PAID" &&
+        sub.order.razorpayPaymentId &&
+        (await claimRefund(sub.order.id, sub.order.razorpayPaymentId))
+      ) {
         try {
-          await prisma.order.update({ where: { id: sub.order.id }, data: { paymentStatus: "REFUND_INITIATED" } });
           await refundPayment(sub.order.razorpayPaymentId, Math.round(Number(sub.order.totalAmount) * 100));
           await prisma.order.update({ where: { id: sub.order.id }, data: { paymentStatus: "REFUNDED" } });
         } catch (refundErr) {

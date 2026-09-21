@@ -1,6 +1,7 @@
 import prisma from "../lib/prisma.js";
 import { fetchCapturedPaymentForOrder, isRazorpayConfigured, refundPayment } from "./razorpay.js";
 import { markOrderPaid } from "./orderPayment.js";
+import { claimRefund } from "./subOrderFulfillment.js";
 
 export interface ReconcileResult {
   orderId: string;
@@ -56,15 +57,26 @@ export async function reconcileOrderPayment(orderId: string): Promise<ReconcileR
   // Money WAS captured at Razorpay.
   if (order.status === "CANCELLED") {
     // Wrongly cancelled yet actually paid (a capture that landed after auto-cancel). Refund — never
-    // keep money for an order we won't fulfil. Skip if already in/through a refund state.
-    if (order.paymentStatus === "REFUND_INITIATED" || order.paymentStatus === "REFUNDED") {
-      return { orderId, paymentStatus: order.paymentStatus, changed: false };
+    // keep money for an order we won't fulfil.
+    //
+    // ⚠️ THE CLAIM IS THE GUARD, and it has to be. This used to read paymentStatus, check it was not
+    // already in a refund state, and then write REFUND_INITIATED with a plain `update` — which claims
+    // nothing. A customer or seller cancel winning its own claimRefund CAS in the window between that
+    // read and that write left BOTH callers believing they owned the refund, and both called the
+    // gateway. Routing every caller through the same compare-and-swap on PAID is what makes exactly
+    // one of them proceed. Losing is an ordinary outcome here, not an error: it means a cancel path
+    // already has this refund in hand.
+    if (!(await claimRefund(order.id, captured.id))) {
+      // Re-read rather than report the stale status from above — another path has moved it on by now,
+      // and this result is what the app's launch recovery and the expiry sweeper act on.
+      const fresh = await prisma.order.findUnique({
+        where: { id: order.id },
+        select: { paymentStatus: true },
+      });
+      return { orderId, paymentStatus: fresh?.paymentStatus ?? order.paymentStatus, changed: false };
     }
     try {
-      await prisma.order.update({
-        where: { id: order.id },
-        data: { paymentStatus: "REFUND_INITIATED", razorpayPaymentId: captured.id },
-      });
+      // ⚠️ Gateway call OUTSIDE any transaction — never hold row locks across a network call.
       await refundPayment(captured.id, captured.amount);
       await prisma.order.update({ where: { id: order.id }, data: { paymentStatus: "REFUNDED" } });
       return { orderId, paymentStatus: "REFUNDED", changed: true };

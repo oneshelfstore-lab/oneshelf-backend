@@ -22,7 +22,7 @@ import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 import { generateOrderInvoice, syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { generateInvoicePdf } from "../services/pdfGenerator.js";
 import { refundWalletOnCancel } from "../services/referralRewards.js";
-import { reverseSellerLedgerOnCancel } from "../services/subOrderFulfillment.js";
+import { reverseSellerLedgerOnCancel, cancelOrder, claimRefund } from "../services/subOrderFulfillment.js";
 import { markOrderPaid } from "../services/orderPayment.js";
 import { reconcileOrderPayment } from "../services/paymentReconciliation.js";
 import { generateOtp, orderRequiresOtp, OTP_VISIBLE_STATUSES } from "../lib/otp.js";
@@ -32,6 +32,7 @@ import { computeSubOrderTds194o } from "../services/sellerTds194o.js";
 import { haversineKm } from "../lib/distance.js";
 import { getRiderRoute } from "../services/riderRoute.js";
 import { recordOrderEventAsync } from "../services/orderEvents.js";
+import { redeemCouponInTx } from "../services/coupons.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -316,46 +317,9 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       // updateMany) to prevent over-redemption under concurrency; per-user cap is
       // checked against the redemption ledger, and a redemption row is written.
       //
-      // ⚠️ LOAD-BEARING ORDER — the coupon UPDATE below MUST stay above the per-user count, and
-      // must stay unconditional. The per-user check is a read-then-write (count, then create),
-      // which in isolation races: two concurrent checkouts would both read the pre-insert count
-      // and both redeem. What makes it safe is that the UPDATE takes a row-level exclusive lock on
-      // the coupon, held to commit — a second checkout on the SAME coupon blocks there, and under
-      // READ COMMITTED its later COUNT(*) takes a fresh snapshot that sees the first transaction's
-      // committed redemption row. So the lock, not a unique constraint, is the serialisation.
-      //
-      // Which means: reordering these statements, or skipping the increment on some path (e.g.
-      // "only bump usageCount when usageLimit is set"), silently reopens the race with no test
-      // failing. If this block ever needs restructuring, add @@unique([couponId, userId]) on
-      // CouponRedemption and catch P2002 instead — but check for existing duplicate rows first,
-      // since a perUserLimit > 1 coupon legitimately has several per user.
-      if (totals.couponCode) {
-        const coupon = await tx.coupon.findUnique({ where: { code: totals.couponCode } });
-        if (coupon) {
-          const bumped = await tx.coupon.updateMany({
-            where: coupon.usageLimit == null
-              ? { id: coupon.id }
-              : { id: coupon.id, usageCount: { lt: coupon.usageLimit } },
-            data: { usageCount: { increment: 1 } },
-          });
-          if (bumped.count === 0) {
-            throw new AppError(400, "COUPON_LIMIT", "This coupon has reached its usage limit.");
-          }
-
-          if (coupon.perUserLimit != null) {
-            const usedByUser = await tx.couponRedemption.count({
-              where: { couponId: coupon.id, userId },
-            });
-            if (usedByUser >= coupon.perUserLimit) {
-              throw new AppError(400, "COUPON_LIMIT", "You have already used this coupon the maximum number of times.");
-            }
-          }
-
-          await tx.couponRedemption.create({
-            data: { couponId: coupon.id, userId, orderId: created.id },
-          });
-        }
-      }
+      // One shared implementation with the food checkout — the statement order inside is
+      // load-bearing against a redemption race. See services/coupons.ts.
+      await redeemCouponInTx(tx, totals.couponCode, userId, created.id);
 
       // Debit store credit (payment tender). The guarded decrement is the double-spend defense — a
       // concurrent checkout can't spend the same balance twice (count === 0 ⇒ the balance changed
@@ -620,44 +584,40 @@ router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const order = await prisma.order.findFirst({
       where: { id: req.params.id, customerId: req.appUser!.id },
-      include: { items: true },
     });
     if (!order) throw new NotFoundError("Order", req.params.id!);
 
-    if (!["PLACED", "CONFIRMED"].includes(order.status)) {
+    // Compare-and-swap: flips the status and restores stock in one transaction, and only for the
+    // caller that actually wins the row. The status check used to live out here, which let a double
+    // tap (or a race with the expiry sweeper / a seller reject) restore the same stock twice.
+    // See services/subOrderFulfillment.ts.
+    const outcome = await cancelOrder(order.id);
+    if (outcome === "NOT_CANCELLABLE") {
       throw new ValidationError(`Cannot cancel order in '${order.status}' status. Only PLACED or CONFIRMED orders can be cancelled.`);
     }
+    if (outcome === "ALREADY_CANCELLED") {
+      // Their first tap got through and the reply was lost. The intent is satisfied, so this reads as
+      // success — reporting a failure here would send them looking for an order that IS cancelled.
+      // Everything below already ran for the winning call.
+      res.json({ success: true, message: "Order cancelled", data: { orderId: order.id, status: "CANCELLED" } });
+      return;
+    }
 
-    await prisma.$transaction(async (tx) => {
-      // Restore stock back into whichever batches each item actually drew from (a no-op for
-      // pre-migration items with no recorded consumption — nothing to restore, same as before).
-      for (const item of order.items) {
-        if (!item.variantId) continue;
-        await restoreConsumption(tx, { orderItemId: item.id });
-      }
-
-      await tx.order.update({
-        where: { id: order.id },
-        data: { status: "CANCELLED" },
-      });
-    });
-
-    // Refund any captured online payment. Best-effort: mark REFUND_INITIATED first,
-    // then call Razorpay; on success mark REFUNDED. A failure is logged and the order
-    // stays REFUND_INITIATED for manual follow-up (the cancellation itself stands).
+    // Refund any captured online payment. claimRefund is the CAS that decides who calls the gateway —
+    // without it, this path and reconcileOrderPayment's orphan-capture refund could both read
+    // paymentStatus PAID and both refund. The gateway call stays outside any transaction.
     if (order.paymentStatus === "PAID" && order.razorpayPaymentId) {
-      try {
-        await prisma.order.update({
-          where: { id: order.id },
-          data: { paymentStatus: "REFUND_INITIATED" },
-        });
-        await refundPayment(order.razorpayPaymentId, Math.round(Number(order.totalAmount) * 100));
-        await prisma.order.update({
-          where: { id: order.id },
-          data: { paymentStatus: "REFUNDED" },
-        });
-      } catch (refundErr) {
-        console.error("Refund failed for order", order.id, refundErr);
+      if (await claimRefund(order.id, order.razorpayPaymentId)) {
+        try {
+          await refundPayment(order.razorpayPaymentId, Math.round(Number(order.totalAmount) * 100));
+          await prisma.order.update({
+            where: { id: order.id },
+            data: { paymentStatus: "REFUNDED" },
+          });
+        } catch (refundErr) {
+          // Logged; the order stays REFUND_INITIATED for manual follow-up (the cancellation stands).
+          console.error("Refund failed for order", order.id, refundErr);
+        }
       }
     }
 
@@ -827,7 +787,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         include: {
           // variant.productId lets the app link a thumbnail straight to its product page —
           // OrderItem itself has no productId column, only variantId (same fix as GET /:id).
-          items: { select: { productName: true, quantity: true, unitPrice: true, mrp: true, lineTotal: true, imageUrl: true, isLoose: true, stepSize: true, stepUnit: true, packageUnit: true, hsnCode: true, gstRate: true, variantId: true, isFreeGift: true, variant: { select: { productId: true } } } },
+          items: { select: { productName: true, quantity: true, unitPrice: true, mrp: true, lineTotal: true, imageUrl: true, isLoose: true, stepSize: true, stepUnit: true, packageUnit: true, hsnCode: true, gstRate: true, variantId: true, isFreeGift: true, variant: { select: { productId: true } }, subOrder: { select: { seller: { select: { name: true, isHouse: true } } } } } },
         },
       }),
       prisma.order.count({ where: listWhere }),
@@ -851,7 +811,14 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
       orders.map((o) => ({
         ...o,
         deliveryOtp: otpByOrder.get(o.id) ?? null,
-        items: o.items.map((it) => ({ ...it, productId: it.variant?.productId ?? null })),
+        // Flatten the seller onto each item, matching GET /:id. A food order needs it so the list
+        // card can name the restaurant; grocery gets its "Sold by" attribution here for free.
+        items: o.items.map((it) => ({
+          ...it,
+          productId: it.variant?.productId ?? null,
+          sellerName: it.subOrder?.seller?.name ?? null,
+          sellerIsHouse: it.subOrder?.seller?.isHouse ?? null,
+        })),
       })),
     );
 
@@ -1019,7 +986,7 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     const userId = req.appUser!.id;
 
     const order = await prisma.order.findFirst({
-      where: { id: req.params.id, customerId: userId },
+      where: { id: String(req.params.id ?? ""), customerId: userId },
       include: {
         // Each item carries its seller (via the sub-order) so the app can show "Sold by <shop>"
         // and group the order by seller. Also its variant, so we can flatten the real productId

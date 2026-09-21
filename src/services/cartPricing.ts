@@ -4,6 +4,7 @@ import { getUserSpend365, resolveLoyaltyConfig } from "./loyalty.js";
 import { tierForSpend, nextTier } from "../data/loyaltyTiers.js";
 import { computeDistanceDelivery } from "./deliveryPricing.js";
 import { computeFreeGiftLines, type FreeGiftLine } from "./freeGifts.js";
+import { resolveCoupon } from "./coupons.js";
 
 function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
@@ -189,39 +190,10 @@ export async function calculateCartTotals(
     cartItems.map((i) => ({ variantId: i.variantId, quantity: i.quantity })),
   );
 
-  // Coupon
-  let discount = 0;
-  let appliedCoupon: string | null = null;
-
-  if (couponCode) {
-    const coupon = await prisma.coupon.findUnique({ where: { code: couponCode.toUpperCase() } });
-    if (coupon && coupon.isActive) {
-      const now = new Date();
-      const inRange = (!coupon.validFrom || coupon.validFrom <= now) &&
-        (!coupon.validUntil || coupon.validUntil >= now);
-      const meetsMin = subtotal >= Number(coupon.minOrder);
-      const underLimit = !coupon.usageLimit || coupon.usageCount < coupon.usageLimit;
-      // Per-user cap: how many times this customer has already redeemed it.
-      let underPerUser = true;
-      if (coupon.perUserLimit && userId) {
-        const usedByUser = await prisma.couponRedemption.count({
-          where: { couponId: coupon.id, userId },
-        });
-        underPerUser = usedByUser < coupon.perUserLimit;
-      }
-
-      if (inRange && meetsMin && underLimit && underPerUser) {
-        appliedCoupon = coupon.code;
-        if (coupon.couponType === "PERCENT") {
-          discount = round2(subtotal * Number(coupon.value) / 100);
-          if (coupon.maxDiscount) discount = Math.min(discount, Number(coupon.maxDiscount));
-        } else if (coupon.couponType === "FLAT") {
-          discount = Math.min(Number(coupon.value), subtotal);
-        }
-        // FREE_DELIVERY handled below
-      }
-    }
-  }
+  // Coupon — one implementation, shared with the food checkout (services/coupons.ts).
+  const resolved = await resolveCoupon(couponCode, subtotal, userId);
+  let discount = resolved.discount;
+  let appliedCoupon = resolved.code;
 
   // Loyalty tier perks (member free delivery + standing % member discount). One lightweight
   // aggregate query when a user is known; absent for anonymous quotes. Spend-based tier.
@@ -255,8 +227,8 @@ export async function calculateCartTotals(
   const storeConfig = await prisma.storeConfig.findFirst();
   const freeDeliveryAbove = storeConfig ? Number(storeConfig.freeDeliveryAbove) : 500;
   const minOrderValue = storeConfig ? Number(storeConfig.minOrderValue) : 0;
-  const isFreeDelivery = appliedCoupon &&
-    (await prisma.coupon.findUnique({ where: { code: appliedCoupon } }))?.couponType === "FREE_DELIVERY";
+  // Was a second findUnique for a row resolveCoupon had already read. Same value, one less query.
+  const isFreeDelivery = resolved.isFreeDelivery;
 
   const isPickup = fulfillmentType === "PICKUP";
   // Delivery only — a minimum basket exists to make the trip worth running, and there is no trip on a

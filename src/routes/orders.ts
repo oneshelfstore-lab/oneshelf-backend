@@ -422,6 +422,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
             await tx.seller.update({
               where: { id: sid },
               data: { outstandingBalance: { increment: netPayable } },
+              select: { id: true },
             });
           }
           // Notify whoever logs in to pack this slice — house co-manager included. The house

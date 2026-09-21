@@ -513,6 +513,7 @@ async function generateOrderFor(
             await tx.seller.update({
               where: { id: sellerId },
               data: { outstandingBalance: { increment: netPayable } },
+              select: { id: true },
             });
           }
         }

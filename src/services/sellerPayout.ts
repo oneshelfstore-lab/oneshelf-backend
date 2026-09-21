@@ -82,7 +82,11 @@ export async function payoutSellerInTx(
   if (claimed.count !== unsettled.length) {
     throw new ValidationError("Another payout just settled some of these orders — re-check the balance and try again.");
   }
-  await tx.seller.update({ where: { id: sellerId }, data: { outstandingBalance: { decrement: net } } });
+  await tx.seller.update({
+    where: { id: sellerId },
+    data: { outstandingBalance: { decrement: net } },
+    select: { id: true },
+  });
 
   // Feed the existing manual TDS register (routes/tdsRecords.ts) so a Sec 194-O withholding shows
   // up alongside vendor/salary TDS instead of being invisible outside the SubOrder rows. One row

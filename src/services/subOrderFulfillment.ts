@@ -331,6 +331,7 @@ export async function cancelSubOrderAndRefund(
       await tx.seller.update({
         where: { id: sub.sellerId },
         data: { outstandingBalance: { decrement: Number(sub.netPayable) } },
+        select: { id: true },
       });
     }
 
@@ -399,9 +400,14 @@ export async function reverseSellerLedgerOnCancel(orderId: string): Promise<void
         });
         if (flipped.count === 0) continue; // already reversed by another path
         if (s.seller.isHouse || s.settled) continue;
+        // select: only the id — this write's result is discarded, but without a select Prisma
+        // emits RETURNING for every column in the model, so a client that is even briefly ahead of
+        // the database (a schema edit not yet migrated) fails the whole transaction with P2022.
+        // That is exactly what silently rolled back scripts/repairLegacyAccrual.ts.
         await tx.seller.update({
           where: { id: s.sellerId },
           data: { outstandingBalance: { decrement: Number(s.netPayable) } },
+          select: { id: true },
         });
       }
     });

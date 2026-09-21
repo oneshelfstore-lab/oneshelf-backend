@@ -431,6 +431,7 @@ router.post("/orders", async (req: FirebaseAuthRequest, res: Response) => {
         await tx.seller.update({
           where: { id: p.restaurant.id },
           data: { outstandingBalance: { increment: netPayable } },
+          select: { id: true },
         });
       }
 

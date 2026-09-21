@@ -72,6 +72,83 @@ export async function resolvePayoutHoldDays(): Promise<number> {
   return Math.max(0, config?.payoutHoldDays ?? 0);
 }
 
+const r2 = (n: number): number => +n.toFixed(2);
+
+export interface PendingAdjustment {
+  id: string;
+  /** Signed. Negative recovers money from the seller, positive owes them more. */
+  amount: number;
+  reason: string;
+}
+
+export interface AbsorptionPlan {
+  /** Adjustment rows this payout claims. */
+  claimIds: string[];
+  /** The signed total actually applied to this payout. */
+  applied: number;
+  /**
+   * What a partially-absorbed clawback leaves behind. The claimed row is settled in full and this
+   * becomes a NEW unsettled row, so every row stays either fully settled or fully open — no
+   * part-settled state, and therefore no second column to keep in step.
+   */
+  carryForward: { fromId: string; amount: number; reason: string } | null;
+}
+
+/**
+ * Decide how much of a seller's outstanding adjustments this payout can absorb.
+ *
+ * ⚠️ A clawback can exceed the payout it lands on, and what happens then is the whole design
+ * question. Refusing the payout is the obvious answer and it is wrong: it strands the rest of the
+ * seller's money — possibly far more than the debt — until they happen to earn enough to cover it.
+ * So the payout absorbs what it can, floors at zero, and the unabsorbed remainder carries forward as
+ * a fresh adjustment.
+ *
+ * ⚠️ That flooring is not cosmetic. Without it a payout could compute a NEGATIVE netPaid, which is
+ * not a transfer at all — it is an invoice to the seller, wearing a payout's clothes.
+ *
+ * Credits are applied before debits, deliberately: a seller owed a correction should receive it in
+ * the same batch that recovers a clawback, not watch the clawback eat the batch while their credit
+ * waits for the next one.
+ */
+export function planAdjustmentAbsorption(
+  subOrderNet: number,
+  adjustments: PendingAdjustment[],
+): AbsorptionPlan {
+  const claimIds: string[] = [];
+  let applied = 0;
+  let available = subOrderNet;
+
+  // Credits first — they only ever increase what a debit can then be absorbed against.
+  for (const a of adjustments) {
+    if (a.amount <= 0) continue;
+    claimIds.push(a.id);
+    applied = r2(applied + a.amount);
+    available = r2(available + a.amount);
+  }
+
+  let carryForward: AbsorptionPlan["carryForward"] = null;
+  for (const a of adjustments) {
+    if (a.amount >= 0) continue;
+    if (available <= 0) break; // nothing left to recover against; the rest waits for the next payout
+    const owed = -a.amount;
+    const absorbed = Math.min(available, owed);
+    claimIds.push(a.id);
+    applied = r2(applied - absorbed);
+    available = r2(available - absorbed);
+    const remainder = r2(owed - absorbed);
+    if (remainder > 0) {
+      carryForward = {
+        fromId: a.id,
+        amount: -remainder,
+        reason: `Carried forward from an earlier clawback: ${a.reason}`,
+      };
+      break; // available is now 0, so nothing after this could be absorbed either
+    }
+  }
+
+  return { claimIds, applied, carryForward };
+}
+
 /**
  * The ledger write itself, with the transaction injected.
  *
@@ -98,7 +175,18 @@ export async function payoutSellerInTx(
     where: payableSubOrderWhere({ sellerId, payoutHoldDays, now: opts.now }),
     select: { id: true, subtotal: true, commissionAmount: true, tcsAmount: true, tdsAmount: true, netPayable: true },
   });
-  if (unsettled.length === 0) {
+  // Adjustments ride along with the sub-orders: a clawback on a slice cancelled after it was paid,
+  // or a correction owed to the seller. Oldest first, so a debt cannot be skipped by a newer one.
+  // Read BEFORE the empty check, because a seller with no payable orders but a correction owed to
+  // them still has something to be paid — and because the refusal below needs to know either way.
+  const pending = await tx.subOrderAdjustment.findMany({
+    where: { sellerId, settled: false },
+    orderBy: { createdAt: "asc" },
+    select: { id: true, amount: true, reason: true },
+  });
+  const pendingCredit = pending.some((a) => Number(a.amount) > 0);
+
+  if (unsettled.length === 0 && !pendingCredit) {
     // ⚠️ "Nothing to pay out" is now ambiguous in a way it never used to be: the owner's screen
     // shows outstandingBalance, which still counts everything accrued and unpaid INCLUDING orders
     // in flight. Without naming the held amount, a seller showing ₹693 owed and refusing to pay
@@ -123,11 +211,18 @@ export async function payoutSellerInTx(
   const commission = +unsettled.reduce((s, o) => s + Number(o.commissionAmount), 0).toFixed(2);
   const tcs = +unsettled.reduce((s, o) => s + Number(o.tcsAmount), 0).toFixed(2);
   const tds = +unsettled.reduce((s, o) => s + Number(o.tdsAmount), 0).toFixed(2);
-  const net = +unsettled.reduce((s, o) => s + Number(o.netPayable), 0).toFixed(2);
+  const subOrderNet = +unsettled.reduce((s, o) => s + Number(o.netPayable), 0).toFixed(2);
+
+  const plan = planAdjustmentAbsorption(
+    subOrderNet,
+    pending.map((a) => ({ id: a.id, amount: Number(a.amount), reason: a.reason })),
+  );
+  const net = r2(subOrderNet + plan.applied);
 
   const payout = await tx.sellerPayout.create({
     data: {
-      sellerId, grossAmount: gross, commission, tcs, tds, netPaid: net,
+      sellerId, grossAmount: gross, commission, tcs, tds,
+      adjustmentTotal: plan.applied, netPaid: net,
       mode: opts.mode ?? null, reference: opts.reference ?? null, note: opts.note ?? null,
     },
   });
@@ -149,6 +244,35 @@ export async function payoutSellerInTx(
   if (claimed.count !== unsettled.length) {
     throw new ValidationError("Another payout just settled some of these orders — re-check the balance and try again.");
   }
+  // Adjustments are claimed with the SAME compare-and-swap, for the same reason: without
+  // `settled: false` a concurrent payout re-matches them and recovers the same clawback twice.
+  if (plan.claimIds.length > 0) {
+    const claimedAdj = await tx.subOrderAdjustment.updateMany({
+      where: { id: { in: plan.claimIds }, settled: false },
+      data: { settled: true, payoutId: payout.id },
+    });
+    if (claimedAdj.count !== plan.claimIds.length) {
+      throw new ValidationError("Another payout just applied some of these adjustments — re-check the balance and try again.");
+    }
+  }
+  // A clawback bigger than this payout could absorb leaves a remainder. The claimed row above is
+  // settled in full and the remainder becomes a NEW open row, so every row is either fully settled
+  // or fully open — no part-settled state to keep in step with a second column.
+  if (plan.carryForward) {
+    await tx.subOrderAdjustment.create({
+      data: {
+        sellerId,
+        kind: "CLAWBACK",
+        amount: plan.carryForward.amount,
+        reason: plan.carryForward.reason,
+      },
+      select: { id: true },
+    });
+  }
+  // ⚠️ Decrements by `net`, which already nets the applied adjustments, NOT by subOrderNet.
+  // outstandingBalance is the sum of what is still unsettled — sub-orders plus adjustments — and a
+  // clawback lowered it when it was written. Decrementing the pre-adjustment figure here would take
+  // it down twice and underpay the seller by the clawback on their next payout.
   await tx.seller.update({
     where: { id: sellerId },
     data: { outstandingBalance: { decrement: net } },

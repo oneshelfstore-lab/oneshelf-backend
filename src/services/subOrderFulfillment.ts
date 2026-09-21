@@ -296,8 +296,9 @@ export async function cancelSubOrderAndRefund(
     walletApplied: Number(order.walletApplied),
   });
 
-  // Already paid out ⇒ the money has left; reversing the balance would just make the seller's next
-  // payout absorb it silently. Surfaced to the caller so it lands in the Complaint instead.
+  // Already paid out ⇒ the money has left, so the balance cannot simply be reversed. It becomes a
+  // SubOrderAdjustment instead (written inside the claim below), which the seller's next payout
+  // absorbs automatically. The flag is still returned so the Complaint can say what happened.
   const clawbackBlocked = sub.settled && !sub.seller.isHouse && Number(sub.netPayable) > 0;
 
   // ⚠️ The slice flip is a COMPARE-AND-SWAP, not a plain update, and it gates everything below it.
@@ -327,7 +328,22 @@ export async function cancelSubOrderAndRefund(
       await restoreConsumption(tx, { orderItemId: it.id });
     }
 
-    if (!sub.seller.isHouse && !sub.settled) {
+    // Unpaid ⇒ just back the accrual out. Already paid ⇒ the money has gone, so it becomes a debt
+    // the next payout recovers. Either way the seller's balance drops by the same amount, and it
+    // happens INSIDE the claim so a lost race cannot write a second clawback for the same slice.
+    if (!sub.seller.isHouse && Number(sub.netPayable) > 0) {
+      if (sub.settled) {
+        await tx.subOrderAdjustment.create({
+          data: {
+            sellerId: sub.sellerId,
+            subOrderId: sub.id,
+            kind: "CLAWBACK",
+            amount: -Number(sub.netPayable),
+            reason: `Seller rejected their items on order ${order.id} after being paid for them`,
+          },
+          select: { id: true },
+        });
+      }
       await tx.seller.update({
         where: { id: sub.sellerId },
         data: { outstandingBalance: { decrement: Number(sub.netPayable) } },
@@ -399,7 +415,23 @@ export async function reverseSellerLedgerOnCancel(orderId: string): Promise<void
           data: { status: "CANCELLED" },
         });
         if (flipped.count === 0) continue; // already reversed by another path
-        if (s.seller.isHouse || s.settled) continue;
+        if (s.seller.isHouse || Number(s.netPayable) <= 0) continue;
+        // ⚠️ A settled slice used to be SKIPPED here entirely — silently, with no warning anywhere,
+        // unlike the single-slice path which at least flagged it on a Complaint. The seller kept
+        // money for an order that was cancelled and nothing recorded that it had happened. It is a
+        // clawback now: a debt their next payout recovers automatically.
+        if (s.settled) {
+          await tx.subOrderAdjustment.create({
+            data: {
+              sellerId: s.sellerId,
+              subOrderId: s.id,
+              kind: "CLAWBACK",
+              amount: -Number(s.netPayable),
+              reason: `Order ${orderId} was cancelled after this seller had been paid for it`,
+            },
+            select: { id: true },
+          });
+        }
         // select: only the id — this write's result is discarded, but without a select Prisma
         // emits RETURNING for every column in the model, so a client that is even briefly ahead of
         // the database (a schema edit not yet migrated) fails the whole transaction with P2022.

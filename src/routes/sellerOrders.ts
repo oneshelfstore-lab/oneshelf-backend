@@ -296,7 +296,8 @@ router.post("/:id/reject", async (req: SellerRequest, res: Response) => {
           ? ` ⚠️ ₹${partial.storeCreditPortion.toFixed(2)} of it was paid with store credit — credit that back by hand.`
           : "") +
         (partial.clawbackBlocked
-          ? " ⚠️ This seller was already paid out for these items — recover it from their next payout."
+          ? " This seller had already been paid for these items, so the amount has been recorded" +
+            " against them and their next payout will recover it automatically."
           : "")
       : "";
     const complaint = await prisma.complaint.create({

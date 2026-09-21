@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { payoutSellerInTx, payableSubOrderWhere } from "../sellerPayout.js";
+import { payoutSellerInTx, payableSubOrderWhere, planAdjustmentAbsorption } from "../sellerPayout.js";
 
 /**
  * Pins the exactly-once claim in the seller payout.
@@ -18,9 +18,31 @@ const SUB = (id: string) => ({
   id, subtotal: 100, commissionAmount: 5, tcsAmount: 0, tdsAmount: 0, netPayable: 95,
 });
 
-function fakeTx(opts: { unsettled: string[]; claimedCount?: number; heldNet?: number; heldCount?: number }) {
+function fakeTx(opts: {
+  unsettled: string[];
+  claimedCount?: number;
+  heldNet?: number;
+  heldCount?: number;
+  adjustments?: { id: string; amount: number; reason: string }[];
+  adjClaimedCount?: number;
+}) {
   const calls: Call[] = [];
+  const adjustments = opts.adjustments ?? [];
   const tx = {
+    subOrderAdjustment: {
+      findMany: async (args: any) => {
+        calls.push({ op: "subOrderAdjustment.findMany", args });
+        return adjustments;
+      },
+      updateMany: async (args: any) => {
+        calls.push({ op: "subOrderAdjustment.updateMany", args });
+        return { count: opts.adjClaimedCount ?? args.where.id.in.length };
+      },
+      create: async (args: any) => {
+        calls.push({ op: "subOrderAdjustment.create", args });
+        return { id: "adj_new" };
+      },
+    },
     subOrder: {
       findMany: async (args: any) => {
         calls.push({ op: "subOrder.findMany", args });
@@ -171,5 +193,176 @@ describe("payableSubOrderWhere", () => {
   it("scopes to one seller only when asked, so the cron can sum across all of them", () => {
     expect(payableSubOrderWhere({ sellerId: "s1", payoutHoldDays: 0 }).sellerId).toBe("s1");
     expect(payableSubOrderWhere({ payoutHoldDays: 0 }).sellerId).toBeUndefined();
+  });
+});
+
+/**
+ * Absorbing adjustments into a payout. A clawback recovers money already paid to a seller, so every
+ * way this can be wrong moves real money in the wrong direction and shows up on no screen: absorb
+ * twice and the seller is underpaid; absorb nothing and the platform eats it; let the net go
+ * negative and a "payout" becomes an invoice to the seller wearing a payout's clothes.
+ */
+describe("planAdjustmentAbsorption", () => {
+  const debt = (id: string, amount: number, reason = "cancelled after payout") => ({ id, amount, reason });
+
+  it("does nothing when there is nothing to absorb", () => {
+    expect(planAdjustmentAbsorption(500, [])).toEqual({ claimIds: [], applied: 0, carryForward: null });
+  });
+
+  it("absorbs a clawback that fits, with nothing carried forward", () => {
+    const plan = planAdjustmentAbsorption(600, [debt("a", -500)]);
+    expect(plan.applied).toBe(-500);
+    expect(plan.claimIds).toEqual(["a"]);
+    expect(plan.carryForward).toBeNull();
+  });
+
+  // The case the whole design turns on. Refusing the payout here would strand the seller's 100
+  // over a 500 debt; letting it through unfloored would compute a NEGATIVE payout.
+  it("floors at zero and carries the remainder when the clawback is bigger than the payout", () => {
+    const plan = planAdjustmentAbsorption(100, [debt("a", -500)]);
+    expect(plan.applied).toBe(-100);
+    expect(plan.claimIds).toEqual(["a"]);
+    expect(plan.carryForward).toEqual({
+      fromId: "a",
+      amount: -400,
+      reason: expect.stringContaining("Carried forward"),
+    });
+  });
+
+  it("never lets the resulting payout go negative, whatever the debt", () => {
+    for (const [sub, owed] of [[0, -900], [1, -900], [100, -500], [499.99, -500]]) {
+      const plan = planAdjustmentAbsorption(sub!, [debt("a", owed!)]);
+      expect(sub! + plan.applied).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it("pays a credit even when there are no orders to pay for", () => {
+    const plan = planAdjustmentAbsorption(0, [{ id: "c", amount: 4.19, reason: "rate correction" }]);
+    expect(plan.applied).toBe(4.19);
+    expect(plan.claimIds).toEqual(["c"]);
+  });
+
+  // Credits first is deliberate: a seller owed a correction should get it in the same batch that
+  // recovers a debt, not watch the debt eat the batch while their credit waits for the next one.
+  it("applies credits before debts, so a credit widens what a debt can be absorbed against", () => {
+    const plan = planAdjustmentAbsorption(0, [debt("d", -50), { id: "c", amount: 50, reason: "correction" }]);
+    expect(plan.claimIds).toEqual(["c", "d"]);
+    expect(plan.applied).toBe(0);
+    expect(plan.carryForward).toBeNull();
+  });
+
+  it("leaves a debt it cannot touch completely alone rather than half-claiming it", () => {
+    const plan = planAdjustmentAbsorption(100, [debt("a", -100), debt("b", -200)]);
+    expect(plan.claimIds).toEqual(["a"]);
+    expect(plan.applied).toBe(-100);
+    expect(plan.carryForward).toBeNull();
+  });
+
+  it("carries forward at most once, since nothing can be absorbed after the payout hits zero", () => {
+    const plan = planAdjustmentAbsorption(50, [debt("a", -80), debt("b", -80)]);
+    expect(plan.claimIds).toEqual(["a"]);
+    expect(plan.carryForward?.amount).toBe(-30);
+  });
+
+  it("leaves no floating-point tail on a partial absorption", () => {
+    const plan = planAdjustmentAbsorption(33.33, [debt("a", -100)]);
+    expect(plan.applied).toBe(-33.33);
+    expect(plan.carryForward?.amount).toBe(-66.67);
+    expect(33.33 + plan.applied).toBe(0);
+  });
+});
+
+describe("payoutSellerInTx — adjustments", () => {
+  it("reduces the payout by the clawback and records it as its own line", async () => {
+    // 3 slices x 95 = 285 payable, less a 100 clawback.
+    const { tx, calls } = fakeTx({
+      unsettled: ["a", "b", "c"],
+      adjustments: [{ id: "adj1", amount: -100, reason: "cancelled after payout" }],
+    });
+
+    await payoutSellerInTx(tx as never, "s1", SELLER);
+
+    const row = calls.find((c) => c.op === "sellerPayout.create")!.args.data;
+    expect(row.netPaid).toBe(185);
+    // Recorded separately, not folded in — otherwise the row's own arithmetic stops closing.
+    expect(row.adjustmentTotal).toBe(-100);
+    expect(row.grossAmount - row.commission - row.tcs - row.tds + row.adjustmentTotal).toBe(row.netPaid);
+    // And the balance drops by the NET, not by the pre-adjustment figure — the clawback already
+    // took its share when it was written.
+    expect(calls.find((c) => c.op === "seller.update")!.args.data.outstandingBalance.decrement).toBe(185);
+  });
+
+  it("claims adjustments with settled: false, the same guard the sub-orders get", async () => {
+    const { tx, calls } = fakeTx({
+      unsettled: ["a"],
+      adjustments: [{ id: "adj1", amount: -10, reason: "x" }],
+    });
+
+    await payoutSellerInTx(tx as never, "s1", SELLER);
+
+    const claim = calls.find((c) => c.op === "subOrderAdjustment.updateMany")!.args;
+    expect(claim.where.settled).toBe(false);
+    expect(claim.where.id.in).toEqual(["adj1"]);
+    expect(claim.data.settled).toBe(true);
+  });
+
+  it("aborts without touching the balance when another payout claimed an adjustment first", async () => {
+    const { tx, calls } = fakeTx({
+      unsettled: ["a"],
+      adjustments: [{ id: "adj1", amount: -10, reason: "x" }],
+      adjClaimedCount: 0,
+    });
+
+    await expect(payoutSellerInTx(tx as never, "s1", SELLER)).rejects.toThrow(/another payout/i);
+    expect(calls.map((c) => c.op)).not.toContain("seller.update");
+  });
+
+  it("carries an oversized clawback forward instead of refusing the payout", async () => {
+    // 95 payable against a 500 debt: pay 0 now, carry 405, do NOT strand the seller's other money.
+    const { tx, calls } = fakeTx({
+      unsettled: ["a"],
+      adjustments: [{ id: "adj1", amount: -500, reason: "cancelled after payout" }],
+    });
+
+    await payoutSellerInTx(tx as never, "s1", SELLER);
+
+    expect(calls.find((c) => c.op === "sellerPayout.create")!.args.data.netPaid).toBe(0);
+    const carried = calls.find((c) => c.op === "subOrderAdjustment.create")!.args.data;
+    expect(carried.amount).toBe(-405);
+    expect(carried.kind).toBe("CLAWBACK");
+    expect(carried.settled).toBeUndefined(); // defaults open, so the next payout picks it up
+  });
+
+  it("writes no carry-forward row when the clawback was absorbed in full", async () => {
+    const { tx, calls } = fakeTx({
+      unsettled: ["a", "b"],
+      adjustments: [{ id: "adj1", amount: -50, reason: "x" }],
+    });
+
+    await payoutSellerInTx(tx as never, "s1", SELLER);
+
+    expect(calls.map((c) => c.op)).not.toContain("subOrderAdjustment.create");
+  });
+
+  it("pays a seller owed only a correction, with no orders at all", async () => {
+    const { tx, calls } = fakeTx({
+      unsettled: [],
+      adjustments: [{ id: "adj1", amount: 4.19, reason: "TCS rate correction" }],
+    });
+
+    await payoutSellerInTx(tx as never, "s1", SELLER);
+
+    expect(calls.find((c) => c.op === "sellerPayout.create")!.args.data.netPaid).toBe(4.19);
+  });
+
+  it("still refuses when the only thing outstanding is a debt", async () => {
+    // Nothing to recover it against. It waits rather than producing a negative transfer.
+    const { tx, calls } = fakeTx({
+      unsettled: [],
+      adjustments: [{ id: "adj1", amount: -100, reason: "x" }],
+    });
+
+    await expect(payoutSellerInTx(tx as never, "s1", SELLER)).rejects.toThrow();
+    expect(calls.map((c) => c.op)).not.toContain("sellerPayout.create");
   });
 });

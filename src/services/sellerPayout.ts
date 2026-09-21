@@ -3,6 +3,7 @@ import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError } from "../lib/errors.js";
 import { quarterFor } from "./sellerTds194o.js";
 import { getCurrentFinancialYear } from "./invoiceNumbering.js";
+import { ManualRail, resolvePayoutRail } from "./payoutRail.js";
 
 /**
  * Which sub-orders a seller may actually be PAID for, as one Prisma filter.
@@ -57,19 +58,52 @@ export async function payoutSeller(
 ) {
   const seller = await prisma.seller.findUnique({
     where: { id: sellerId },
-    select: { id: true, isHouse: true, name: true, pan: true },
+    select: { id: true, isHouse: true, name: true, pan: true, payoutAccountRef: true },
   });
   if (!seller) throw new NotFoundError("Seller", sellerId);
   if (seller.isHouse) throw new ValidationError("The house store has no commission ledger to pay out.");
 
-  const payoutHoldDays = await resolvePayoutHoldDays();
-  return prisma.$transaction((tx) => payoutSellerInTx(tx, sellerId, seller, { ...opts, payoutHoldDays }));
+  const { payoutHoldDays, payoutRail } = await resolvePayoutSettings();
+  const result = await prisma.$transaction((tx) =>
+    payoutSellerInTx(tx, sellerId, seller, { ...opts, payoutHoldDays }),
+  );
+
+  // ⚠️ OUTSIDE the transaction, always. A rail is a network call to somebody else's service, and
+  // holding row locks across one is the rule this codebase already follows for Razorpay refunds.
+  // ManualRail does nothing, so today this cannot fail — see payoutRail.ts for what a rail that
+  // genuinely sends would need before it can be added here.
+  const rail = resolvePayoutRail(payoutRail);
+  const sent = await rail.send({
+    payoutId: result.payout.id,
+    sellerId,
+    sellerName: seller.name,
+    amount: Number(result.payout.netPaid),
+    accountRef: seller.payoutAccountRef ?? null,
+  });
+  if (sent.reference) {
+    await prisma.sellerPayout.update({
+      where: { id: result.payout.id },
+      data: { reference: sent.reference },
+      select: { id: true },
+    });
+  }
+
+  return { ...result, rail: rail.name, railStatus: sent.status };
 }
 
-/** StoreConfig.payoutHoldDays, defaulting to 0 (payable on delivery) if there is no config row. */
-export async function resolvePayoutHoldDays(): Promise<number> {
-  const config = await prisma.storeConfig.findFirst({ select: { payoutHoldDays: true } });
-  return Math.max(0, config?.payoutHoldDays ?? 0);
+/**
+ * StoreConfig's payout knobs, in one read.
+ * payoutHoldDays defaults to 0 (payable on delivery); payoutRail defaults to the rail that moves
+ * no money, which is the safe answer when there is no config row to ask.
+ */
+export async function resolvePayoutSettings(): Promise<{ payoutHoldDays: number; payoutRail: string }> {
+  const config = await prisma.storeConfig.findFirst({
+    select: { payoutHoldDays: true, payoutRail: true },
+  });
+  return {
+    payoutHoldDays: Math.max(0, config?.payoutHoldDays ?? 0),
+    payoutRail: config?.payoutRail ?? ManualRail.name,
+  };
 }
 
 const r2 = (n: number): number => +n.toFixed(2);
@@ -317,11 +351,20 @@ export async function payoutSellerInTx(
 // point is to stop unpaid balances sitting indefinitely just because nobody remembered to click.
 export async function runAutoSellerPayouts(): Promise<{ paidCount: number; skipped: number }> {
   const config = await prisma.storeConfig.findFirst({
-    select: { autoSellerPayoutEnabled: true, autoSellerPayoutMinAmount: true, payoutHoldDays: true },
+    select: {
+      autoSellerPayoutEnabled: true,
+      autoSellerPayoutMinAmount: true,
+      payoutHoldDays: true,
+      payoutRail: true,
+    },
   });
   if (!config?.autoSellerPayoutEnabled) return { paidCount: 0, skipped: 0 };
   const minAmount = config.autoSellerPayoutMinAmount ?? 500;
   const payoutHoldDays = Math.max(0, config.payoutHoldDays ?? 0);
+  // The note used to hardcode "owner still transfers funds manually" — an answer to a question only
+  // the rail can answer. It comes from the rail now, so a rail that genuinely sends cannot leave a
+  // batch of payouts each claiming a human still has to move the money.
+  const rail = resolvePayoutRail(config.payoutRail);
 
   // ⚠️ Gated on the PAYABLE sum, not on Seller.outstandingBalance, and the distinction is new.
   // The two used to be the same number. Now that undelivered orders are held back, a seller can owe
@@ -349,7 +392,7 @@ export async function runAutoSellerPayouts(): Promise<{ paidCount: number; skipp
     try {
       // mode stays null here — it documents the TRANSFER method (bank/UPI/cash), which an automatic
       // run doesn't know; the note records that this was cron-triggered, not owner-clicked.
-      await payoutSeller(c.id, { note: "Automatic scheduled payout (owner still transfers funds manually)" });
+      await payoutSeller(c.id, { note: rail.unattendedNote });
       paidCount++;
     } catch {
       // A race (another payout just cleared it) or a genuinely-empty ledger — skip, never fail the cron.

@@ -176,6 +176,7 @@ router.post("/", requireRole(...FINANCE_ROLES) as any, async (req: Request, res:
       await tx.vendor.update({
         where: { id: vendor.id },
         data: { outstandingBalance: { increment: netPayable } },
+        select: { id: true },
       });
 
       return { ...created, lineItems };

@@ -290,6 +290,7 @@ router.delete("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request,
     await prisma.vendor.update({
       where: { id: req.params.id },
       data: { isActive: false },
+      select: { id: true },
     });
 
     res.json({ success: true, message: "Vendor deactivated" });

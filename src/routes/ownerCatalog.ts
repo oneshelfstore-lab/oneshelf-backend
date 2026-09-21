@@ -557,7 +557,11 @@ router.post("/:id/stock/receive", async (req: FirebaseAuthRequest, res: Response
           },
         });
         await receiveBatch(tx, variantId, converted.stock, converted.costPrice ?? 0, `Bill ${billNumber}${note ? ` — ${note}` : ""}`, line.id);
-        await tx.vendor.update({ where: { id: vendor.id }, data: { outstandingBalance: { increment: totals.totalAmount } } });
+        await tx.vendor.update({
+          where: { id: vendor.id },
+          data: { outstandingBalance: { increment: totals.totalAmount } },
+          select: { id: true },
+        });
       } else {
         await receiveBatch(tx, variantId, converted.stock, converted.costPrice ?? 0, note);
       }

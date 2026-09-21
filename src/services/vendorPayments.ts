@@ -63,10 +63,20 @@ export async function recordVendorPayment(
     },
   });
 
-  await tx.purchaseBill.update({ where: { id: billId }, data: { status: newStatus as any } });
+  // select: only the id on both — neither result is used, and without it Prisma emits RETURNING for
+  // every column in the model, so a client even briefly ahead of the deployed schema takes the whole
+  // transaction down with P2022. Same reasoning as the Seller balance writes in sellerPayout.ts and
+  // subOrderFulfillment.ts; this transaction moves a bill's status and a vendor's balance together,
+  // so hardening one and not the other would leave it just as fragile.
+  await tx.purchaseBill.update({
+    where: { id: billId },
+    data: { status: newStatus as any },
+    select: { id: true },
+  });
   await tx.vendor.update({
     where: { id: bill.vendorId },
     data: { outstandingBalance: { decrement: input.amount } },
+    select: { id: true },
   });
 
   return payment;

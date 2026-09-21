@@ -13,6 +13,7 @@ import { chargeSubscriptionMandate } from "./razorpay.js";
 import { consumeFifo, recordConsumption, type ConsumeResult } from "./stockBatches.js";
 import { AppError } from "../lib/errors.js";
 import { computeSubOrderTds194o } from "./sellerTds194o.js";
+import { computeSellerSplit } from "./sellerSplit.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Subscriptions engine (milk / newspaper / recurring deliveries).
@@ -485,24 +486,24 @@ async function generateOrderFor(
         });
         if (seller) {
           const subtotal = pricing.lineTotal;
-          const commissionPct = Number(seller.commissionPct);
-          const commissionAmount = +((subtotal * commissionPct) / 100).toFixed(2);
-          const tcsAmount = seller.isHouse ? 0 : +((pricing.taxableValue * TCS_RATE_PCT) / 100).toFixed(2);
           // Sec 194-O TDS — same discipline as routes/orders.ts. Off (0) unless StoreConfig.tds194oEnabled.
           const { tdsAmount } = await computeSubOrderTds194o(tx, seller, subtotal);
-          const netPayable = +(subtotal - commissionAmount - tcsAmount - tdsAmount).toFixed(2);
+          const split = computeSellerSplit({
+            subtotal,
+            taxableValue: pricing.taxableValue,
+            commissionPct: Number(seller.commissionPct),
+            tcsRatePct: TCS_RATE_PCT,
+            tdsAmount,
+            isHouse: seller.isHouse,
+          });
+          const { netPayable } = split;
 
           const subOrder = await tx.subOrder.create({
             data: {
               orderId: created.id,
               sellerId,
               status: "PACKED",
-              subtotal,
-              commissionPct,
-              commissionAmount,
-              tcsAmount,
-              tdsAmount,
-              netPayable,
+              ...split,
             },
           });
           await tx.orderItem.updateMany({

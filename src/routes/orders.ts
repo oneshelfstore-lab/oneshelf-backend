@@ -29,6 +29,7 @@ import { generateOtp, orderRequiresOtp, OTP_VISIBLE_STATUSES } from "../lib/otp.
 import { consumeFifo, recordConsumption, restoreConsumption, type ConsumeResult } from "../services/stockBatches.js";
 import { drawFreeGiftStock } from "../services/freeGifts.js";
 import { computeSubOrderTds194o } from "../services/sellerTds194o.js";
+import { sumSellerLines, computeSellerSplit } from "../services/sellerSplit.js";
 import { haversineKm } from "../lib/distance.js";
 import { getRiderRoute } from "../services/riderRoute.js";
 import { recordOrderEventAsync } from "../services/orderEvents.js";
@@ -385,32 +386,38 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         for (const [sid, sellerItems] of itemsBySeller) {
           const seller = sellerById.get(sid);
           if (!seller) continue;
-          const subtotal = +sellerItems.reduce((sum, it) => sum + Number(it.lineTotal), 0).toFixed(2);
-          const commissionPct = Number(seller.commissionPct);
-          const commissionAmount = +((subtotal * commissionPct) / 100).toFixed(2);
+          const { subtotal, taxableValue } = sumSellerLines(
+            sellerItems.map((it) => ({
+              lineTotal: Number(it.lineTotal),
+              taxableValue: Number(it.taxableValue),
+            })),
+          );
+          // Income Tax Sec 194-O TDS — off (0) unless StoreConfig.tds194oEnabled. Resolved here
+          // rather than inside computeSellerSplit because it needs a transaction for the
+          // financial-year cumulative. See services/sellerTds194o.ts for the rate/threshold/
+          // deduction-point discipline.
+          const { tdsAmount } = await computeSubOrderTds194o(tx, seller, subtotal);
           // ⚠️ GST/CA (Phase 6): as a GST e-commerce operator the platform collects Sec-52 TCS @ 1%
           // (0.5% CGST + 0.5% SGST) on the NET TAXABLE value of each EXTERNAL seller's supplies. The
           // house store is the platform's own catalog → no TCS on its own supplies. TCS is NOT charged
           // to the customer; it's withheld from the seller's payout and reported in GSTR-8. The TCS base
           // is the GST-exclusive taxable value (prices are GST-inclusive). Confirm the rate/base w/ CA.
-          const taxableValue = +sellerItems.reduce((sum, it) => sum + Number(it.taxableValue), 0).toFixed(2);
-          const tcsAmount = seller.isHouse ? 0 : +((taxableValue * TCS_RATE_PCT) / 100).toFixed(2);
-          // Income Tax Sec 194-O TDS — off (0) unless StoreConfig.tds194oEnabled. See
-          // services/sellerTds194o.ts for the rate/threshold/deduction-point discipline.
-          const { tdsAmount } = await computeSubOrderTds194o(tx, seller, subtotal);
-          const netPayable = +(subtotal - commissionAmount - tcsAmount - tdsAmount).toFixed(2);
+          const split = computeSellerSplit({
+            subtotal,
+            taxableValue,
+            commissionPct: Number(seller.commissionPct),
+            tcsRatePct: TCS_RATE_PCT,
+            tdsAmount,
+            isHouse: seller.isHouse,
+          });
+          const { netPayable } = split;
 
           const subOrder = await tx.subOrder.create({
             data: {
               orderId: created.id,
               sellerId: sid,
               status: "PLACED",
-              subtotal,
-              commissionPct,
-              commissionAmount,
-              tcsAmount,
-              tdsAmount,
-              netPayable,
+              ...split,
             },
           });
           await tx.orderItem.updateMany({

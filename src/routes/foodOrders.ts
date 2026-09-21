@@ -11,6 +11,7 @@ import { computeFoodOrderTotals, type FoodLineInput } from "../services/foodPric
 import { resolveCoupon, redeemCouponInTx } from "../services/coupons.js";
 import { computeDeliveryForOrigin } from "../services/deliveryPricing.js";
 import { computeSubOrderTds194o } from "../services/sellerTds194o.js";
+import { computeSellerSplit } from "../services/sellerSplit.js";
 import { getNextOrderNumber } from "../services/orderNumbering.js";
 import { generateOrderInvoice } from "../services/orderInvoice.js";
 import { notifyNewOrder, notifySubOrderNew } from "../services/fcmNotifier.js";
@@ -387,8 +388,9 @@ router.post("/orders", async (req: FirebaseAuthRequest, res: Response) => {
         });
       }
 
-      const commissionPct = p.restaurant.commissionPct;
-      const commissionAmount = +((p.totals.subtotal * commissionPct) / 100).toFixed(2);
+      // Income Tax Sec 194-O is a DIFFERENT statute (income tax on the seller's receipts) and is
+      // unaffected by the GST mechanism below, so it still applies to restaurants.
+      const { tdsAmount } = await computeSubOrderTds194o(tx, p.restaurant, p.totals.subtotal);
       // ⚠️⚠️ GST/CA — TCS IS DELIBERATELY ZERO ON FOOD, and this is the single most important line
       // in this file. A goods sub-order accrues Sec-52 TCS @1% because the platform merely COLLECTS
       // tax on someone else's supply. Restaurant service supplied through an e-commerce operator is
@@ -396,23 +398,24 @@ router.post("/orders", async (req: FirebaseAuthRequest, res: Response) => {
       // are alternatives, not additions, so charging TCS here would withhold from the restaurant for
       // a tax the platform is separately liable for. MULTIVERTICAL_PLAN.md §4.4. Confirm with the CA
       // BEFORE StoreConfig.foodEnabled is ever turned on.
-      const tcsAmount = 0;
-      // Income Tax Sec 194-O is a DIFFERENT statute (income tax on the seller's receipts) and is
-      // unaffected by the GST mechanism above, so it still applies to restaurants.
-      const { tdsAmount } = await computeSubOrderTds194o(tx, p.restaurant, p.totals.subtotal);
-      const netPayable = +(p.totals.subtotal - commissionAmount - tcsAmount - tdsAmount).toFixed(2);
+      // ⚠️ The zero is passed IN as a rate, deliberately. computeSellerSplit must never infer it
+      // from the vertical — the 9(5) reasoning has to stay readable at the site it applies to.
+      const split = computeSellerSplit({
+        subtotal: p.totals.subtotal,
+        taxableValue: p.totals.taxableValue,
+        commissionPct: p.restaurant.commissionPct,
+        tcsRatePct: 0,
+        tdsAmount,
+        isHouse: false, // a restaurant is always a third party; the house store has no menu
+      });
+      const { netPayable } = split;
 
       const subOrder = await tx.subOrder.create({
         data: {
           orderId: created.id,
           sellerId: p.restaurant.id,
           status: "PLACED",
-          subtotal: p.totals.subtotal,
-          commissionPct,
-          commissionAmount,
-          tcsAmount,
-          tdsAmount,
-          netPayable,
+          ...split,
         },
       });
       await tx.orderItem.updateMany({

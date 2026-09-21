@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { payoutSellerInTx } from "../sellerPayout.js";
+import { payoutSellerInTx, payableSubOrderWhere } from "../sellerPayout.js";
 
 /**
  * Pins the exactly-once claim in the seller payout.
@@ -18,7 +18,7 @@ const SUB = (id: string) => ({
   id, subtotal: 100, commissionAmount: 5, tcsAmount: 0, tdsAmount: 0, netPayable: 95,
 });
 
-function fakeTx(opts: { unsettled: string[]; claimedCount?: number }) {
+function fakeTx(opts: { unsettled: string[]; claimedCount?: number; heldNet?: number; heldCount?: number }) {
   const calls: Call[] = [];
   const tx = {
     subOrder: {
@@ -29,6 +29,12 @@ function fakeTx(opts: { unsettled: string[]; claimedCount?: number }) {
       updateMany: async (args: any) => {
         calls.push({ op: "subOrder.updateMany", args });
         return { count: opts.claimedCount ?? opts.unsettled.length };
+      },
+      // Only reached on the nothing-payable branch, to tell "you have no orders" apart from
+      // "your orders have not been delivered yet".
+      aggregate: async (args: any) => {
+        calls.push({ op: "subOrder.aggregate", args });
+        return { _sum: { netPayable: opts.heldNet ?? 0 }, _count: { _all: opts.heldCount ?? 0 } };
       },
     },
     sellerPayout: {
@@ -96,5 +102,74 @@ describe("payoutSellerInTx", () => {
 
     await expect(payoutSellerInTx(tx as never, "s1", SELLER)).rejects.toThrow(/nothing to pay out/i);
     expect(calls.map((c) => c.op)).not.toContain("sellerPayout.create");
+  });
+
+  // The guard below changes what "nothing to pay out" can mean: a seller may be owed real money and
+  // still have none of it payable. Saying only "nothing to pay out" against a screen showing ₹693
+  // owed reads as a broken button, so the refusal has to name the held amount.
+  it("names the held amount when money is owed but nothing has been delivered", async () => {
+    const { tx, calls } = fakeTx({ unsettled: [], heldNet: 693.72, heldCount: 4 });
+
+    await expect(payoutSellerInTx(tx as never, "s1", SELLER)).rejects.toThrow(/693\.72.*4 order/i);
+    expect(calls.map((c) => c.op)).not.toContain("sellerPayout.create");
+  });
+
+  it("mentions the hold window in that refusal only when one is configured", async () => {
+    const withHold = fakeTx({ unsettled: [], heldNet: 100, heldCount: 1 });
+    await expect(
+      payoutSellerInTx(withHold.tx as never, "s1", SELLER, { payoutHoldDays: 3 }),
+    ).rejects.toThrow(/3-day hold/i);
+
+    const noHold = fakeTx({ unsettled: [], heldNet: 100, heldCount: 1 });
+    await expect(payoutSellerInTx(noHold.tx as never, "s1", SELLER)).rejects.not.toThrow(/hold/i);
+  });
+
+  it("asks only for delivered slices", async () => {
+    const { tx, calls } = fakeTx({ unsettled: ["a"] });
+
+    await payoutSellerInTx(tx as never, "s1", SELLER);
+
+    const where = calls.find((c) => c.op === "subOrder.findMany")!.args.where;
+    expect(where.order.status).toBe("DELIVERED");
+    expect(where.settled).toBe(false);
+    expect(where.status).toEqual({ not: "CANCELLED" });
+  });
+});
+
+/**
+ * The filter itself. Every way it can be wrong is silent money: too loose pays a seller for goods
+ * still in a rider's bag, too strict strands a delivered order's payout forever.
+ */
+describe("payableSubOrderWhere", () => {
+  const NOW = new Date("2026-09-21T12:00:00.000Z");
+
+  it("requires the parent order to be DELIVERED", () => {
+    expect(payableSubOrderWhere({ payoutHoldDays: 0 }).order).toEqual({ status: "DELIVERED" });
+  });
+
+  it("still excludes a slice the seller rejected on an order others delivered", () => {
+    expect(payableSubOrderWhere({ payoutHoldDays: 0 }).status).toEqual({ not: "CANCELLED" });
+  });
+
+  it("adds NO deliveredAt condition when the hold is zero", () => {
+    // Load-bearing: a DELIVERED order with a null deliveredAt would otherwise be permanently
+    // unpayable the day someone sets a hold, and nothing enforces that column being populated.
+    const order = payableSubOrderWhere({ payoutHoldDays: 0, now: NOW }).order as any;
+    expect(order.deliveredAt).toBeUndefined();
+  });
+
+  it("holds back anything delivered inside the window", () => {
+    const order = payableSubOrderWhere({ payoutHoldDays: 3, now: NOW }).order as any;
+    expect(order.deliveredAt.lte).toEqual(new Date("2026-09-18T12:00:00.000Z"));
+  });
+
+  it("treats a negative hold as no hold rather than paying out the future", () => {
+    const order = payableSubOrderWhere({ payoutHoldDays: -5, now: NOW }).order as any;
+    expect(order.deliveredAt).toBeUndefined();
+  });
+
+  it("scopes to one seller only when asked, so the cron can sum across all of them", () => {
+    expect(payableSubOrderWhere({ sellerId: "s1", payoutHoldDays: 0 }).sellerId).toBe("s1");
+    expect(payableSubOrderWhere({ payoutHoldDays: 0 }).sellerId).toBeUndefined();
   });
 });

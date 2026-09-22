@@ -1,4 +1,5 @@
 import prisma from "../lib/prisma.js";
+import { splitInclusiveDeliveryFee } from "../data/deliveryTax.js";
 import { getNextOrderNumber } from "./orderNumbering.js";
 import { generateOrderInvoice } from "./orderInvoice.js";
 import { notifyNewOrder } from "./fcmNotifier.js";
@@ -30,6 +31,12 @@ export interface MaterializeResult {
  * lines never touch inventory. Never throws on the post-create steps (invoice/notify); a failure
  * there leaves a valid order behind.
  */
+/** Names the two columns once, so the spread at the create site cannot mistype either. */
+function splitQuoteDelivery(fee: number): { deliveryTaxable: number; deliveryGst: number } {
+  const { taxable, gst } = splitInclusiveDeliveryFee(fee);
+  return { deliveryTaxable: taxable, deliveryGst: gst };
+}
+
 export async function materializeQuoteOrder(quoteId: string): Promise<MaterializeResult | null> {
   const quote = await prisma.quoteRequest.findUnique({
     where: { id: quoteId },
@@ -140,6 +147,11 @@ export async function materializeQuoteOrder(quoteId: string): Promise<Materializ
         subtotal,
         discount: 0,
         deliveryCharge,
+        // Step 15, on the owner's quoted delivery figure. ⚠️ GST/CA: the bulk LINES still carry no
+        // per-line tax split (taxableValue 0 below) because the owner prices them by hand — that is
+        // a separate open question. The delivery half is unambiguous either way, so it is split
+        // here rather than waiting on it.
+        ...splitQuoteDelivery(deliveryCharge),
         taxableValue: 0, // owner-priced bulk lines carry no per-line GST split (⚠️ GST/CA: bulk invoice tax)
         totalTax: 0,
         totalAmount: total,

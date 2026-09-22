@@ -407,6 +407,12 @@ async function generateOrderFor(
           subtotal: pricing.subtotal,
           discount: 0,
           deliveryCharge: 0, // 🩹 subscription deliveries are free (D4)
+          // Step 15: zero, and that is the honest answer rather than a NULL. A subscription drop is
+          // never charged for separately, so delivery is bundled into the price of the goods — a
+          // composite supply with no separate delivery supply to value. "Split, came to nothing",
+          // not "never split".
+          deliveryTaxable: 0,
+          deliveryGst: 0,
           taxableValue: pricing.taxableValue,
           totalTax: pricing.totalTax,
           totalAmount: pricing.totalAmount,

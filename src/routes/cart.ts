@@ -75,7 +75,9 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     // Calculate totals for active items
     const totals = activeItems.length > 0
       ? await calculateCartTotals(activeItems as any)
-      : { subtotal: 0, discount: 0, couponCode: null, deliveryCharge: 0, taxableValue: 0, totalCgst: 0, totalSgst: 0, totalTax: 0, totalAmount: 0, distanceKm: null, outOfRange: false };
+      // An empty cart has no delivery supply at all, so the step-15 fields read 0/NONE rather
+      // than being absent — a client that asks for deliveryGst should never get undefined back.
+      : { subtotal: 0, discount: 0, couponCode: null, deliveryCharge: 0, deliveryTaxable: 0, deliveryGst: 0, deliverySupply: "NONE", taxableValue: 0, totalCgst: 0, totalSgst: 0, totalTax: 0, totalAmount: 0, distanceKm: null, outOfRange: false };
 
     res.json({
       success: true,
@@ -122,6 +124,7 @@ router.post("/quote", async (req: FirebaseAuthRequest, res: Response) => {
 
     const emptyTotals = {
       items: [], subtotal: 0, discount: 0, couponCode: null, deliveryCharge: 0,
+      deliveryTaxable: 0, deliveryGst: 0, deliverySupply: "NONE",
       taxableValue: 0, totalCgst: 0, totalSgst: 0, totalTax: 0, totalAmount: 0,
       walletApplied: 0, walletAvailable: 0, distanceKm: null, outOfRange: false,
     };

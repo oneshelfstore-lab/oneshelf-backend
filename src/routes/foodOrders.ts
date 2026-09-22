@@ -351,6 +351,10 @@ router.post("/orders", async (req: FirebaseAuthRequest, res: Response) => {
           discount: p.totals.discount,
           couponCode: p.totals.appliedCoupon,
           deliveryCharge: p.totals.deliveryCharge,
+          // Step 15 — the restaurant supplies the food, the platform supplies the trip from its
+          // kitchen to the door. Split inclusive, so the order total is unchanged.
+          deliveryTaxable: p.totals.deliveryTaxable,
+          deliveryGst: p.totals.deliveryGst,
           taxableValue: p.totals.taxableValue,
           totalTax: p.totals.totalTax,
           totalAmount: p.totals.totalAmount,

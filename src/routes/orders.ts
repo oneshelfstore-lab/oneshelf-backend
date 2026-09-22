@@ -250,6 +250,11 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           // (subtotal − discount + delivery = total). savedAmount tracks the full breakdown.
           discount: totals.discount + totals.loyaltyDiscount + totals.bogoDiscount,
           deliveryCharge: totals.deliveryCharge,
+          // Step 15. INCLUSIVE, so these two sum to deliveryCharge exactly and totalAmount above is
+          // untouched — the customer pays what they always paid; the platform now declares the GST
+          // inside it. Written on every new order, so a NULL here means the order predates step 15.
+          deliveryTaxable: totals.deliveryTaxable,
+          deliveryGst: totals.deliveryGst,
           taxableValue: totals.taxableValue,
           totalTax: totals.totalTax,
           totalAmount: totals.totalAmount,

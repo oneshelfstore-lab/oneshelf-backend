@@ -1,4 +1,8 @@
 import prisma from "../lib/prisma.js";
+import {
+  splitInclusiveDeliveryFee,
+  type DeliverySupplyKind,
+} from "../data/deliveryTax.js";
 import { toAppFormat } from "../utils/looseUnitConverter.js";
 import { getUserSpend365, resolveLoyaltyConfig } from "./loyalty.js";
 import { tierForSpend, nextTier } from "../data/loyaltyTiers.js";
@@ -48,6 +52,19 @@ export interface CartTotals {
   discount: number;
   couponCode: string | null;
   deliveryCharge: number;
+  /**
+   * The delivery fee split into its own taxable value and the GST inside it (runbook step 15).
+   * INCLUSIVE: these two always sum to exactly `deliveryCharge`, so the customer's total never
+   * moves — only the account of what the fee is made of changes.
+   *
+   * ⚠️ Deliberately NOT added into `taxableValue`/`totalTax` below. Those are the GOODS totals,
+   * and the goods are the seller's supply while delivery is the PLATFORM's — two identities, two
+   * returns. Folding them together is precisely the mixing step 13 exists to prevent.
+   */
+  deliveryTaxable: number;
+  deliveryGst: number;
+  /** Whether a delivery service was supplied at all, and if so whether it was paid for. */
+  deliverySupply: DeliverySupplyKind;
   taxableValue: number;
   totalCgst: number;
   totalSgst: number;
@@ -287,6 +304,29 @@ export async function calculateCartTotals(
       ? standardDelivery
       : 0;
 
+  // ── Delivery GST (step 15) ─────────────────────────────────────────────────────────────────
+  //
+  // Three outcomes, and the two that are ₹0 are NOT the same event — this is the step-15 Watch, and
+  // the reason they get separate branches rather than one `deliveryCharge === 0`:
+  //
+  //   CHARGED  a fee was charged, so a supply happened for consideration. Split it.
+  //   WAIVED   a fee was PRICED (the basket is under the free-delivery threshold, the trip is real,
+  //            the fee would have been charged) and then given away by a FREE_DELIVERY coupon or a
+  //            member tier perk. The supply occurred; a discount recorded at the time of supply
+  //            takes its value to nil. Zero tax, but a document with a line on it.
+  //   NONE     no separate consideration was ever sought — pickup, a basket over the threshold, or
+  //            a store that never charges. Delivery is bundled into the price of the goods, a
+  //            composite supply, so there is no separate delivery supply to value or invoice.
+  //
+  // Collapsing WAIVED into NONE would make step 16 skip a document for a supply that happened;
+  // collapsing NONE into WAIVED would make it issue one for a supply that did not.
+  const deliveryWasPricedThenGivenAway =
+    !isPickup && !noDeliveryCharge && deliveryCharge === 0 && standardDelivery > 0 &&
+    deliveryEligibleSubtotal < freeDeliveryAbove && (isFreeDelivery || tierFreeDelivery);
+  const deliverySupply: DeliverySupplyKind =
+    deliveryCharge > 0 ? "CHARGED" : deliveryWasPricedThenGivenAway ? "WAIVED" : "NONE";
+  const deliverySplit = splitInclusiveDeliveryFee(deliveryCharge);
+
   const afterDiscount = round2(subtotal - discount - loyaltyDiscount - bogoDiscount);
 
   // Recalculate totals
@@ -329,6 +369,9 @@ export async function calculateCartTotals(
     discount,
     couponCode: appliedCoupon,
     deliveryCharge,
+    deliveryTaxable: deliverySplit.taxable,
+    deliveryGst: deliverySplit.gst,
+    deliverySupply,
     taxableValue: totalTaxable,
     totalCgst,
     totalSgst,

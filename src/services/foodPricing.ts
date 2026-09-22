@@ -5,6 +5,8 @@
 // OUT of the price (taxable = gross ÷ (1 + rate)), never added on top. Getting this backwards
 // silently overcharges every customer by the GST rate and the totals still look self-consistent.
 
+import { splitInclusiveDeliveryFee, type DeliverySupplyKind } from "../data/deliveryTax.js";
+
 export interface FoodLineInput {
   menuItemId: string;
   name: string;
@@ -29,6 +31,17 @@ export interface FoodOrderTotals {
   taxableValue: number;
   totalTax: number;
   deliveryCharge: number;
+  /**
+   * Step 15, the same INCLUSIVE split as the grocery path: these sum to deliveryCharge exactly.
+   *
+   * Food delivery is always either CHARGED or absent — there is no free-delivery threshold and no
+   * coupon can reach the fee (the discount below is clamped to the food subtotal precisely because
+   * the rider is paid for that trip either way), so the WAIVED case the grocery path has to
+   * distinguish cannot arise here.
+   */
+  deliveryTaxable: number;
+  deliveryGst: number;
+  deliverySupply: DeliverySupplyKind;
   /** Platform-funded coupon discount. 0 when none applied. */
   discount: number;
   appliedCoupon: string | null;
@@ -88,6 +101,7 @@ export function computeFoodOrderTotals(
   const taxableValue = round2(priced.reduce((s, l) => s + l.taxableValue, 0));
   const totalTax = round2(subtotal - taxableValue);
   const delivery = round2(deliveryCharge);
+  const deliverySplit = splitInclusiveDeliveryFee(delivery);
   // Clamped to the food subtotal: a coupon must never eat the delivery fee (the rider is paid for
   // that trip either way) and can never drive the order negative.
   const discount = round2(Math.min(Math.max(0, discountInput), subtotal));
@@ -97,6 +111,9 @@ export function computeFoodOrderTotals(
     taxableValue,
     totalTax,
     deliveryCharge: delivery,
+    deliveryTaxable: deliverySplit.taxable,
+    deliveryGst: deliverySplit.gst,
+    deliverySupply: delivery > 0 ? "CHARGED" : "NONE",
     discount,
     appliedCoupon: discount > 0 ? appliedCoupon : null,
     totalAmount: round2(subtotal - discount + delivery),

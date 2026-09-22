@@ -873,16 +873,27 @@ export async function getGstHealth(period: string) {
  */
 export async function getSellerTcs(sellerId: string, period: string) {
   const { from, to } = periodToDateRange(period);
-  const agg = await prisma.subOrder.aggregate({
+  // Grouped by the rate each row was written at rather than aggregated flat, so the statement can
+  // say which rate applied instead of asserting today's constant over history. Normally one group.
+  const groups = await prisma.subOrder.groupBy({
+    by: ["tcsRatePct"],
     where: {
       sellerId,
       createdAt: { gte: from, lte: to },
       tcsAmount: { gt: 0 },
       order: { is: { status: { not: "CANCELLED" } } },
     },
-    _sum: { subtotal: true, tcsAmount: true },
+    _sum: { subtotal: true, tcsAmount: true, taxableValue: true },
     _count: true,
   });
+  const agg = {
+    _count: groups.reduce((t, g) => t + g._count, 0),
+    _sum: {
+      subtotal: groups.reduce((t, g) => t + num(g._sum.subtotal), 0),
+      tcsAmount: groups.reduce((t, g) => t + num(g._sum.tcsAmount), 0),
+      taxableValue: groups.reduce((t, g) => t + num(g._sum.taxableValue), 0),
+    },
+  };
   const seller = await prisma.seller.findUnique({
     where: { id: sellerId },
     select: { name: true, gstin: true, pan: true },
@@ -894,10 +905,14 @@ export async function getSellerTcs(sellerId: string, period: string) {
     sellerName: seller?.name ?? "",
     gstin: seller?.gstin ?? null,
     pan: seller?.pan ?? null,
-    tcsRatePct: TCS_RATE_PCT,
+    // The rate(s) these rows were actually written at — read from the row, never assumed from the
+    // constant. Dividing tcsAmount by today's rate would double every pre-0.5% row's liable value.
+    tcsRatePct: groups.length === 1 ? Number(groups[0]!.tcsRatePct ?? TCS_RATE_PCT) : TCS_RATE_PCT,
+    ratesApplied: groups.map((g) => Number(g.tcsRatePct ?? TCS_RATE_PCT)).sort((x, y) => x - y),
     orderCount: agg._count,
-    grossSupplies: money(num(agg._sum.subtotal)),
-    netLiableValue: money(tcs / (TCS_RATE_PCT / 100)),
+    grossSupplies: money(agg._sum.subtotal),
+    // The base TCS was charged on, as stored at placement.
+    netLiableValue: money(agg._sum.taxableValue),
     tcsCgst: half,
     tcsSgst: half,
     tcsTotal: money(tcs),

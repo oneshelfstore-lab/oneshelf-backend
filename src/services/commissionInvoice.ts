@@ -1,4 +1,5 @@
 import prisma from "../lib/prisma.js";
+import { houseSellerIsSeparateEntity, isSameLegalEntity } from "./entitySplit.js";
 import { getNextInvoiceNumber } from "./invoiceNumbering.js";
 import { convertAmountToWords, round2, CURRENT_TAX_RULE_VERSION } from "./taxEngine.js";
 import { resolveStoreState, stateCodeFromGstin } from "../lib/stateCodes.js";
@@ -124,11 +125,8 @@ export async function generateCommissionInvoice(
   // platform invoicing itself: one legal entity, one GSTIN, a supply to nobody. That changes the
   // day StoreConfig.houseSellerIsSeparateEntity is turned on (step 23), which is exactly why the
   // test is on that flag rather than on isHouse alone.
-  if (seller.isHouse) {
-    const cfg = await prisma.storeConfig.findFirst({ select: { houseSellerIsSeparateEntity: true } });
-    if (!cfg?.houseSellerIsSeparateEntity) {
-      return { ...base, skipped: "house seller - the platform and the shop are one entity" };
-    }
+  if (isSameLegalEntity(seller, await houseSellerIsSeparateEntity())) {
+    return { ...base, skipped: "house seller - the platform and the shop are one entity" };
   }
 
   const key = `${sellerId}:${period}`;

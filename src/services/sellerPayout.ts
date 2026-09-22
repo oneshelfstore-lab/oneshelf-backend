@@ -1,4 +1,5 @@
 import type { Prisma } from "@prisma/client";
+import { houseSellerIsSeparateEntity, isSameLegalEntity } from "./entitySplit.js";
 import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError } from "../lib/errors.js";
 import { quarterFor } from "./sellerTds194o.js";
@@ -61,7 +62,11 @@ export async function payoutSeller(
     select: { id: true, isHouse: true, name: true, pan: true, payoutAccountRef: true },
   });
   if (!seller) throw new NotFoundError("Seller", sellerId);
-  if (seller.isHouse) throw new ValidationError("The house store has no commission ledger to pay out.");
+  // Step 09. The platform cannot pay itself. Once the shop is a separate legal entity it has a real
+  // ledger and this guard has to let it through, so the test is on the flag, not on isHouse alone.
+  if (isSameLegalEntity(seller, await houseSellerIsSeparateEntity())) {
+    throw new ValidationError("The house store has no commission ledger to pay out.");
+  }
 
   const { payoutHoldDays, payoutRail } = await resolvePayoutSettings();
   const result = await prisma.$transaction((tx) =>
@@ -381,8 +386,16 @@ export async function runAutoSellerPayouts(): Promise<{ paidCount: number; skipp
   );
   if (overMinimum.size === 0) return { paidCount: 0, skipped: 0 };
 
+  // Step 09: the house store joins the auto-payout pool only once it is a separate entity. Until
+  // then it has no payable ledger, and payoutSeller would refuse it once per cron run anyway.
+  const houseIsSeparate = await houseSellerIsSeparateEntity();
   const candidates = await prisma.seller.findMany({
-    where: { isHouse: false, isActive: true, status: "APPROVED", id: { in: [...overMinimum] } },
+    where: {
+      ...(houseIsSeparate ? {} : { isHouse: false }),
+      isActive: true,
+      status: "APPROVED",
+      id: { in: [...overMinimum] },
+    },
     select: { id: true },
   });
 

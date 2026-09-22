@@ -1,16 +1,22 @@
 /**
- * STEP 02 PROOF — replay every SubOrder ever written through the extracted pure function and
- * compare, field by field, against what is actually stored. Performs NO writes.
+ * Replay every SubOrder ever written through the pure split and compare, field by field, against
+ * what is actually stored. Performs NO writes.
  *
- * The runbook asks for "a placed test order produces identical SubOrder values to before". This is
- * the stronger version of that check: instead of one new order, it re-derives all 391 orders' worth
- * of slices from their own order items and fails if a single paise of commission, TCS or net payable
- * comes out different. If the extraction drifted anywhere, this finds it.
+ * Written for runbook step 02 ("a placed test order produces identical SubOrder values to before")
+ * as the stronger version of that check: instead of one new order, it re-derives every live slice
+ * from its own order items and fails if a single paise of commission, TCS or net payable comes out
+ * different.
  *
- * The inputs are taken from the row's OWN snapshot (commissionPct, tdsAmount) rather than from the
- * seller's current record, because a seller's rate can have changed since the order was placed —
- * comparing against today's rate would report a false mismatch on a row that was correct when it
- * was written.
+ * ⚠️ IT REPLAYS THE REAL LINES, one at a time, and that is what makes it step 08's prove too.
+ * Commission is now resolved per line and the rounded line amounts are summed, where it used to be
+ * one rate times one subtotal. Those two can differ by a paise on some inputs. Collapsing the slice
+ * into a single synthetic line — which this script used to do — would hide exactly that difference.
+ *
+ * ⚠️ The rates come from the row's OWN snapshot (commissionPct, tcsRatePct, tdsAmount), never from
+ * the seller's current record or from today's constant. A seller's rate can have changed since the
+ * order was placed, and the statutory TCS rate has; comparing against today's numbers would report
+ * a false mismatch on a row that was perfectly correct when it was written. It is also why this
+ * check stays green across scripts/repairTcsRate.ts — it reads whatever rate each row now carries.
  *
  * Run: railway run --service Postgres bash -c 'DATABASE_URL="$DATABASE_PUBLIC_URL" npx tsx scripts/replaySellerSplit.ts'
  */
@@ -21,84 +27,83 @@ const prisma = new PrismaClient({
   datasources: { db: { url: process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL } },
 });
 
-/** The rate each path used at placement. Food is 0 under Sec 9(5); goods are still on the old 1%. */
-const TCS_RATE_GOODS = 1;
-const TCS_RATE_FOOD = 0;
-
-type Row = {
-  id: string;
-  orderNumber: string;
-  sellerName: string;
-  vertical: string;
-  isHouse: boolean;
-  subtotal: string;
-  commissionPct: string;
-  commissionAmount: string;
-  tcsAmount: string;
-  tdsAmount: string;
-  netPayable: string;
-  itemsGross: string;
-  itemsTaxable: string;
-  nItems: number;
-};
-
 async function main() {
-  const rows = await prisma.$queryRaw<Row[]>`
-    SELECT s.id,
-           o."orderNumber"        AS "orderNumber",
-           sel.name               AS "sellerName",
-           sel.vertical,
-           sel."isHouse",
-           s.subtotal, s."commissionPct", s."commissionAmount",
-           s."tcsAmount", s."tdsAmount", s."netPayable",
-           (SELECT coalesce(sum(i."lineTotal"), 0)     FROM "OrderItem" i WHERE i."subOrderId" = s.id) AS "itemsGross",
-           (SELECT coalesce(sum(i."taxableValue"), 0)  FROM "OrderItem" i WHERE i."subOrderId" = s.id) AS "itemsTaxable",
-           (SELECT count(*)::int                       FROM "OrderItem" i WHERE i."subOrderId" = s.id) AS "nItems"
-    FROM "SubOrder" s
-    JOIN "Order"  o   ON o.id  = s."orderId"
-    JOIN "Seller" sel ON sel.id = s."sellerId"
-    ORDER BY o."orderNumber"`;
+  const slices = await prisma.subOrder.findMany({
+    select: {
+      id: true,
+      subtotal: true,
+      commissionPct: true,
+      commissionAmount: true,
+      tcsAmount: true,
+      tcsRatePct: true,
+      tdsAmount: true,
+      netPayable: true,
+      order: { select: { orderNumber: true } },
+      seller: { select: { name: true, vertical: true, isHouse: true } },
+      items: {
+        select: {
+          lineTotal: true,
+          taxableValue: true,
+          variant: { select: { product: { select: { commissionPctOverride: true } } } },
+        },
+      },
+    },
+    orderBy: { createdAt: "asc" },
+  });
 
-  console.log(`Replaying ${rows.length} sub-orders through computeSellerSplit…\n`);
+  console.log(`Replaying ${slices.length} sub-orders through sumSellerLines + computeSellerSplit...\n`);
 
   const mismatches: string[] = [];
   let orphaned = 0;
   let checked = 0;
+  let multiLine = 0;
 
-  for (const r of rows) {
+  for (const s of slices) {
     // A slice whose items were never linked back (subOrderId null) has nothing to re-derive from.
-    if (r.nItems === 0) {
-      orphaned++;
-      continue;
-    }
+    if (s.items.length === 0) { orphaned++; continue; }
     checked++;
+    if (s.items.length > 1) multiLine++;
 
-    const isFood = r.vertical === "FOOD";
+    const isFood = s.seller.vertical === "FOOD";
     const stored = {
-      subtotal: Number(r.subtotal),
-      commissionAmount: Number(r.commissionAmount),
-      tcsAmount: Number(r.tcsAmount),
-      netPayable: Number(r.netPayable),
+      subtotal: Number(s.subtotal),
+      commissionAmount: Number(s.commissionAmount),
+      tcsAmount: Number(s.tcsAmount),
+      netPayable: Number(s.netPayable),
     };
 
-    // Re-derive the sums from the order items, exactly as placement does.
-    const summed = sumSellerLines([
-      { lineTotal: Number(r.itemsGross), taxableValue: Number(r.itemsTaxable) },
-    ]);
+    const lines = s.items.map((i) => ({
+      lineTotal: Number(i.lineTotal),
+      taxableValue: Number(i.taxableValue),
+      commissionPctOverride:
+        i.variant?.product.commissionPctOverride == null
+          ? null
+          : Number(i.variant.product.commissionPctOverride),
+    }));
+
+    // Food takes its subtotal from its own priced totals, not from a line sum, so its slice is
+    // replayed as one line at the stored subtotal — exactly as routes/foodOrders.ts does it.
+    const summed = isFood
+      ? sumSellerLines(
+          [{ lineTotal: stored.subtotal, taxableValue: Number(s.items.reduce((t, i) => t + Number(i.taxableValue), 0).toFixed(2)) }],
+          Number(s.commissionPct),
+        )
+      : sumSellerLines(lines, Number(s.commissionPct));
 
     const split = computeSellerSplit({
-      // Food takes its subtotal from the priced totals, not from a line sum, so trust the stored
-      // figure there. Goods sum their lines — which is what `summed.subtotal` is checking.
-      subtotal: isFood ? stored.subtotal : summed.subtotal,
+      subtotal: summed.subtotal,
       taxableValue: summed.taxableValue,
-      commissionPct: Number(r.commissionPct),
-      tcsRatePct: isFood ? TCS_RATE_FOOD : TCS_RATE_GOODS,
-      tdsAmount: Number(r.tdsAmount),
-      isHouse: r.isHouse,
+      commissionPct: summed.commissionPct,
+      commissionAmount: summed.commissionAmount,
+      // The rate this row was actually written at. Null only on a row that predates the snapshot
+      // column, and the step-04 migration backfilled every one of those.
+      tcsRatePct: Number(s.tcsRatePct ?? 0),
+      tdsAmount: Number(s.tdsAmount),
+      isHouse: s.seller.isHouse,
     });
 
     const bad: string[] = [];
-    if (!isFood && summed.subtotal !== stored.subtotal) {
+    if (summed.subtotal !== stored.subtotal) {
       bad.push(`subtotal stored=${stored.subtotal} re-summed=${summed.subtotal}`);
     }
     if (split.commissionAmount !== stored.commissionAmount) {
@@ -111,21 +116,21 @@ async function main() {
       bad.push(`netPayable stored=${stored.netPayable} computed=${split.netPayable}`);
     }
     if (bad.length) {
-      mismatches.push(`  ${r.orderNumber} / ${r.sellerName} [${r.vertical}] — ${bad.join(" · ")}`);
+      mismatches.push(`  ${s.order.orderNumber} / ${s.seller.name} [${s.seller.vertical}] - ${bad.join(" | ")}`);
     }
   }
 
-  console.log(`  checked:  ${checked}`);
-  console.log(`  skipped:  ${orphaned} (no order items linked to the slice — nothing to re-derive)`);
-  console.log(`  mismatch: ${mismatches.length}\n`);
+  console.log(`  checked:     ${checked}  (${multiLine} of them multi-line, where per-line rounding can bite)`);
+  console.log(`  skipped:     ${orphaned} (no order items linked to the slice - nothing to re-derive)`);
+  console.log(`  mismatch:    ${mismatches.length}\n`);
 
   if (mismatches.length) {
-    console.log("MISMATCHES — the extraction is NOT byte-identical:");
+    console.log("MISMATCHES - the replay does NOT reproduce what is stored:");
     mismatches.slice(0, 40).forEach((m) => console.log(m));
-    if (mismatches.length > 40) console.log(`  …and ${mismatches.length - 40} more`);
+    if (mismatches.length > 40) console.log(`  ...and ${mismatches.length - 40} more`);
     process.exitCode = 1;
   } else {
-    console.log("✓ Every re-derived slice matches its stored row to the paise.");
+    console.log("OK - every re-derived slice matches its stored row to the paise.");
   }
 }
 

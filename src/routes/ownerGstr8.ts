@@ -49,16 +49,35 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
 
     // Sub-orders with TCS in the window. tcsAmount > 0 already excludes the house store (it never
     // accrues TCS on its own supplies).
+    // ⚠️ Step 09 deliberately changes NOTHING here, and that is worth stating rather than leaving
+    // to be rediscovered: the filter is on the money, not on isHouse. The day the shop becomes a
+    // separate legal entity its slices start carrying real TCS and appear in this return on their
+    // own, with no code change. A filter written as `seller: { isHouse: false }` would instead have
+    // silently omitted them from a filed GSTR-8.
+    const inPeriod = {
+      createdAt: { gte: start, lt: end },
+      tcsAmount: { gt: 0 },
+      order: { is: liveInPeriod },
+    };
+
     const grouped = await prisma.subOrder.groupBy({
       by: ["sellerId"],
-      where: {
-        createdAt: { gte: start, lt: end },
-        tcsAmount: { gt: 0 },
-        order: { is: liveInPeriod },
-      },
-      _sum: { subtotal: true, tcsAmount: true },
+      where: inPeriod,
+      // ⚠️ taxableValue is SUMMED, not reconstructed. The liable value used to be recovered as
+      // tcsAmount ÷ the current rate constant, which silently assumed every row had been written at
+      // today's rate — so halving TCS from 1% to 0.5% (runbook step 06) would have doubled the
+      // liable value of every row written before it, in a return that goes to the government.
+      // SubOrder.taxableValue IS the base the TCS was charged on, stored at placement. Read it.
+      _sum: { subtotal: true, tcsAmount: true, taxableValue: true },
       _count: true,
     });
+
+    // Which rates the period's rows were actually written at, so the header can state a fact rather
+    // than assert today's constant over history. Normally one value; two only across a rate change.
+    const rateGroups = await prisma.subOrder.groupBy({ by: ["tcsRatePct"], where: inPeriod });
+    const ratesApplied = rateGroups
+      .map((r) => Number(r.tcsRatePct ?? TCS_RATE_PCT))
+      .sort((x, y) => x - y);
 
     // ── Reversals of ALREADY-FILED periods that happened during this one ───────────────────────
     //
@@ -66,7 +85,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     // entirely: the TCS would be collected, reported, and then quietly never given back. These are
     // NEGATIVE rows, reported in the period the cancellation happened.
     const priorFiled = await reversibleFiledPeriods(RETURN_TYPES.GSTR8, period);
-    const reversals: { sellerId: string; subtotal: number; tcs: number; count: number; fromPeriod: string }[] = [];
+    const reversals: { sellerId: string; subtotal: number; taxable: number; tcs: number; count: number; fromPeriod: string }[] = [];
     for (const f of priorFiled) {
       const w = periodWindow(f.period);
       const rows = await prisma.subOrder.groupBy({
@@ -78,13 +97,14 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
           // period (so this is where the reversal belongs).
           order: { is: { status: "CANCELLED", cancelledAt: { gt: f.filedAt, gte: start, lt: end } } },
         },
-        _sum: { subtotal: true, tcsAmount: true },
+        _sum: { subtotal: true, tcsAmount: true, taxableValue: true },
         _count: true,
       });
       for (const r of rows) {
         reversals.push({
           sellerId: r.sellerId,
           subtotal: -Number(r._sum.subtotal ?? 0),
+          taxable: -Number(r._sum.taxableValue ?? 0),
           tcs: -Number(r._sum.tcsAmount ?? 0),
           count: r._count,
           fromPeriod: f.period,
@@ -102,8 +122,8 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     const rows = grouped.map((g) => {
       const seller = sellerById.get(g.sellerId);
       const tcs = Number(g._sum.tcsAmount ?? 0);
-      // Net value of supplies liable to TCS = tcs / rate. CGST/SGST split the TCS in half (intra-state).
-      const netLiable = +(tcs / (TCS_RATE_PCT / 100)).toFixed(2);
+      // CGST/SGST split the TCS in half (intra-state supply).
+      const netLiable = +Number(g._sum.taxableValue ?? 0).toFixed(2);
       const half = +(tcs / 2).toFixed(2);
       return {
         sellerId: g.sellerId,
@@ -123,7 +143,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     // their CA can see WHY a month contains a minus rather than having to reconcile it blind.
     for (const rv of reversals) {
       const seller = sellerById.get(rv.sellerId);
-      const netLiable = +(rv.tcs / (TCS_RATE_PCT / 100)).toFixed(2);
+      const netLiable = +rv.taxable.toFixed(2);
       const half = +(rv.tcs / 2).toFixed(2);
       rows.push({
         sellerId: rv.sellerId,
@@ -156,7 +176,10 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         filed: cutoff != null,
         filedAt: cutoff,
         period,
+        // The statutory rate applied to rows written from now on. It is NOT a claim about this
+        // period's rows — ratesApplied is.
         tcsRatePct: TCS_RATE_PCT,
+        ratesApplied,
         sellerCount: rows.length,
         rows,
         totals: {

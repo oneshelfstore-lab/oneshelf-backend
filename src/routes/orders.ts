@@ -30,6 +30,7 @@ import { consumeFifo, recordConsumption, restoreConsumption, type ConsumeResult 
 import { drawFreeGiftStock } from "../services/freeGifts.js";
 import { computeSubOrderTds194o } from "../services/sellerTds194o.js";
 import { sumSellerLines, computeSellerSplit } from "../services/sellerSplit.js";
+import { houseSellerIsSeparateEntity, isSameLegalEntity } from "../services/entitySplit.js";
 import { TCS_RATE_PCT } from "../data/taxRates.js";
 import { haversineKm } from "../lib/distance.js";
 import { getRiderRoute } from "../services/riderRoute.js";
@@ -96,7 +97,10 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         variant: {
           include: {
             product: {
-              select: { id: true, name: true, productType: true, hsnCode: true, gstRate: true, isPackaged: true, categoryId: true, imageUrls: true, sellerId: true, isBuyOneGetOne: true },
+              // commissionPctOverride: the rate negotiated for this one product, resolved per line
+              // at placement (runbook step 08). Read here rather than in a second query because the
+              // cart already loads the product.
+              select: { id: true, name: true, productType: true, hsnCode: true, gstRate: true, isPackaged: true, categoryId: true, imageUrls: true, sellerId: true, isBuyOneGetOne: true, commissionPctOverride: true },
             },
           },
         },
@@ -379,6 +383,18 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         arr.push(...freeGiftItems);
         itemsBySeller.set(houseSeller!.id, arr);
       }
+      // variantId → the product's negotiated commission override (null = use the seller's rate).
+      // Built from the cart rows already in memory, so per-line resolution costs no extra query.
+      const overrideByVariant = new Map<string, number | null>(
+        cartItems.map((ci) => [
+          ci.variantId,
+          ci.variant.product.commissionPctOverride == null ? null : Number(ci.variant.product.commissionPctOverride),
+        ]),
+      );
+
+      // Read once for the whole order - the flag is a property of the business, not of a seller.
+      const houseIsSeparate = await houseSellerIsSeparateEntity(tx);
+
       if (itemsBySeller.size > 0) {
         const sellers = await tx.seller.findMany({
           where: { id: { in: [...itemsBySeller.keys()] } },
@@ -388,11 +404,17 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         for (const [sid, sellerItems] of itemsBySeller) {
           const seller = sellerById.get(sid);
           if (!seller) continue;
-          const { subtotal, taxableValue } = sumSellerLines(
+          // ⚠️ A free-gift line has no cart row, so it finds no override and falls back to the
+          // seller's rate — times a lineTotal of 0, which is still nothing. Correct either way.
+          const { subtotal, taxableValue, commissionPct, commissionAmount, lineCommissions } = sumSellerLines(
             sellerItems.map((it) => ({
               lineTotal: Number(it.lineTotal),
               taxableValue: Number(it.taxableValue),
+              commissionPctOverride: it.variantId
+                ? overrideByVariant.get(it.variantId) ?? null
+                : null,
             })),
+            Number(seller.commissionPct),
           );
           // Income Tax Sec 194-O TDS — off (0) unless StoreConfig.tds194oEnabled. Resolved here
           // rather than inside computeSellerSplit because it needs a transaction for the
@@ -407,10 +429,15 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           const split = computeSellerSplit({
             subtotal,
             taxableValue,
-            commissionPct: Number(seller.commissionPct),
+            // Both resolved per line above. With no override anywhere in the basket — which is every
+            // order placed so far — commissionPct IS the seller's rate and the amount is unchanged.
+            commissionPct,
+            commissionAmount,
             tcsRatePct: TCS_RATE_PCT,
             tdsAmount,
-            isHouse: seller.isHouse,
+            // Step 09: exempt because it is the SAME LEGAL ENTITY, not merely because it is the
+            // house store. The two mean the same thing until a second entity exists to bill.
+            isHouse: isSameLegalEntity(seller, houseIsSeparate),
           });
           const { netPayable } = split;
 
@@ -422,12 +449,22 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
               ...split,
             },
           });
-          await tx.orderItem.updateMany({
-            where: { id: { in: sellerItems.map((it) => it.id) } },
-            data: { subOrderId: subOrder.id },
-          });
-          // The platform doesn't owe its own house store — only accrue payout for real sellers.
-          if (!seller.isHouse) {
+          // One update per line rather than one updateMany for the slice, because each line now
+          // carries its OWN rate. They are identical today; the loop is what stops them silently
+          // collapsing back to a shared value the day an override is granted.
+          for (const [i, it] of sellerItems.entries()) {
+            await tx.orderItem.update({
+              where: { id: it.id },
+              data: {
+                subOrderId: subOrder.id,
+                commissionPct: lineCommissions[i]!.commissionPct,
+                commissionAmount: lineCommissions[i]!.commissionAmount,
+              },
+              select: { id: true },
+            });
+          }
+          // The platform doesn't owe itself — only accrue a payout for a separate legal entity.
+          if (!isSameLegalEntity(seller, houseIsSeparate)) {
             await tx.seller.update({
               where: { id: sid },
               data: { outstandingBalance: { increment: netPayable } },

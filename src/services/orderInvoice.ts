@@ -88,6 +88,20 @@ const HOUSE_SUPPLIER: SupplierSnapshot = {
  * money is still the restaurant's. That is also why `foodOrders.ts` sets `tcsAmount = 0` on food
  * sub-orders: Sec 9(5) and the Sec 52 / 1% TCS path are alternatives, not additions.
  */
+/**
+ * ⚠️ DELIBERATELY NOT GATED ON StoreConfig.houseSellerIsSeparateEntity, unlike the commission, TCS
+ * and TDS exemptions that runbook step 09 moved onto that flag (services/entitySplit.ts).
+ *
+ * Splitting the platform off does not move the shop's sales onto a different GSTIN. The shop keeps
+ * invoicing its own customers under Company, exactly as it does today; what changes is that a new
+ * platform entity starts charging the shop for selling through it. So the customer invoice's
+ * supplier, its number series and its revenue recognition all stay where they are.
+ *
+ * Gating this on the flag would swap the customer invoice's supplier onto the house Seller row the
+ * moment the flag moved — a row that carries no GSTIN, no PAN and no address — and every house
+ * invoice issued after that would be a defective tax invoice. Step 23 owns that question, and it
+ * owns it only after a real second entity with a real registration exists.
+ */
 export function isStoreOwnSupply(seller: { isHouse: boolean } | null | undefined): boolean {
   return !seller || seller.isHouse;
 }

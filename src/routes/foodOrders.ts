@@ -11,7 +11,7 @@ import { computeFoodOrderTotals, type FoodLineInput } from "../services/foodPric
 import { resolveCoupon, redeemCouponInTx } from "../services/coupons.js";
 import { computeDeliveryForOrigin } from "../services/deliveryPricing.js";
 import { computeSubOrderTds194o } from "../services/sellerTds194o.js";
-import { computeSellerSplit } from "../services/sellerSplit.js";
+import { sumSellerLines, computeSellerSplit } from "../services/sellerSplit.js";
 import { getNextOrderNumber } from "../services/orderNumbering.js";
 import { generateOrderInvoice } from "../services/orderInvoice.js";
 import { notifyNewOrder, notifySubOrderNew } from "../services/fcmNotifier.js";
@@ -404,10 +404,19 @@ router.post("/orders", async (req: FirebaseAuthRequest, res: Response) => {
       // BEFORE StoreConfig.foodEnabled is ever turned on.
       // ⚠️ The zero is passed IN as a rate, deliberately. computeSellerSplit must never infer it
       // from the vertical — the 9(5) reasoning has to stay readable at the site it applies to.
+      // A menu item is a MenuItem, not a CatalogProduct, so it can carry no per-product commission
+      // override — a restaurant slice has exactly one rate by construction. It still goes through
+      // sumSellerLines as a single line so the commission formula and its rounding live in one place
+      // (runbook step 08); the arithmetic is unchanged.
+      const foodLine = sumSellerLines(
+        [{ lineTotal: p.totals.subtotal, taxableValue: p.totals.taxableValue }],
+        p.restaurant.commissionPct,
+      );
       const split = computeSellerSplit({
         subtotal: p.totals.subtotal,
         taxableValue: p.totals.taxableValue,
-        commissionPct: p.restaurant.commissionPct,
+        commissionPct: foodLine.commissionPct,
+        commissionAmount: foodLine.commissionAmount,
         tcsRatePct: 0,
         tdsAmount,
         isHouse: false, // a restaurant is always a third party; the house store has no menu
@@ -424,7 +433,13 @@ router.post("/orders", async (req: FirebaseAuthRequest, res: Response) => {
       });
       await tx.orderItem.updateMany({
         where: { id: { in: created.items.map((i) => i.id) } },
-        data: { subOrderId: subOrder.id },
+        data: {
+          subOrderId: subOrder.id,
+          // Every line on a food order carries the restaurant's one rate. The per-line AMOUNT is
+          // deliberately left null: the slice's commission was computed once on the slice total, so
+          // splitting it back across lines here would be an invention, not a snapshot.
+          commissionPct: foodLine.commissionPct,
+        },
       });
 
       // Burn the redemption inside the SAME transaction as the order, so a failed placement can

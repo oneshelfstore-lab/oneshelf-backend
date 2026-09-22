@@ -1,4 +1,5 @@
 import type { Prisma } from "@prisma/client";
+import { isSameLegalEntity } from "./entitySplit.js";
 
 // ─── Income Tax Sec 194-O — TDS an e-commerce operator withholds from a marketplace seller ───
 //
@@ -85,7 +86,7 @@ export async function computeSubOrderTds194o(
   seller: Tds194oSeller,
   subtotal: number,
 ): Promise<Tds194oResult> {
-  if (seller.isHouse || subtotal <= 0) return { tdsAmount: 0, rateApplied: 0 };
+  if (subtotal <= 0) return { tdsAmount: 0, rateApplied: 0 };
 
   const config = await tx.storeConfig.findFirst({
     select: {
@@ -93,9 +94,17 @@ export async function computeSubOrderTds194o(
       tds194oRatePct: true,
       tds194oThreshold: true,
       tds194oNoPanRatePct: true,
+      houseSellerIsSeparateEntity: true,
     },
   });
   if (!config?.tds194oEnabled) return { tdsAmount: 0, rateApplied: 0 };
+  // Step 09. Withholding income tax from the house store would be the business deducting TDS from
+  // itself, so the exemption is really about legal identity rather than about isHouse. Read from
+  // the config row this function was already loading, not in a second query.
+  // ⚠️ The test moved BELOW the config read on purpose - the answer now depends on the config.
+  if (isSameLegalEntity(seller, config.houseSellerIsSeparateEntity === true)) {
+    return { tdsAmount: 0, rateApplied: 0 };
+  }
 
   const baseRate = Number(config.tds194oRatePct ?? DEFAULT_RATE_PCT);
   const noPanRate = Number(config.tds194oNoPanRatePct ?? DEFAULT_NO_PAN_RATE_PCT);

@@ -20,13 +20,43 @@ export interface SellerLine {
   lineTotal: number;
   /** GST-exclusive. Prices are GST-inclusive, so this is lineTotal backed out of its own rate. */
   taxableValue: number;
+  /**
+   * CatalogProduct.commissionPctOverride — a rate negotiated for this one product, because a flat
+   * rate across a seller's whole catalog is wrong wherever their own margin is thin.
+   * ⚠️ NULL/UNDEFINED MEANS "USE THE SELLER'S RATE", NOT "ZERO COMMISSION". Coalescing it to 0 is
+   * how a seller stops being charged at all. Go through resolveCommissionPct.
+   */
+  commissionPctOverride?: number | null;
+}
+
+/**
+ * The rate that applies to ONE line: the product's negotiated override if it has one, otherwise the
+ * seller's default (runbook step 08).
+ *
+ * ⚠️ The nullish coalesce is the whole function and it is deliberate — `??` not `||`, because a
+ * genuine 0% override (a product the platform carries at no cut) must survive as 0 rather than fall
+ * through to the seller's 5%.
+ */
+export function resolveCommissionPct(line: SellerLine, sellerCommissionPct: number): number {
+  return line.commissionPctOverride ?? sellerCommissionPct;
 }
 
 export interface SellerSplitInput {
   subtotal: number;
   taxableValue: number;
-  /** The seller's agreed rate. Applied to subtotal (GST-INCLUSIVE — step 07 moves it to taxable). */
+  /**
+   * The BLENDED effective rate across this slice, from sumSellerLines — not "the seller's agreed
+   * rate". With no overrides in play the two are the same number, which is why this reads as the
+   * seller's rate everywhere today.
+   */
   commissionPct: number;
+  /**
+   * ⚠️ Passed IN rather than computed from `commissionPct`, and that is the point of step 08. Once
+   * a single product can carry its own rate, one rate times one subtotal is no longer the answer —
+   * the amount is the sum of per-line amounts, and only sumSellerLines has seen the lines.
+   * Recomputing it here as subtotal × pct would quietly discard every override.
+   */
+  commissionAmount: number;
   /**
    * Sec-52 TCS. The CALLER decides this, not the function: food is 0 because Sec 9(5) makes the
    * platform the deemed supplier, and that reasoning has to stay visible at the food call site
@@ -46,6 +76,19 @@ export interface SellerSplitInput {
 /** Exactly the money fields of a SubOrder row, ready to spread into a create. */
 export interface SellerSplit {
   subtotal: number;
+  /**
+   * Echoed straight back out, so that spreading this into the create WRITES it to the row. It is an
+   * input rather than a computed value, and that is the point: SubOrder.taxableValue is the base TCS
+   * was charged on, so a report that has it stored never has to reconstruct it by dividing a stored
+   * amount by whatever the rate constant says today.
+   */
+  taxableValue: number;
+  /**
+   * Echoed back for the same reason. This is the rate the row was ACTUALLY computed at, so a later
+   * rate change cannot rewrite history — the trap halving TCS from 1% to 0.5% (runbook step 06)
+   * would otherwise have sprung on every row written before it.
+   */
+  tcsRatePct: number;
   commissionPct: number;
   commissionAmount: number;
   tcsAmount: number;
@@ -55,20 +98,76 @@ export interface SellerSplit {
 
 const r2 = (n: number): number => +n.toFixed(2);
 
-/** Fan a seller's lines in. Separate from the split because the TDS lookup needs `subtotal` first. */
-export function sumSellerLines(lines: SellerLine[]): { subtotal: number; taxableValue: number } {
+/** What one line ends up owing, snapshotted onto OrderItem so the rate that applied stays readable. */
+export interface LineCommission {
+  commissionPct: number;
+  commissionAmount: number;
+}
+
+export interface SellerLineTotals {
+  subtotal: number;
+  taxableValue: number;
+  /**
+   * ⚠️ The BLENDED effective rate across the slice, not "the seller's agreed rate". With one rate
+   * in play it equals that rate exactly; with an override in the basket it is the weighted mean.
+   * Anything that displays this as a seller's headline rate becomes subtly wrong the first time an
+   * override is granted. Nothing does today — Seller.commissionPct is what every screen reads.
+   */
+  commissionPct: number;
+  /** Sum of the per-line amounts below, so the lines and the slice reconcile exactly. */
+  commissionAmount: number;
+  /** In input order, for the OrderItem snapshot. */
+  lineCommissions: LineCommission[];
+}
+
+/**
+ * Fan a seller's lines in and resolve commission line by line. Separate from the split because the
+ * TDS lookup needs `subtotal` before the split can run.
+ *
+ * ⚠️ THE ROUNDING ORDER IS THE DECISION HERE. Each line is rounded to the paise and then summed,
+ * rather than summing exact products and rounding once at the end. Rounding once would match the
+ * old flat calculation on every possible input; rounding per line can differ from it by a paise on
+ * some. The per-line figure is what goes in OrderItem.commissionAmount, so summing anything else
+ * would leave a slice whose own lines do not add up to it — an audit trail that contradicts itself
+ * is worth less than a paise of continuity. Replayed against all 17 live money-bearing slices: not
+ * one of them moves (scripts/replaySellerSplit.ts).
+ *
+ * ⚠️ The blended rate is the weighted mean of the UNROUNDED products, never commissionAmount ÷
+ * subtotal. Back-deriving a rate from two rounded amounts produces things like 18.02%, which is not
+ * a rate anybody agreed to — the same trap that shipped once already on the delivery invoice.
+ */
+export function sumSellerLines(lines: SellerLine[], sellerCommissionPct: number): SellerLineTotals {
+  const subtotal = r2(lines.reduce((sum, l) => sum + Number(l.lineTotal), 0));
+  const lineCommissions = lines.map((l) => {
+    const commissionPct = resolveCommissionPct(l, sellerCommissionPct);
+    return { commissionPct, commissionAmount: r2((Number(l.lineTotal) * commissionPct) / 100) };
+  });
+  const weighted = lines.reduce(
+    (sum, l, i) => sum + Number(l.lineTotal) * lineCommissions[i]!.commissionPct,
+    0,
+  );
   return {
-    subtotal: r2(lines.reduce((sum, l) => sum + Number(l.lineTotal), 0)),
+    subtotal,
     taxableValue: r2(lines.reduce((sum, l) => sum + Number(l.taxableValue), 0)),
+    // No lines, or lines that are all free gifts, leave nothing to weight — report the rate that
+    // would have applied rather than a 0 that reads as "this seller is on zero commission".
+    commissionPct: subtotal > 0 ? r2(weighted / subtotal) : r2(sellerCommissionPct),
+    commissionAmount: r2(lineCommissions.reduce((sum, c) => sum + c.commissionAmount, 0)),
+    lineCommissions,
   };
 }
 
 export function computeSellerSplit(input: SellerSplitInput): SellerSplit {
-  const { subtotal, taxableValue, commissionPct, tcsRatePct, tdsAmount, isHouse } = input;
-  const commissionAmount = r2((subtotal * commissionPct) / 100);
+  const { subtotal, taxableValue, commissionPct, commissionAmount, tcsRatePct, tdsAmount, isHouse } = input;
   const tcsAmount = isHouse ? 0 : r2((taxableValue * tcsRatePct) / 100);
   return {
     subtotal,
+    taxableValue,
+    // ⚠️ The EFFECTIVE rate, not the rate asked for. A house slice collects nothing, so the rate
+    // that applied to it is 0 — the same rule the step-04 backfill used on every historical row
+    // (house → 0, food → 0, anything else → the rate of the day). Storing 0.5 beside a tcsAmount of
+    // 0 would say a rate was applied and came to nothing, which is a different and untrue claim.
+    tcsRatePct: isHouse ? 0 : tcsRatePct,
     commissionPct,
     commissionAmount,
     tcsAmount,

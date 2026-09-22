@@ -13,7 +13,8 @@ import { chargeSubscriptionMandate } from "./razorpay.js";
 import { consumeFifo, recordConsumption, type ConsumeResult } from "./stockBatches.js";
 import { AppError } from "../lib/errors.js";
 import { computeSubOrderTds194o } from "./sellerTds194o.js";
-import { computeSellerSplit } from "./sellerSplit.js";
+import { sumSellerLines, computeSellerSplit } from "./sellerSplit.js";
+import { houseSellerIsSeparateEntity, isSameLegalEntity } from "./entitySplit.js";
 import { TCS_RATE_PCT } from "../data/taxRates.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -325,6 +326,7 @@ async function generateOrderFor(
           categoryId: true,
           imageUrls: true,
           sellerId: true,
+          commissionPctOverride: true,
         },
       },
     },
@@ -488,16 +490,30 @@ async function generateOrderFor(
           select: { id: true, commissionPct: true, isHouse: true, pan: true, entityType: true },
         });
         if (seller) {
+          const houseIsSeparate = await houseSellerIsSeparateEntity(tx);
           const subtotal = pricing.lineTotal;
           // Sec 194-O TDS — same discipline as routes/orders.ts. Off (0) unless StoreConfig.tds194oEnabled.
           const { tdsAmount } = await computeSubOrderTds194o(tx, seller, subtotal);
+          // One variant, so one line — routed through sumSellerLines anyway so the per-product
+          // override and the rounding come from the same place as every other order (step 08).
+          const lineTotals = sumSellerLines(
+            [{
+              lineTotal: subtotal,
+              taxableValue: pricing.taxableValue,
+              commissionPctOverride: variant.product.commissionPctOverride == null
+                ? null
+                : Number(variant.product.commissionPctOverride),
+            }],
+            Number(seller.commissionPct),
+          );
           const split = computeSellerSplit({
             subtotal,
             taxableValue: pricing.taxableValue,
-            commissionPct: Number(seller.commissionPct),
+            commissionPct: lineTotals.commissionPct,
+            commissionAmount: lineTotals.commissionAmount,
             tcsRatePct: TCS_RATE_PCT,
             tdsAmount,
-            isHouse: seller.isHouse,
+            isHouse: isSameLegalEntity(seller, houseIsSeparate), // step 09 - see services/entitySplit.ts
           });
           const { netPayable } = split;
 
@@ -511,9 +527,13 @@ async function generateOrderFor(
           });
           await tx.orderItem.updateMany({
             where: { orderId: created.id },
-            data: { subOrderId: subOrder.id },
+            data: {
+              subOrderId: subOrder.id,
+              commissionPct: lineTotals.lineCommissions[0]!.commissionPct,
+              commissionAmount: lineTotals.lineCommissions[0]!.commissionAmount,
+            },
           });
-          if (!seller.isHouse) {
+          if (!isSameLegalEntity(seller, houseIsSeparate)) {
             await tx.seller.update({
               where: { id: sellerId },
               data: { outstandingBalance: { increment: netPayable } },

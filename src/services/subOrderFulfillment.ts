@@ -1,4 +1,5 @@
 import type { Prisma, OrderStatus } from "@prisma/client";
+import { houseSellerIsSeparateEntity, isSameLegalEntity } from "./entitySplit.js";
 import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError } from "../lib/errors.js";
 import { refundPayment } from "./razorpay.js";
@@ -303,7 +304,13 @@ export async function cancelSubOrderAndRefund(
   // Already paid out ⇒ the money has left, so the balance cannot simply be reversed. It becomes a
   // SubOrderAdjustment instead (written inside the claim below), which the seller's next payout
   // absorbs automatically. The flag is still returned so the Complaint can say what happened.
-  const clawbackBlocked = sub.settled && !sub.seller.isHouse && Number(sub.netPayable) > 0;
+  // ⚠️ Step 09: gated on the FLAG, not on isHouse, because the reversal has to follow the accrual.
+  // The day the shop becomes a separate legal entity its slices start accruing a real balance, and
+  // an isHouse test here would leave a cancelled house order's accrual stuck in outstandingBalance
+  // forever - exactly the shape of the drift scripts/repairLegacyAccrual.ts exists to clean up.
+  const houseIsSeparate = await houseSellerIsSeparateEntity();
+  const sellerHasLedger = !isSameLegalEntity(sub.seller, houseIsSeparate);
+  const clawbackBlocked = sub.settled && sellerHasLedger && Number(sub.netPayable) > 0;
 
   // ⚠️ The slice flip is a COMPARE-AND-SWAP, not a plain update, and it gates everything below it.
   // The `sub.status === "CANCELLED"` check above was read outside this transaction, so two concurrent
@@ -335,7 +342,7 @@ export async function cancelSubOrderAndRefund(
     // Unpaid ⇒ just back the accrual out. Already paid ⇒ the money has gone, so it becomes a debt
     // the next payout recovers. Either way the seller's balance drops by the same amount, and it
     // happens INSIDE the claim so a lost race cannot write a second clawback for the same slice.
-    if (!sub.seller.isHouse && Number(sub.netPayable) > 0) {
+    if (sellerHasLedger && Number(sub.netPayable) > 0) {
       if (sub.settled) {
         await tx.subOrderAdjustment.create({
           data: {
@@ -405,6 +412,9 @@ export async function reverseSellerLedgerOnCancel(orderId: string): Promise<void
     select: { id: true, sellerId: true, netPayable: true, settled: true, seller: { select: { isHouse: true } } },
   });
   if (subs.length === 0) return;
+  // Step 09 - see the note on clawbackBlocked above. The reversal follows the accrual, so it has to
+  // ask the same question the accrual asked at placement.
+  const houseIsSeparate = await houseSellerIsSeparateEntity();
 
   try {
     await prisma.$transaction(async (tx) => {
@@ -419,7 +429,7 @@ export async function reverseSellerLedgerOnCancel(orderId: string): Promise<void
           data: { status: "CANCELLED" },
         });
         if (flipped.count === 0) continue; // already reversed by another path
-        if (s.seller.isHouse || Number(s.netPayable) <= 0) continue;
+        if (isSameLegalEntity(s.seller, houseIsSeparate) || Number(s.netPayable) <= 0) continue;
         // ⚠️ A settled slice used to be SKIPPED here entirely — silently, with no warning anywhere,
         // unlike the single-slice path which at least flagged it on a Complaint. The seller kept
         // money for an order that was cancelled and nothing recorded that it had happened. It is a

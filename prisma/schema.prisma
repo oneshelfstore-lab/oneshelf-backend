@@ -2051,6 +2051,26 @@ model Seller {
   kycChangeRequested        Boolean          @default(false)
   kycEditUnlocked           Boolean          @default(false)
 
+  // ─── Shop type (data/shopTypes.ts) ──────────────────────────────────
+  // WHICH KIND of shop, one level finer than `vertical`: "GENERAL_STORE" | "PHARMACY" | "BAKERY" …
+  // Decides which onboarding fields are asked for and required, which documents are collected, and
+  // whether the owner's review queue flags this as a licensed trade.
+  //
+  // ⚠️ Nullable on purpose: every seller that pre-dates this column keeps working without a
+  // backfill — profileFor() falls back on `vertical` (SHOP → general store, FOOD → restaurant),
+  // which is the profile their data was already collected under. A String, not an enum, for the
+  // same reason `vertical` is one: a new shop type must not need a DB migration.
+  shopType         String?
+  // Fields that only one trade ever fills — a pharmacy's drug licence, a jeweller's BIS number.
+  // Shape is `{ fieldKey: value }`, validated at write time against the shop type's profile.
+  //
+  // ⚠️ JSON rather than a column each, deliberately. Fifteen trades × their own paperwork is ~40
+  // nullable columns that are null for every seller but one, and a migration every time a shop type
+  // is added — the exact "one giant form" this design exists to avoid. Precedent: `bankDetails`.
+  // The cost is that querying across it needs JSONB (e.g. a future licence-expiry sweep); that is
+  // a query to write when something needs it, not a reason to spread the schema now.
+  categoryData     Json?
+
   // ─── Vertical (MULTIVERTICAL_PLAN.md §4.1) ──────────────────────────
   // Which business this seller trades in: "SHOP" (grocery/daily goods) | "FOOD" (restaurant).
   // ⚠️ @default("SHOP") is the same backward-compat trick as onboardingStatus @default(APPROVED) —

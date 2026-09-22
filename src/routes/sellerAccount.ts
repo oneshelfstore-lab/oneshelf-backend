@@ -1,5 +1,6 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { memoCache } from "../lib/httpCache.js";
@@ -14,6 +15,15 @@ import {
 } from "../validators/index.js";
 import { PARTNER_AGREEMENT_VERSION } from "../data/onboardingAgreements.js";
 import { signDocFields, SELLER_KYC_DOC_FIELDS } from "../lib/storageUrls.js";
+import {
+  profileFor,
+  isKnownShopType,
+  stepsFor,
+  categoryDocKeys,
+  mergeCategoryData,
+  missingRequiredFields,
+  completionPct,
+} from "../data/shopTypes.js";
 
 // A GSTIN is optional (a seller may be unregistered) but, when present, must be well-formed +
 // checksum-valid so invoices are never issued under a malformed GSTIN (COMPLIANCE_PLAN.md P2-3).
@@ -33,6 +43,16 @@ const optionalFssaiNumber = z.string().max(20).optional().nullable().refine(
   { message: "FSSAI number must be exactly 14 digits" },
 );
 
+/** An optional HH:MM wall clock where "" means "clear it". @param example shown in the error. */
+function hhMmOrClear(example: string) {
+  return z
+    .string()
+    .refine((v) => v === "" || /^([01]\d|2[0-3]):[0-5]\d$/.test(v), `Use HH:MM (24-hour), e.g. ${example}`)
+    .transform((v) => (v === "" ? null : v))
+    .optional()
+    .nullable();
+}
+
 // Seller-scoped profile + earnings. Mounted at /api/app/seller/me.
 //   GET  /            → shop profile
 //   PUT  /            → update editable profile fields (NOT commission/status — admin-controlled)
@@ -43,6 +63,16 @@ router.use(requireAppRole("SELLER") as any);
 router.use(resolveSeller as any);
 
 async function shapeSellerProfile(s: any, agreementCurrent: boolean) {
+  // Which trade this is → which fields were asked for, which are still blank, whether a human must
+  // read the licence. Falls back on `vertical` for every seller created before shopType existed.
+  const profile = profileFor(s.shopType, s.vertical);
+  // Sign the Storage paths sitting INSIDE categoryData (a pharmacy's drug licence, a jeweller's BIS
+  // certificate) exactly as the fixed KYC columns are signed below — a document is no less
+  // sensitive for living in a JSON blob. signDocFields is already generic over its key list.
+  const categoryData = s.categoryData
+    ? await signDocFields({ ...(s.categoryData as Record<string, unknown>) }, categoryDocKeys(profile))
+    : null;
+  const missingFields = missingRequiredFields(profile, s, s.categoryData as Record<string, unknown> | null);
   // ⚠️ signDocFields is not cosmetic. The KYC buckets have had correct storage.rules since July
   // 2026 and those rules were doing nothing, because the app uploaded with ref.downloadUrl — a
   // permanent token that bypasses rules entirely. The app now stores the bare object path and this
@@ -94,6 +124,23 @@ async function shapeSellerProfile(s: any, agreementCurrent: boolean) {
     grievanceOfficerEmail: s.grievanceOfficerEmail,
     onboardingStatus: s.onboardingStatus,
     onboardingRejectionReason: s.onboardingRejectionReason,
+    // ─── Shop type + its requirement profile (data/shopTypes.ts) ──
+    // The per-seller STATE only. The form definition itself (steps/fields/labels) comes from the
+    // public GET /api/app/onboarding/requirements — static, cacheable, and not worth repeating for
+    // every row of the house manager's all-sellers list.
+    shopType: profile.key,
+    shopTypeLabel: profile.label,
+    department: profile.department,
+    catalogueModel: profile.catalogueModel,
+    variableWeight: Boolean(profile.variableWeight),
+    // A licensed trade (pharmacy, medical devices). The app warns the seller to expect a manual
+    // check; the owner's queue flags it so the licence gets read rather than waved through.
+    regulated: Boolean(profile.regulated),
+    categoryData,
+    // What the wizard's progress bar shows, and exactly what submit will refuse on — one source,
+    // so a seller can never see "ready to submit" on a form the server rejects.
+    missingFields,
+    completionPct: completionPct(profile, s, s.categoryData as Record<string, unknown> | null),
     // ─── KYC edit lock (see the schema comment on Seller.everApproved) ──
     everApproved: Boolean(s.everApproved),
     kycChangeRequested: Boolean(s.kycChangeRequested),
@@ -154,6 +201,25 @@ const updateSchema = z.object({
   grievanceOfficerName: z.string().max(120).optional().nullable(),
   grievanceOfficerPhone: z.string().max(15).optional().nullable(),
   grievanceOfficerEmail: z.string().email().max(160).optional().nullable(),
+  // Which trade this shop is in — decides the rest of the form (data/shopTypes.ts). Rejected if
+  // unknown rather than stored blind: an unrecognised value would silently fall back to the
+  // general-store profile, so a pharmacy could be onboarded without ever being asked for a licence.
+  shopType: z.string().max(40).optional().nullable().refine(
+    (v) => v == null || v === "" || isKnownShopType(v),
+    { message: "Unknown shop type" },
+  ),
+  // Restaurant service settings — the "kitchen" step of a FOOD profile. Previously owner-only
+  // (ownerSellers.ts PATCH), which meant a restaurant onboarding itself rendered hours it could not
+  // save. Same validators as the owner's route; "" clears an optional time back to null.
+  cuisines: z.string().max(200).optional().nullable(),
+  // "" clears the time back to null, matching ownerSellers.ts's `openTime || null` — otherwise the
+  // same field cleared from two screens would store two different "unset" values.
+  openTime: hhMmOrClear("10:00"),
+  closeTime: hhMmOrClear("23:00"),
+  avgPrepMinutes: z.coerce.number().int().min(1).max(240).optional(),
+  // Category-specific fields. Keys are validated against the shop type's profile in the handler,
+  // not here — the effective profile may be changing in this very request.
+  categoryData: z.record(z.unknown()).optional().nullable(),
 });
 
 // Fields that determine WHO the seller legally is or WHERE their payout money goes — the exact
@@ -162,10 +228,28 @@ const updateSchema = z.object({
 const KYC_SENSITIVE_FIELDS = [
   "gstin", "pan", "fssaiNumber", "fssaiExpiry",
   "gstinDocUrl", "panDocUrl", "fssaiDocUrl", "bankProofUrl", "bankDetails",
+  // Switching trade post-approval is the sharpest version of this problem: a shop approved as a
+  // general store could otherwise re-badge itself a pharmacy and start listing medicines under an
+  // approval that never looked at a drug licence.
+  "shopType",
+  // Holds the licences of whichever trade this is — the documents the owner actually read.
+  "categoryData",
 ] as const;
 
 function isPresent(v: unknown): boolean {
   return v !== null && v !== undefined && !(typeof v === "string" && v.trim() === "");
+}
+
+/**
+ * The write value for the `categoryData` Json column.
+ *
+ * ⚠️ Two Prisma quirks in one place: a `Json?` column cannot be cleared with a plain `null` (it
+ * wants `Prisma.DbNull` — this repo has already been bitten by that on `bankDetails`), and
+ * `Record<string, unknown>` is not assignable to `InputJsonValue`. Both writers strip categoryData
+ * out of their `...parsed.data` spread and come through here, so neither can reintroduce either bug.
+ */
+function categoryDataWrite(merged: Record<string, unknown> | null) {
+  return (merged ?? Prisma.DbNull) as Prisma.InputJsonValue | typeof Prisma.DbNull;
 }
 
 /**
@@ -225,9 +309,29 @@ router.put("/", async (req: SellerRequest, res: Response) => {
         onboardingStatus: true, everApproved: true, kycEditUnlocked: true,
         gstin: true, pan: true, fssaiNumber: true, fssaiExpiry: true,
         gstinDocUrl: true, panDocUrl: true, fssaiDocUrl: true, bankProofUrl: true, bankDetails: true,
+        shopType: true, categoryData: true, vertical: true,
       },
     });
     if (!current) throw new NotFoundError("Seller", req.sellerId ?? "");
+
+    // Resolve the profile this write lands under — the shop type may be changing in this request,
+    // and the incoming category fields must be validated against the type they'll end up in.
+    const nextShopType = parsed.data.shopType !== undefined ? parsed.data.shopType : current.shopType;
+    const profile = profileFor(nextShopType, current.vertical);
+
+    // Merge rather than replace: the wizard saves between steps, so step 5's two fields must not
+    // wipe step 4's. Unknown keys are refused so a typo can't sit in the blob looking like data.
+    const { merged: mergedCategoryData, unknownKeys } = mergeCategoryData(
+      current.categoryData,
+      parsed.data.categoryData,
+      profile,
+    );
+    if (unknownKeys.length > 0) {
+      throw new ValidationError(
+        `These fields aren't part of a ${profile.label} application: ${unknownKeys.join(", ")}`,
+        unknownKeys,
+      );
+    }
 
     // GSTIN embeds its holder's PAN at characters 3-12 — checked whenever this request touches
     // EITHER field, against the EFFECTIVE post-write pair (a partial save might send only one).
@@ -244,7 +348,13 @@ router.put("/", async (req: SellerRequest, res: Response) => {
       }
     }
 
-    const overwritesVerified = overwritesVerifiedField(parsed.data as Record<string, unknown>, current as Record<string, unknown>);
+    // Compare the POST-MERGE category blob, not the two-field fragment this request carried — a
+    // partial save that re-sends an unchanged value must not read as an overwrite.
+    const effectiveChanges: Record<string, unknown> = {
+      ...parsed.data,
+      ...(parsed.data.categoryData !== undefined ? { categoryData: mergedCategoryData } : {}),
+    };
+    const overwritesVerified = overwritesVerifiedField(effectiveChanges, current as Record<string, unknown>);
     const locked = isKycLocked(current);
 
     // A locked seller gets exactly ONE write once the owner unlocks them — enforced here, at the
@@ -256,10 +366,17 @@ router.put("/", async (req: SellerRequest, res: Response) => {
       );
     }
 
+    // categoryData is written from the MERGED value below, never from the raw fragment — dropped
+    // from the spread so the two can't disagree.
+    const { categoryData: _incomingCategoryData, ...scalarUpdates } = parsed.data;
+
     const updated = await prisma.seller.update({
       where: { id: req.sellerId },
       data: {
-        ...parsed.data,
+        ...scalarUpdates,
+        ...(parsed.data.categoryData !== undefined
+          ? { categoryData: categoryDataWrite(mergedCategoryData) }
+          : {}),
         // Editing after submission means the owner would be reviewing stale data — un-submit so
         // the seller has to re-submit once they're done changing things.
         ...(current.onboardingStatus === "PENDING_REVIEW" ? { onboardingStatus: "IN_PROGRESS" as const } : {}),
@@ -334,14 +451,14 @@ router.put("/bank-details", async (req: SellerRequest, res: Response) => {
 // SELLER_DELIVERY_ONBOARDING_PLAN.md. The draft itself is just the Seller row (edited via PUT /
 // above); these two endpoints are the "submit" action and the consent-capture action.
 
-const REQUIRED_ONBOARDING_FIELDS: Array<[keyof Awaited<ReturnType<typeof prisma.seller.findUniqueOrThrow>>, string]> = [
-  ["gstin", "GSTIN"],
-  ["pan", "PAN"],
-  ["shopAddress", "Shop address"],
-  ["grievanceOfficerName", "Grievance officer name"],
-  ["grievanceOfficerPhone", "Grievance officer phone"],
-];
-
+// What "complete" means is no longer one fixed list — it comes from the shop type's profile
+// (data/shopTypes.ts), so the wizard and this gate read the same definition and cannot drift.
+//
+// ⚠️ BEHAVIOUR CHANGE worth knowing about: FSSAI is now HARD-REQUIRED for food trades (kirana,
+// dairy, bakery, sweets, meat, restaurants…) where it was previously asked of everyone and
+// required of no one. That is the correct rule — a shop selling food to the public needs the
+// licence — but it means a food seller sitting mid-onboarding will be told to add it before they
+// can submit. Already-APPROVED sellers are untouched (the short-circuit below returns early).
 router.post("/onboarding/submit", async (req: SellerRequest, res: Response) => {
   try {
     const seller = await prisma.seller.findUnique({ where: { id: req.sellerId } });
@@ -350,14 +467,12 @@ router.post("/onboarding/submit", async (req: SellerRequest, res: Response) => {
       return res.json({ success: true, data: await shapeSellerProfile(seller, await isAgreementCurrent(seller.id)) });
     }
 
-    const missing = REQUIRED_ONBOARDING_FIELDS.filter(([field]) => {
-      const v = (seller as any)[field];
-      return v === null || v === undefined || v === "";
-    }).map(([, label]) => label);
-    // FSSAI is asked for but not hard-blocked at submit — Rule 6 requires the info exist and be
-    // disclosed, not a specific enforcement mechanism (plan §7, left as an open decision for a
-    // stricter Phase 2 gate if wanted). GSTIN/PAN/grievance officer ARE hard-required (Rule 6 is
-    // unconditional on those).
+    const profile = profileFor(seller.shopType, seller.vertical);
+    const missing = missingRequiredFields(
+      profile,
+      seller as unknown as Record<string, unknown>,
+      seller.categoryData as Record<string, unknown> | null,
+    );
     if (missing.length > 0) {
       throw new ValidationError(`Please complete: ${missing.join(", ")}`, missing);
     }
@@ -812,7 +927,10 @@ router.put("/sellers/:id", async (req: SellerRequest, res: Response) => {
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid profile data", parsed.error.errors);
 
-    const current = await prisma.seller.findUnique({ where: { id }, select: { gstin: true, pan: true } });
+    const current = await prisma.seller.findUnique({
+      where: { id },
+      select: { gstin: true, pan: true, shopType: true, categoryData: true, vertical: true },
+    });
     if (!current) throw new NotFoundError("Seller", id);
 
     if (parsed.data.gstin !== undefined || parsed.data.pan !== undefined) {
@@ -825,7 +943,35 @@ router.put("/sellers/:id", async (req: SellerRequest, res: Response) => {
       }
     }
 
-    const updated = await prisma.seller.update({ where: { id }, data: parsed.data });
+    // Same merge + unknown-key rules as the seller's own PUT above. The manager edits a seller's
+    // application step by step exactly as the seller would, so a replace here would wipe whichever
+    // category fields this particular request didn't carry.
+    const managerProfile = profileFor(
+      parsed.data.shopType !== undefined ? parsed.data.shopType : current.shopType,
+      current.vertical,
+    );
+    const { merged: managerMerged, unknownKeys: managerUnknown } = mergeCategoryData(
+      current.categoryData,
+      parsed.data.categoryData,
+      managerProfile,
+    );
+    if (managerUnknown.length > 0) {
+      throw new ValidationError(
+        `These fields aren't part of a ${managerProfile.label} application: ${managerUnknown.join(", ")}`,
+        managerUnknown,
+      );
+    }
+
+    const { categoryData: _managerIncoming, ...managerScalarUpdates } = parsed.data;
+    const updated = await prisma.seller.update({
+      where: { id },
+      data: {
+        ...managerScalarUpdates,
+        ...(parsed.data.categoryData !== undefined
+          ? { categoryData: categoryDataWrite(managerMerged) }
+          : {}),
+      },
+    });
     res.json({ success: true, data: await shapeSellerProfile(updated, await isAgreementCurrent(updated.id)) });
   } catch (e) {
     sendError(res, e);

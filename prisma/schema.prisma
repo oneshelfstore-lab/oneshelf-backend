@@ -2451,6 +2451,19 @@ model Customer {
   paymentTermsDays   Int          @default(0)
   outstandingBalance Decimal      @default(0) @db.Decimal(12, 2)
   isActive           Boolean      @default(true)
+  // The SELLER this customer record represents, when it represents one (runbook step 17). Null for
+  // an ordinary shopper, which is every existing row.
+  //
+  // A seller is the platform's customer for the commission it charges them, so they need a Customer
+  // row — but they are NOT the same party as the shopper who happens to share their phone number.
+  // Resolving by phone, the way ensureBillingCustomer does for app users, would merge a seller's
+  // business with their personal shopping account: the same person, and emphatically not the same
+  // taxable entity. This is the handle that keeps them apart.
+  //
+  // @unique because a seller has exactly one billing identity. Deliberately NOT a Prisma relation:
+  // Seller lives in the marketplace half of this schema and Customer in the billing half, and a
+  // relation would make every Seller delete a Customer question.
+  sellerAccountId    String?      @unique
   createdAt          DateTime     @default(now())
   updatedAt          DateTime     @updatedAt
 
@@ -2557,6 +2570,14 @@ model Invoice {
   //
   // Not reusing orderId for this: an order legitimately has many GOODS invoices, one per seller.
   deliveryForOrderId String? @unique
+  // "<sellerId>:<YYYY-MM>" on a COMMISSION invoice, null on everything else (runbook step 17).
+  //
+  // ⚠️ Same job as deliveryForOrderId one line up, and the same reason: ONE commission invoice per
+  // seller per month, enforced by the database. A month billed twice is a seller charged twice for
+  // the same service and two documents in a filed GSTR-1 — and the generator is a route the owner
+  // can press more than once. Composite because neither half alone is unique: a seller has many
+  // months and a month has many sellers.
+  commissionPeriodKey String? @unique
   // The seller whose supply this invoice bills. Null ⇒ house (store-issued, the pre-Phase-6 path).
   sellerId        String?
   // ⚠️ GST/CA: for an EXTERNAL seller the tax invoice is issued under THE SELLER'S identity (their

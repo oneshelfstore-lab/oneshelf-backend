@@ -7,6 +7,12 @@ import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js"
 import { formatVariantForApp, fromAppFormat, toAppFormat, assertVariantFloors } from "../utils/looseUnitConverter.js";
 import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
 import { calculateLineItemTax, calculateInvoiceTotals } from "../services/taxEngine.js";
+import {
+  createCommissionRequest,
+  listCommissionRequests,
+  withdrawCommissionRequest,
+  effectiveCommissionPct,
+} from "../services/commissionNegotiation.js";
 
 // Seller-scoped catalog. Mounted at /api/app/seller/catalog. Every query is hard-filtered to the
 // caller's own sellerId — a seller can never see or edit another seller's products. New products are
@@ -825,6 +831,85 @@ router.get("/vendors/search", async (req: SellerRequest, res: Response) => {
 });
 
 // ─── GET /categories — active categories (for the product form) ───
+// ─── Commission negotiation (runbook step 20) ─────────────────────────────────────────────────
+//
+// ⚠️ ROUTE ORDER, checked rather than assumed, because Express matches in declaration order and a
+// shadowed route fails as a confusing 404 on a path that plainly exists.
+//
+// These are declared LATE in the file, after the ":id" routes — which is only safe because
+// sellerCatalog has NO bare "GET /:id" handler. Its parameterised routes are PUT /:id, DELETE /:id,
+// PATCH /:id/stock and POST /:id/stock/receive; none of them can claim "GET /commission-requests"
+// (one segment, and the GETs above it are exact paths) or "POST /commission-requests/:id/withdraw"
+// (three segments, and /:id/stock/receive needs the literals "stock" and "receive" in the middle).
+// "/categories" below has always relied on exactly this.
+//
+// ⚠️ ADD A BARE "GET /:id" TO THIS FILE AND THESE BREAK SILENTLY, along with /categories and
+// /vendors/search. Move them above it if that day comes.
+
+const commissionRequestSchema = z.object({
+  // ⚠️ Bounded here AND by a database CHECK — see the step-20 migration. A negative commission is
+  // the platform paying the seller a fee, a supply in the opposite direction.
+  requestedPct: z.number().min(0).max(100),
+  note: z.string().max(500).optional(),
+});
+
+// GET /commission-requests — this seller's own asks, whatever their state.
+router.get("/commission-requests", async (req: SellerRequest, res: Response) => {
+  try {
+    res.json({ success: true, data: await listCommissionRequests({ sellerId: req.sellerId! }) });
+  } catch (e) { sendError(res, e); }
+});
+
+// GET /:id/commission — the rate in force on one of their products, so the editor can show it
+// without the app having to work out override-vs-default for itself.
+router.get("/:id/commission", async (req: SellerRequest, res: Response) => {
+  try {
+    const productId = String(req.params.id ?? "");
+    const owned = await prisma.catalogProduct.findFirst({
+      where: { id: productId, sellerId: req.sellerId! },
+      select: { id: true },
+    });
+    if (!owned) throw new NotFoundError("Product", productId);
+    const { pct, productName } = await effectiveCommissionPct(productId);
+    const open = await prisma.commissionRequest.findFirst({
+      where: { productId, sellerId: req.sellerId!, status: "PENDING" },
+      select: { id: true, requestedPct: true, createdAt: true },
+    });
+    res.json({
+      success: true,
+      data: {
+        productId, productName, commissionPct: pct,
+        openRequest: open
+          ? { id: open.id, requestedPct: Number(open.requestedPct), createdAt: open.createdAt }
+          : null,
+      },
+    });
+  } catch (e) { sendError(res, e); }
+});
+
+// POST /:id/commission-request — ask for a different rate on one product.
+router.post("/:id/commission-request", async (req: SellerRequest, res: Response) => {
+  try {
+    const parsed = commissionRequestSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid request", parsed.error.errors);
+    const data = await createCommissionRequest({
+      sellerId: req.sellerId!,
+      productId: String(req.params.id ?? ""),
+      requestedPct: parsed.data.requestedPct,
+      sellerNote: parsed.data.note ?? null,
+    });
+    res.json({ success: true, data });
+  } catch (e) { sendError(res, e); }
+});
+
+// POST /commission-requests/:reqId/withdraw — take back an open ask.
+router.post("/commission-requests/:reqId/withdraw", async (req: SellerRequest, res: Response) => {
+  try {
+    await withdrawCommissionRequest(req.sellerId!, String(req.params.reqId ?? ""));
+    res.json({ success: true, data: { withdrawn: true } });
+  } catch (e) { sendError(res, e); }
+});
+
 router.get("/categories", async (_req: SellerRequest, res: Response) => {
   try {
     const categories = await prisma.category.findMany({ where: { isActive: true }, orderBy: { displayOrder: "asc" } });

@@ -13,17 +13,17 @@ import { TCS_RATE_PCT } from "../../data/taxRates.js";
  * base, a rounding helper swapped for its near-twin, a house slice quietly accruing tax on the
  * platform's own supply. None of it shows up on a screen.
  *
- * The first block pins REAL PRODUCTION ROWS, read from the live database on 21 Sep 2026. They are
- * the proof that lifting this arithmetic out of the route handlers changed nothing — if the
- * extraction had drifted by a paise, these fail.
+ * The first block replays REAL PRODUCTION ROWS, read from the live database on 21 Sep 2026. It
+ * began life as proof that lifting this arithmetic out of the route handlers changed nothing. Steps
+ * 06 and 07 then changed it ON PURPOSE, so each row now states what is STORED and what the same
+ * inputs produce today, and the gap between the two is the whole point of those steps.
+ *
+ * ⚠️ Reproducing what is stored is scripts/replaySellerSplit.ts's job, not this file's — it knows
+ * which rule each row was written under. These are about the rule in force NOW.
  *
  * ⚠️ They run the WHOLE pipeline — sumSellerLines, then computeSellerSplit — because since runbook
  * step 08 the commission is resolved line by line and handed to the split rather than computed
  * inside it. Testing the split alone would leave the half that decides the rate untested.
- *
- * One assertion below pins behaviour that is KNOWN WRONG and scheduled to change (commission on the
- * GST-inclusive figure, runbook step 07). That is deliberate: it should break loudly rather than
- * move money quietly. It is marked.
  */
 
 /** The real placement pipeline, as routes/orders.ts runs it. */
@@ -40,6 +40,7 @@ function placeSlice(
       taxableValue: totals.taxableValue,
       commissionPct: totals.commissionPct,
       commissionAmount: totals.commissionAmount,
+      commissionGstAmount: totals.commissionGstAmount,
       tcsRatePct: opts.tcsRatePct,
       tdsAmount: opts.tdsAmount ?? 0,
       isHouse: opts.isHouse ?? false,
@@ -47,56 +48,134 @@ function placeSlice(
   };
 }
 
-describe("the split — real production rows", () => {
-  // ONS/2627/00013 · bansal stationary. 0% GST stationery, so gross equals taxable.
-  // ⚠️ Replayed at tcsRatePct 1, the rate the row was ACTUALLY written at. Replaying it at today's
-  // 0.5% would not reproduce the ₹1.26 that is stored — which is the whole reason the rate is
-  // snapshotted per row rather than read from the constant (runbook step 06).
-  it("reproduces ONS/2627/00013 exactly", () => {
+describe("real production rows, under the rules now in force", () => {
+  // ONS/2627/00013 · bansal stationary. 0% GST stationery, so gross equals taxable — which means
+  // step 07's change of base cannot move its commission. Only the withholding moved.
+  // ⚠️ Replayed at tcsRatePct 1, the rate the row was ACTUALLY written at (it has since been
+  // corrected to 0.5% in the database by scripts/repairTcsRate.ts). Replaying it at today's rate
+  // would not reproduce the ₹1.26 it was written with — the reason the rate is snapshotted per row.
+  // STORED: commission 6.30 · tcs 1.26 · net 118.44.
+  it("ONS/2627/00013 — same commission, ₹1.13 less payable now the commission GST is withheld", () => {
     expect(placeSlice([{ lineTotal: 126, taxableValue: 126 }], 5, { tcsRatePct: 1 }).split).toEqual({
       subtotal: 126,
       taxableValue: 126,
       tcsRatePct: 1,
       commissionPct: 5,
-      commissionAmount: 6.3,
+      commissionAmount: 6.3, // unchanged: gross and taxable are the same number here
+      commissionGstPct: 18,
+      commissionGstAmount: 1.13,
       tcsAmount: 1.26,
       tdsAmount: 0,
-      netPayable: 118.44,
+      netPayable: 117.31, // stored 118.44, less the 1.13 of GST that used to go uncollected
     });
   });
 
-  it("reproduces ONS/2627/00026 exactly", () => {
-    const { split } = placeSlice([{ lineTotal: 72, taxableValue: 72 }], 5, { tcsRatePct: 1 });
-    expect(split.commissionAmount).toBe(3.6);
-    expect(split.tcsAmount).toBe(0.72);
-    expect(split.netPayable).toBe(67.68);
-  });
-
   // ONS/2627/00439 · Chandpur Bakehouse, the one food order placed so far. Gross 210, taxable 200 —
-  // the only live row where the two differ, which makes it the one row that can tell the two
-  // candidate commission bases apart.
-  it("reproduces ONS/2627/00439 exactly, including its zero TCS", () => {
+  // the only live row where the two differ, which makes it THE row that tells the two candidate
+  // commission bases apart. STORED: commission 10.50 · net 199.50.
+  it("ONS/2627/00439 — commission is ₹10.00 on the taxable 200, not ₹10.50 on the gross 210", () => {
     expect(placeSlice([{ lineTotal: 210, taxableValue: 200 }], 5, { tcsRatePct: 0 }).split).toEqual({
       subtotal: 210,
       taxableValue: 200,
       tcsRatePct: 0,
       commissionPct: 5,
-      commissionAmount: 10.5,
+      commissionAmount: 10, // stored 10.50 — the ₹0.50 the old base charged on the customer's GST
+      commissionGstPct: 18,
+      commissionGstAmount: 1.8,
       tcsAmount: 0,
       tdsAmount: 0,
-      netPayable: 199.5,
+      netPayable: 198.2,
     });
   });
 });
 
+/**
+ * Runbook step 07's prove, and the settlement architecture's own worked example: one regular seller,
+ * one composition seller, and the four deductions that turn a gross into a payout.
+ *
+ * ⚠️ IT ONLY ADDS UP IF THE COMMISSION GST IS WITHHELD. ₹223.00 is 236 − 10 − 1.80 − 1.00 − 0.20;
+ * leaving the 1.80 as a receivable gives 224.80 and the platform's ₹19.50 becomes ₹16.80. That is
+ * why step 07 closes the gap rather than step 17, which only produced the piece of paper.
+ */
+describe("the two-seller worked example", () => {
+  // Seller A — regular, 18% GST goods. Gross 236.00 carrying 200.00 of taxable value.
+  const A = placeSlice([{ lineTotal: 236, taxableValue: 200 }], 5, {
+    tcsRatePct: 0.5,
+    tdsAmount: 0.2, // 0.1% of the TAXABLE 200, resolved by the caller inside a transaction
+  }).split;
+
+  // Seller B — composition, so there is no GST inside the price and gross equals taxable.
+  const B = placeSlice([{ lineTotal: 100, taxableValue: 100 }], 5, {
+    tcsRatePct: 0.5,
+    tdsAmount: 0.1,
+  }).split;
+
+  it("seller A nets ₹223.00", () => {
+    expect(A.commissionAmount).toBe(10); // 5% of 200, not of 236
+    expect(A.commissionGstAmount).toBe(1.8); // 18% on top
+    expect(A.tcsAmount).toBe(1); // 0.5% of 200
+    expect(A.tdsAmount).toBe(0.2); // 0.1% of 200
+    expect(A.netPayable).toBe(223);
+  });
+
+  it("seller B, on composition, nets ₹93.50", () => {
+    expect(B.commissionAmount).toBe(5);
+    expect(B.commissionGstAmount).toBe(0.9);
+    expect(B.tcsAmount).toBe(0.5);
+    expect(B.tdsAmount).toBe(0.1);
+    expect(B.netPayable).toBe(93.5);
+    // ⚠️ A composition seller still pays GST on the platform's commission. It is the PLATFORM's
+    // outward supply, not theirs — they simply cannot claim credit for it.
+    expect(B.commissionGstPct).toBe(18);
+  });
+
+  it("the platform retains ₹19.50 from the two sellers", () => {
+    const retained = [A, B].reduce(
+      (t, x) => t + x.commissionAmount + x.commissionGstAmount + x.tcsAmount + x.tdsAmount,
+      0,
+    );
+    expect(+retained.toFixed(2)).toBe(19.5);
+    // ...and every rupee of it is accounted for: 15.00 is income, 4.50 is held for the government.
+    expect(+(A.commissionAmount + B.commissionAmount).toFixed(2)).toBe(15);
+    expect(
+      +[A, B].reduce((t, x) => t + x.commissionGstAmount + x.tcsAmount + x.tdsAmount, 0).toFixed(2),
+    ).toBe(4.5);
+  });
+
+  // What the base change is worth to a seller, in rupees, on one ₹236 order. Each component is
+  // rounded the way the code rounds it, so this is the real difference rather than a float artifact.
+  it("charging seller A on the gross instead would cost them ₹2.16 more", () => {
+    const onGross = 11.8 + 2.12 + 0.24; // 5% of 236 · 18% of that · 0.1% of 236
+    const onTaxable = A.commissionAmount + A.commissionGstAmount + A.tdsAmount; // 10 + 1.80 + 0.20
+    expect(+onTaxable.toFixed(2)).toBe(12);
+    expect(+(onGross - onTaxable).toFixed(2)).toBe(2.16);
+  });
+});
+
 describe("the base each rate is applied to", () => {
-  // STEP 07 WILL BREAK THIS, ON PURPOSE. Commission is charged on the GST-INCLUSIVE subtotal today:
-  // 210 gross carrying 200 taxable pays 10.50, not 10.00. When step 07 moves the base, change this
-  // to 10 in the same commit. Do not "fix" it before then, or the change ships unannounced.
-  it("charges commission on the GST-inclusive line total, not the taxable value", () => {
+  // Runbook step 07. Commission is charged on the GST-EXCLUSIVE taxable value: 210 gross carrying
+  // 200 taxable pays 10.00, not 10.50. The ₹0.50 difference is commission the platform used to
+  // charge on tax the seller collects for the government and never keeps.
+  it("charges commission on the taxable value, not the GST-inclusive line total", () => {
     const { commissionAmount } = sumSellerLines([{ lineTotal: 210, taxableValue: 200 }], 5);
-    expect(commissionAmount).toBe(10.5);
-    expect(commissionAmount).not.toBe(10);
+    expect(commissionAmount).toBe(10);
+    expect(commissionAmount).not.toBe(10.5);
+  });
+
+  // ⚠️ The receivable step 17 had to record because netPayable did not withhold it. It does now.
+  it("withholds the GST on that commission from the payout", () => {
+    const { split } = placeSlice([{ lineTotal: 210, taxableValue: 200 }], 5, { tcsRatePct: 0 });
+    expect(split.commissionGstAmount).toBe(1.8);
+    expect(split.netPayable).toBe(+(210 - 10 - 1.8).toFixed(2));
+  });
+
+  // A slice charged no commission is charged no rate either — a rate beside a zero amount claims a
+  // rate applied and came to nothing.
+  it("charges no commission GST where there is no commission", () => {
+    const { split } = placeSlice([{ lineTotal: 500, taxableValue: 500 }], 0, { tcsRatePct: 0 });
+    expect(split.commissionAmount).toBe(0);
+    expect(split.commissionGstAmount).toBe(0);
+    expect(split.commissionGstPct).toBe(0);
   });
 
   it("charges TCS on the taxable value, not the gross", () => {
@@ -110,7 +189,7 @@ describe("the base each rate is applied to", () => {
       tdsAmount: 1, // resolved against the FY cumulative by the caller, inside a transaction
     });
     expect(split.tdsAmount).toBe(1);
-    expect(split.netPayable).toBe(1000 - 50 - 10 - 1);
+    expect(split.netPayable).toBe(1000 - 50 - 9 - 10 - 1); // commission 50, its GST 9, tcs 10, tds 1
   });
 });
 
@@ -291,9 +370,10 @@ describe("rounding", () => {
       tdsAmount: 0.03,
     });
     expect(split.netPayable).toBe(+split.netPayable.toFixed(2));
-    // 33.33 − 2.50 − 0.30 − 0.03. Commission is 2.49975 and TCS 0.2976 before rounding, so this
-    // also pins that each component is rounded before the subtraction, not after.
-    expect(split.netPayable).toBe(30.5);
+    // 33.33 − 2.23 − 0.40 − 0.30 − 0.03. Commission is 2.232 on the TAXABLE 29.76, its GST 0.4014
+    // and TCS 0.2976 before rounding, so this also pins that each component is rounded before the
+    // subtraction, not after.
+    expect(split.netPayable).toBe(30.37);
   });
 });
 

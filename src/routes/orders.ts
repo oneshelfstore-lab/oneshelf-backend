@@ -406,7 +406,8 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           if (!seller) continue;
           // ⚠️ A free-gift line has no cart row, so it finds no override and falls back to the
           // seller's rate — times a lineTotal of 0, which is still nothing. Correct either way.
-          const { subtotal, taxableValue, commissionPct, commissionAmount, lineCommissions } = sumSellerLines(
+          const { subtotal, taxableValue, commissionPct, commissionAmount, commissionGstAmount,
+                  lineCommissions } = sumSellerLines(
             sellerItems.map((it) => ({
               lineTotal: Number(it.lineTotal),
               taxableValue: Number(it.taxableValue),
@@ -420,7 +421,9 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           // rather than inside computeSellerSplit because it needs a transaction for the
           // financial-year cumulative. See services/sellerTds194o.ts for the rate/threshold/
           // deduction-point discipline.
-          const { tdsAmount } = await computeSubOrderTds194o(tx, seller, subtotal);
+          // ⚠️ The TAXABLE base since step 07, not subtotal. The FY-cumulative inside accumulates
+          // the same base, so the ₹5 lakh threshold is measured in the same currency it is stated in.
+          const { tdsAmount } = await computeSubOrderTds194o(tx, seller, taxableValue);
           // ⚠️ GST/CA (Phase 6): as a GST e-commerce operator the platform collects Sec-52 TCS @ 1%
           // (0.5% CGST + 0.5% SGST) on the NET TAXABLE value of each EXTERNAL seller's supplies. The
           // house store is the platform's own catalog → no TCS on its own supplies. TCS is NOT charged
@@ -433,6 +436,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
             // order placed so far — commissionPct IS the seller's rate and the amount is unchanged.
             commissionPct,
             commissionAmount,
+            commissionGstAmount,
             tcsRatePct: TCS_RATE_PCT,
             tdsAmount,
             // Step 09: exempt because it is the SAME LEGAL ENTITY, not merely because it is the

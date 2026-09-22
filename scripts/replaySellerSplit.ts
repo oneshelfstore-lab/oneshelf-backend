@@ -18,6 +18,12 @@
  * a false mismatch on a row that was perfectly correct when it was written. It is also why this
  * check stays green across scripts/repairTcsRate.ts — it reads whatever rate each row now carries.
  *
+ * ⚠️ AND SO DOES THE RULE, not just the rate. Runbook step 07 moved commission off the GST-inclusive
+ * lineTotal onto taxableValue and began withholding the GST on it. `SubOrder.commissionGstAmount`
+ * is the marker for which side of that a row sits on: NULL means it was written before, so it is
+ * replayed on the old base with no GST withheld. Without that branch this script would report every
+ * historical row as a mismatch and stop being a regression net at exactly the moment one is useful.
+ *
  * Run: railway run --service Postgres bash -c 'DATABASE_URL="$DATABASE_PUBLIC_URL" npx tsx scripts/replaySellerSplit.ts'
  */
 import { PrismaClient } from "@prisma/client";
@@ -27,6 +33,9 @@ const prisma = new PrismaClient({
   datasources: { db: { url: process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL } },
 });
 
+/** The split's own rounding. Not round2 — see services/sellerSplit.ts. */
+const r2 = (v: number) => +v.toFixed(2);
+
 async function main() {
   const slices = await prisma.subOrder.findMany({
     select: {
@@ -34,6 +43,7 @@ async function main() {
       subtotal: true,
       commissionPct: true,
       commissionAmount: true,
+      commissionGstAmount: true,
       tcsAmount: true,
       tcsRatePct: true,
       tdsAmount: true,
@@ -57,12 +67,14 @@ async function main() {
   let orphaned = 0;
   let checked = 0;
   let multiLine = 0;
+  let legacyRule = 0;
 
   for (const s of slices) {
     // A slice whose items were never linked back (subOrderId null) has nothing to re-derive from.
     if (s.items.length === 0) { orphaned++; continue; }
     checked++;
     if (s.items.length > 1) multiLine++;
+    if (s.commissionGstAmount == null) legacyRule++;
 
     const isFood = s.seller.vertical === "FOOD";
     const stored = {
@@ -90,11 +102,23 @@ async function main() {
         )
       : sumSellerLines(lines, Number(s.commissionPct));
 
+    // Which rule was in force when this row was written. A pre-step-07 row charged commission on the
+    // GST-inclusive line total and withheld no GST on it; the arithmetic for that era lives HERE, in
+    // the replay, rather than as a dead branch inside the production function.
+    const preStep07 = s.commissionGstAmount == null;
+    const legacyCommission = r2(
+      (isFood ? [{ lineTotal: stored.subtotal, commissionPctOverride: null as number | null }] : lines).reduce(
+        (sum, l) => sum + r2((Number(l.lineTotal) * Number(s.commissionPct)) / 100),
+        0,
+      ),
+    );
+
     const split = computeSellerSplit({
       subtotal: summed.subtotal,
       taxableValue: summed.taxableValue,
       commissionPct: summed.commissionPct,
-      commissionAmount: summed.commissionAmount,
+      commissionAmount: preStep07 ? legacyCommission : summed.commissionAmount,
+      commissionGstAmount: preStep07 ? 0 : Number(s.commissionGstAmount),
       // The rate this row was actually written at. Null only on a row that predates the snapshot
       // column, and the step-04 migration backfilled every one of those.
       tcsRatePct: Number(s.tcsRatePct ?? 0),
@@ -121,6 +145,7 @@ async function main() {
   }
 
   console.log(`  checked:     ${checked}  (${multiLine} of them multi-line, where per-line rounding can bite)`);
+  console.log(`  pre-step-07: ${legacyRule}  (commission on the gross, no GST withheld - replayed under that rule)`);
   console.log(`  skipped:     ${orphaned} (no order items linked to the slice - nothing to re-derive)`);
   console.log(`  mismatch:    ${mismatches.length}\n`);
 

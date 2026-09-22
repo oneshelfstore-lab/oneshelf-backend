@@ -1,14 +1,22 @@
+import { commissionWithGst, COMMISSION_GST_RATE_PCT } from "../data/commissionTax.js";
+
 /**
  * The seller split — how one seller's slice of an order turns into money.
  *
  * This arithmetic used to live inline in three places (routes/orders.ts, routes/foodOrders.ts,
  * services/subscriptionEngine.ts), which meant a rate change had to be made three times and could
- * not be tested at all. It is lifted here BYTE-IDENTICALLY: every number this produces is the same
- * number those three sites produced before, to the paise.
+ * not be tested at all. It was lifted here byte-identically; the numbers have since moved, twice,
+ * deliberately and each time as its own decision:
+ *
+ *   step 06 - Sec-52 TCS from the superseded 1% to the notified 0.5%.
+ *   step 07 - commission off the GST-INCLUSIVE lineTotal and onto taxableValue, and the GST on that
+ *             commission WITHHELD from the payout rather than left as a receivable.
  *
  * ⚠️ Rounding is `+(x).toFixed(2)`, NOT the `round2()` helper several other services define as
  * `Math.round((n + EPSILON) * 100) / 100`. The two disagree on some values. The split has always
- * used toFixed and must keep using it, or existing rows stop reconciling.
+ * used toFixed and must keep using it, or existing rows stop reconciling. The ONE exception is the
+ * commission GST, which goes through `commissionWithGst` on round2 so that placement and the
+ * monthly commission invoice cannot disagree about it - see the note at that line.
  *
  * Two functions, because the TDS base is needed before the split can run: the caller sums the lines,
  * uses that subtotal to ask the database for the financial-year 194-O cumulative, then splits. TDS
@@ -58,6 +66,14 @@ export interface SellerSplitInput {
    */
   commissionAmount: number;
   /**
+   * ⚠️ WITHHELD FROM THE PAYOUT, not merely recorded (runbook step 07). Until step 07 netPayable was
+   * subtotal - commission - tcs - tds, so the platform billed the seller 11.80 having only taken
+   * 10.00 out of their money and carried the 1.80 as a receivable it would never realistically
+   * collect. The settlement architecture's worked example has always shown it as its own deduction
+   * line; this is where that becomes true.
+   */
+  commissionGstAmount: number;
+  /**
    * Sec-52 TCS. The CALLER decides this, not the function: food is 0 because Sec 9(5) makes the
    * platform the deemed supplier, and that reasoning has to stay visible at the food call site
    * rather than hiding behind a flag in here.
@@ -91,6 +107,13 @@ export interface SellerSplit {
   tcsRatePct: number;
   commissionPct: number;
   commissionAmount: number;
+  /**
+   * GST the PLATFORM charges the SELLER on that commission - its own outward supply, SAC 998599,
+   * billed monthly as a COMMISSION invoice (runbook step 17). Snapshotted per slice so a later rate
+   * change cannot rewrite what a row was charged.
+   */
+  commissionGstPct: number;
+  commissionGstAmount: number;
   tcsAmount: number;
   tdsAmount: number;
   netPayable: number;
@@ -116,6 +139,9 @@ export interface SellerLineTotals {
   commissionPct: number;
   /** Sum of the per-line amounts below, so the lines and the slice reconcile exactly. */
   commissionAmount: number;
+  /** GST the platform charges the seller ON TOP of that commission, withheld from the payout. */
+  commissionGstPct: number;
+  commissionGstAmount: number;
   /** In input order, for the OrderItem snapshot. */
   lineCommissions: LineCommission[];
 }
@@ -138,27 +164,39 @@ export interface SellerLineTotals {
  */
 export function sumSellerLines(lines: SellerLine[], sellerCommissionPct: number): SellerLineTotals {
   const subtotal = r2(lines.reduce((sum, l) => sum + Number(l.lineTotal), 0));
+  const taxableValue = r2(lines.reduce((sum, l) => sum + Number(l.taxableValue), 0));
   const lineCommissions = lines.map((l) => {
     const commissionPct = resolveCommissionPct(l, sellerCommissionPct);
-    return { commissionPct, commissionAmount: r2((Number(l.lineTotal) * commissionPct) / 100) };
+    return { commissionPct, commissionAmount: r2((Number(l.taxableValue) * commissionPct) / 100) };
   });
   const weighted = lines.reduce(
-    (sum, l, i) => sum + Number(l.lineTotal) * lineCommissions[i]!.commissionPct,
+    (sum, l, i) => sum + Number(l.taxableValue) * lineCommissions[i]!.commissionPct,
     0,
   );
+  const commissionAmount = r2(lineCommissions.reduce((sum, c) => sum + c.commissionAmount, 0));
   return {
     subtotal,
-    taxableValue: r2(lines.reduce((sum, l) => sum + Number(l.taxableValue), 0)),
-    // No lines, or lines that are all free gifts, leave nothing to weight — report the rate that
+    taxableValue,
+    // ⚠️ Weighted by the base the rate is charged ON, which since step 07 is taxableValue. Weighting
+    // by lineTotal would blend two rates by the wrong quantity and produce a percentage that is not
+    // any seller's rate and not the effective one either.
+    // No lines, or lines that are all free gifts, leave nothing to weight - report the rate that
     // would have applied rather than a 0 that reads as "this seller is on zero commission".
-    commissionPct: subtotal > 0 ? r2(weighted / subtotal) : r2(sellerCommissionPct),
-    commissionAmount: r2(lineCommissions.reduce((sum, c) => sum + c.commissionAmount, 0)),
+    commissionPct: taxableValue > 0 ? r2(weighted / taxableValue) : r2(sellerCommissionPct),
+    commissionAmount,
+    // ⚠️ commissionWithGst, NOT a local multiplication, and the crossing of rounding helpers is
+    // deliberate. services/commissionInvoice.ts bills the seller using that same function; if
+    // placement rounded with toFixed and the invoice with round2 they would disagree by a paise and
+    // the invoice's "already withheld" figure would stop matching what was actually withheld.
+    commissionGstPct: COMMISSION_GST_RATE_PCT,
+    commissionGstAmount: commissionWithGst(commissionAmount).gst,
     lineCommissions,
   };
 }
 
 export function computeSellerSplit(input: SellerSplitInput): SellerSplit {
-  const { subtotal, taxableValue, commissionPct, commissionAmount, tcsRatePct, tdsAmount, isHouse } = input;
+  const { subtotal, taxableValue, commissionPct, commissionAmount, commissionGstAmount,
+          tcsRatePct, tdsAmount, isHouse } = input;
   const tcsAmount = isHouse ? 0 : r2((taxableValue * tcsRatePct) / 100);
   return {
     subtotal,
@@ -170,8 +208,12 @@ export function computeSellerSplit(input: SellerSplitInput): SellerSplit {
     tcsRatePct: isHouse ? 0 : tcsRatePct,
     commissionPct,
     commissionAmount,
+    // A rate beside a zero amount would claim a rate applied and came to nothing, so a slice that
+    // was charged no commission is charged no rate either - the same rule as tcsRatePct above.
+    commissionGstPct: commissionAmount > 0 ? COMMISSION_GST_RATE_PCT : 0,
+    commissionGstAmount,
     tcsAmount,
     tdsAmount,
-    netPayable: r2(subtotal - commissionAmount - tcsAmount - tdsAmount),
+    netPayable: r2(subtotal - commissionAmount - commissionGstAmount - tcsAmount - tdsAmount),
   };
 }

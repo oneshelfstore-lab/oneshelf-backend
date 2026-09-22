@@ -493,7 +493,7 @@ async function generateOrderFor(
           const houseIsSeparate = await houseSellerIsSeparateEntity(tx);
           const subtotal = pricing.lineTotal;
           // Sec 194-O TDS — same discipline as routes/orders.ts. Off (0) unless StoreConfig.tds194oEnabled.
-          const { tdsAmount } = await computeSubOrderTds194o(tx, seller, subtotal);
+          const { tdsAmount } = await computeSubOrderTds194o(tx, seller, pricing.taxableValue);
           // One variant, so one line — routed through sumSellerLines anyway so the per-product
           // override and the rounding come from the same place as every other order (step 08).
           const lineTotals = sumSellerLines(
@@ -511,6 +511,7 @@ async function generateOrderFor(
             taxableValue: pricing.taxableValue,
             commissionPct: lineTotals.commissionPct,
             commissionAmount: lineTotals.commissionAmount,
+            commissionGstAmount: lineTotals.commissionGstAmount,
             tcsRatePct: TCS_RATE_PCT,
             tdsAmount,
             isHouse: isSameLegalEntity(seller, houseIsSeparate), // step 09 - see services/entitySplit.ts

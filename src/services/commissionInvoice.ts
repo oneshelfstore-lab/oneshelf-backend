@@ -160,7 +160,7 @@ export async function generateCommissionInvoice(
       status: { not: "CANCELLED" },
       order: { is: { status: { not: "CANCELLED" } } },
     },
-    select: { id: true, commissionAmount: true },
+    select: { id: true, commissionAmount: true, commissionGstAmount: true },
   });
 
   const commission = round2(slices.reduce((sum, s) => sum + Number(s.commissionAmount), 0));
@@ -169,6 +169,11 @@ export async function generateCommissionInvoice(
   }
 
   const { taxable, gst, total } = commissionWithGst(commission);
+  // The commission itself is always recovered by withholding it from the payout. The GST on top is
+  // recovered only for slices placed since step 07 - a null here means the row predates it.
+  const gstWithheld = round2(slices.reduce((sum, s) => sum + Number(s.commissionGstAmount ?? 0), 0));
+  const withheldTotal = round2(Math.min(taxable + gstWithheld, total));
+  const amountDue = round2(total - withheldTotal);
   const customer = await ensureSellerBillingCustomer(seller);
 
   // The platform supplies from its own place of business; the seller is the recipient. Inter-state
@@ -241,14 +246,16 @@ export async function generateCommissionInvoice(
         totalAmount: total,
         amountInWords: convertAmountToWords(total),
 
-        // ⚠️ PARTIAL, not PAID, and the split is the honest part. The commission itself was
-        // already recovered by withholding it from the payout; the GST on top was NOT, because
-        // netPayable is subtotal - commission - tcs - tds. So the seller genuinely still owes the
-        // tax, and the invoice records that instead of claiming money nobody took.
+        // ⚠️ WHAT WAS ACTUALLY WITHHELD, read off the rows rather than assumed. Since runbook
+        // step 07 netPayable is subtotal - commission - commissionGst - tcs - tds, so a slice
+        // placed after it has had the tax taken too and the invoice is settled in full. A slice
+        // placed BEFORE it carries a null commissionGstAmount, had only the commission withheld,
+        // and leaves a genuine receivable - which is recorded rather than papered over. A period
+        // spanning the cutover is correctly part-paid.
         status: "APPROVED",
-        paymentStatus: (gst > 0 ? "PARTIAL" : "PAID") as any,
-        amountPaid: taxable,
-        amountDue: gst,
+        paymentStatus: (amountDue > 0 ? "PARTIAL" : "PAID") as any,
+        amountPaid: withheldTotal,
+        amountDue,
 
         createdBy: "system",
 
@@ -282,16 +289,20 @@ export async function generateCommissionInvoice(
     });
 
     // Snapshot what each slice was billed at, so a later rate change cannot rewrite what this
-    // invoice charged — the same reason SubOrder.tcsRatePct exists. These columns were added by
-    // step 04 and have been unwritten until now.
-    await tx.subOrder.updateMany({
-      where: { id: { in: slices.map((s) => s.id) } },
-      data: { commissionGstPct: COMMISSION_GST_RATE_PCT },
-    });
-    for (const s of slices) {
+    // invoice charged — the same reason SubOrder.tcsRatePct exists.
+    // ⚠️ ONLY for slices that do not already carry one. Since step 07 placement writes these two
+    // columns itself, and the placement figure is the truthful one: it is what was actually taken
+    // out of the payout. Overwriting it here with a fresh multiplication would quietly restate a
+    // row at today's rate if the rate had moved since - the exact history-rewriting this snapshot
+    // exists to prevent.
+    const unsnapshotted = slices.filter((s) => s.commissionGstAmount == null);
+    for (const s of unsnapshotted) {
       await tx.subOrder.update({
         where: { id: s.id },
-        data: { commissionGstAmount: round2((Number(s.commissionAmount) * COMMISSION_GST_RATE_PCT) / 100) },
+        data: {
+          commissionGstPct: COMMISSION_GST_RATE_PCT,
+          commissionGstAmount: round2((Number(s.commissionAmount) * COMMISSION_GST_RATE_PCT) / 100),
+        },
         select: { id: true },
       });
     }

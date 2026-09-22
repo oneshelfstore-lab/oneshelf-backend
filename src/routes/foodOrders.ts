@@ -394,7 +394,7 @@ router.post("/orders", async (req: FirebaseAuthRequest, res: Response) => {
 
       // Income Tax Sec 194-O is a DIFFERENT statute (income tax on the seller's receipts) and is
       // unaffected by the GST mechanism below, so it still applies to restaurants.
-      const { tdsAmount } = await computeSubOrderTds194o(tx, p.restaurant, p.totals.subtotal);
+      const { tdsAmount } = await computeSubOrderTds194o(tx, p.restaurant, p.totals.taxableValue);
       // ⚠️⚠️ GST/CA — TCS IS DELIBERATELY ZERO ON FOOD, and this is the single most important line
       // in this file. A goods sub-order accrues Sec-52 TCS @1% because the platform merely COLLECTS
       // tax on someone else's supply. Restaurant service supplied through an e-commerce operator is
@@ -417,6 +417,7 @@ router.post("/orders", async (req: FirebaseAuthRequest, res: Response) => {
         taxableValue: p.totals.taxableValue,
         commissionPct: foodLine.commissionPct,
         commissionAmount: foodLine.commissionAmount,
+        commissionGstAmount: foodLine.commissionGstAmount,
         tcsRatePct: 0,
         tdsAmount,
         isHouse: false, // a restaurant is always a third party; the house store has no menu

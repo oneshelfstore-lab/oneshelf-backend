@@ -46,6 +46,7 @@ describe("what the flag does to a house slice's money", () => {
       taxableValue: totals.taxableValue,
       commissionPct: totals.commissionPct,
       commissionAmount: totals.commissionAmount,
+      commissionGstAmount: totals.commissionGstAmount,
       tcsRatePct: TCS_RATE_PCT,
       tdsAmount: 0, // 194-O is off; see the prove script for the live decision
       isHouse: isSameLegalEntity(HOUSE, houseIsSeparate),
@@ -67,8 +68,9 @@ describe("what the flag does to a house slice's money", () => {
   it("charges it once the shop is a separate legal entity", () => {
     const split = place(true, 5);
     expect(split.commissionAmount).toBe(25); // 5% of 500
+    expect(split.commissionGstAmount).toBe(4.5); // 18% on top, withheld since step 07
     expect(split.tcsAmount).toBe(2.5); // 0.5% of 500
-    expect(split.netPayable).toBe(472.5);
+    expect(split.netPayable).toBe(468);
   });
 
   // ⚠️ Worth being explicit about, because it is the thing most likely to be misread as a bug:
@@ -88,6 +90,7 @@ describe("what the flag does to a house slice's money", () => {
         taxableValue: totals.taxableValue,
         commissionPct: totals.commissionPct,
         commissionAmount: totals.commissionAmount,
+        commissionGstAmount: totals.commissionGstAmount,
         tcsRatePct: TCS_RATE_PCT,
         tdsAmount: 0,
         isHouse: isSameLegalEntity(EXTERNAL, houseIsSeparate),

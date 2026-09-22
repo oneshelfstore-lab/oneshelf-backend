@@ -60,33 +60,47 @@ export function quarterFor(date: Date): "Q1" | "Q2" | "Q3" | "Q4" {
   return "Q4";
 }
 
-/** Sum of this seller's SubOrder.subtotal so far this FY, excluding CANCELLED sub-orders (a
+/** Sum of this seller's GST-EXCLUSIVE sales so far this FY, excluding CANCELLED sub-orders (a
  *  cancelled sale never really "paid" the seller — same exclusion GSTR-8/TCS reporting already
- *  uses) and excluding the order currently being placed (it doesn't exist yet at call time). */
-async function cumulativeFyGross(
+ *  uses) and excluding the order currently being placed (it doesn't exist yet at call time).
+ *
+ *  ⚠️ SUMS taxableValue, NOT subtotal (runbook step 07). It used to accumulate the GST-INCLUSIVE
+ *  figure, which pushes a seller over the ₹5 lakh threshold earlier than the law says — on 18% goods
+ *  they would cross it at roughly ₹4.24 lakh of actual sales. The rate and the threshold have to be
+ *  measured on the same base or the exemption is quietly smaller than the statute grants.
+ *
+ *  ⚠️ taxableValue is nullable, and Postgres sum() SKIPS nulls rather than poisoning the total, so a
+ *  null would silently under-count and under-withhold. Nothing can write one today: every placement
+ *  path fills it (step 06) and the step-04 backfill plus scripts/repairLegacyTaxableValue.ts left
+ *  zero nulls behind. Verified, not assumed - if that ever stops being true, this is where it bites. */
+async function cumulativeFyTaxable(
   tx: Prisma.TransactionClient,
   sellerId: string,
   fyStart: Date,
 ): Promise<number> {
   const agg = await tx.subOrder.aggregate({
     where: { sellerId, createdAt: { gte: fyStart }, status: { not: "CANCELLED" } },
-    _sum: { subtotal: true },
+    _sum: { taxableValue: true },
   });
-  return Number(agg._sum.subtotal ?? 0);
+  return Number(agg._sum.taxableValue ?? 0);
 }
 
 /**
  * Computes the Sec 194-O TDS to withhold on ONE seller's sub-order at placement time. Returns
- * {tdsAmount: 0} whenever the feature is off, the seller is the house store, or the exemption
- * fully covers this order. Must be called from WITHIN the same transaction that creates the
- * SubOrder, so the cumulative-FY-gross read is consistent with concurrent order placements.
+ * {tdsAmount: 0} whenever the feature is off, the seller is the same legal entity as the platform,
+ * or the exemption fully covers this order. Must be called from WITHIN the same transaction that
+ * creates the SubOrder, so the cumulative-FY read is consistent with concurrent order placements.
+ *
+ * ⚠️ THE BASE IS THE GST-EXCLUSIVE TAXABLE VALUE (runbook step 07), not the gross the customer paid.
+ * TDS is income tax on the seller's receipts, and the GST inside a price is not the seller's income -
+ * it is tax they collect and hand on. Withholding on the gross taxes them on the government's money.
  */
 export async function computeSubOrderTds194o(
   tx: Prisma.TransactionClient,
   seller: Tds194oSeller,
-  subtotal: number,
+  taxableValue: number,
 ): Promise<Tds194oResult> {
-  if (subtotal <= 0) return { tdsAmount: 0, rateApplied: 0 };
+  if (taxableValue <= 0) return { tdsAmount: 0, rateApplied: 0 };
 
   const config = await tx.storeConfig.findFirst({
     select: {
@@ -116,17 +130,17 @@ export async function computeSubOrderTds194o(
   const exemptionEligible = seller.entityType === "INDIVIDUAL_HUF" && !!seller.pan;
   if (!exemptionEligible) {
     // Companies/partnerships/firms get NO threshold exemption under 194-O — TDS from rupee one.
-    const tdsAmount = +((subtotal * rate) / 100).toFixed(2);
+    const tdsAmount = +((taxableValue * rate) / 100).toFixed(2);
     return { tdsAmount, rateApplied: rate };
   }
 
-  const priorGross = await cumulativeFyGross(tx, seller.id, fyStartDate());
-  const newTotal = priorGross + subtotal;
+  const priorTaxable = await cumulativeFyTaxable(tx, seller.id, fyStartDate());
+  const newTotal = priorTaxable + taxableValue;
   if (newTotal <= threshold) return { tdsAmount: 0, rateApplied: 0 };
 
   // Only the slice above ₹5L is taxed: either the whole order (already past threshold before this
   // order) or just the portion that crosses it (this is the order that tips the seller over ₹5L).
-  const taxableSlice = priorGross >= threshold ? subtotal : newTotal - threshold;
+  const taxableSlice = priorTaxable >= threshold ? taxableValue : newTotal - threshold;
   const tdsAmount = +((taxableSlice * rate) / 100).toFixed(2);
   return { tdsAmount, rateApplied: rate };
 }

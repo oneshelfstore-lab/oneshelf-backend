@@ -4,6 +4,17 @@ import { stateNameFromCode, stateCodeFromGstin } from "../lib/stateCodes.js";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
+/**
+ * Rule 5(1)(f), CGST Rules 2017 — a composition taxable person must carry these exact words on the
+ * bill of supply it issues.
+ *
+ * ⚠️ Quoted wording, not copy. Do not reword, shorten or "improve" it; the rule prescribes the
+ * phrase. And ⚠️ it goes AT THE TOP of the document, which the rule also specifies — not in the
+ * footer with the terms, where a reader would reach it after the amount.
+ */
+export const COMPOSITION_DECLARATION =
+  "composition taxable person, not eligible to collect tax on supplies";
+
 export interface InvoiceData {
   // Company
   companyName: string;
@@ -66,6 +77,18 @@ export interface InvoiceData {
     totalTax: string;
   }>;
 
+  /**
+   * The supplier traded under the GST composition scheme when this document was issued, so it must
+   * carry [COMPOSITION_DECLARATION]. Read from the invoice's own SNAPSHOT, never from the seller's
+   * current scheme — a seller who later moves to the regular scheme must not have their already
+   * issued bills of supply quietly lose the declaration.
+   *
+   * ⚠️ Not the same question as "is this a BILL_OF_SUPPLY". A regular dealer selling only exempt
+   * goods gets one too, and must NOT carry this line — it would assert something untrue about a
+   * registered business.
+   */
+  supplierIsComposition: boolean;
+
   // Credit note reference
   originalInvoiceNumber?: string;
 }
@@ -104,7 +127,12 @@ interface Col {
 
 // ─── PDF drawing ─────────────────────────────────────────────────────
 
-function drawInvoice(doc: PDFKit.PDFDocument, data: InvoiceData): void {
+/**
+ * Exported ONLY so a test can render real bytes and read the text back off the page. A mandatory
+ * declaration that exists in the data and not on the document is still a defective bill of supply,
+ * and nothing but rendering catches that.
+ */
+export function drawInvoice(doc: PDFKit.PDFDocument, data: InvoiceData): void {
   const LEFT = doc.page.margins.left;
   const RIGHT = doc.page.width - doc.page.margins.right;
   const CONTENT_W = RIGHT - LEFT;
@@ -159,6 +187,16 @@ function drawInvoice(doc: PDFKit.PDFDocument, data: InvoiceData): void {
     characterSpacing: 2,
   });
   y += 28;
+
+  // Rule 5(1)(f) declaration, immediately under the title because the rule says "at the top of the
+  // bill of supply" — a footer would put it after the amount, which is not the top of anything.
+  if (data.supplierIsComposition) {
+    doc.rect(LEFT, y, CONTENT_W, 18).fillColor("#FFF8E1").fill();
+    doc.rect(LEFT, y, CONTENT_W, 18).lineWidth(0.5).strokeColor("#E0C77A").stroke();
+    doc.fillColor("#6B5300").font("Helvetica-Bold").fontSize(9);
+    doc.text(COMPOSITION_DECLARATION, LEFT, y + 5, { width: CONTENT_W, align: "center" });
+    y += 24;
+  }
 
   if (data.originalInvoiceNumber) {
     doc.fillColor(DARK).font("Helvetica").fontSize(10);
@@ -481,6 +519,12 @@ function drawThermalInvoice(doc: PDFKit.PDFDocument, data: InvoiceData): number 
 
   rule({ heavy: true });
   write(data.invoiceTitle, { size: 9, bold: true, align: "center", color: GREEN, gap: 2 });
+  // Same Rule 5(1)(f) line as the A4 copy. The slip is a full tax document, not a delivery note, so
+  // a mandatory declaration belongs on it too. Safe to add here: drawThermalInvoice is pure layout
+  // and runs identically in the measure pass, so the roll still grows to exactly fit.
+  if (data.supplierIsComposition) {
+    write(COMPOSITION_DECLARATION, { size: 6, bold: true, align: "center", color: DARK, gap: 3 });
+  }
   pair("No.", data.invoiceNumber, { size: 7, bold: true });
   pair("Date", data.invoiceDate, { size: 7 });
   if (data.originalInvoiceNumber) pair("Against invoice", data.originalInvoiceNumber, { size: 7 });
@@ -729,6 +773,7 @@ export async function generateInvoicePdf(
     companyStateCode: invoice.supplierStateCode,
 
     invoiceTitle: titleMap[invoice.invoiceType] ?? "Tax Invoice",
+    supplierIsComposition: invoice.supplierGstScheme === "COMPOSITION",
     invoiceNumber: invoice.invoiceNumber,
     invoiceDate: fmtDate(invoice.invoiceDate),
 

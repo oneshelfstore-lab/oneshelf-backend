@@ -1,0 +1,16 @@
+-- Runbook step 14: Bill of Supply for composition sellers.
+--
+-- ONE nullable ADD COLUMN. No new type — the SellerGstScheme enum already exists from
+-- 20260921000001_commission_negotiation_and_ledger, so this reuses it rather than creating a
+-- parallel String.
+--
+-- Nullable, not DEFAULT 'REGULAR', and the reason is the rule this runbook settled on at step 04:
+-- default only where the default is a true statement about every existing row. It nearly is here —
+-- all 374 invoices on file were issued by regular dealers — but a money/compliance column that
+-- cannot tell "issued by a regular dealer" from "we never asked" is how the legacy
+-- OrderItem.taxableValue @default(0) row got created. NULL reads as REGULAR everywhere it is
+-- consumed, so the effect is the same without the loss of information.
+--
+-- Nothing reads it yet at the moment this migration ships, so the database may run ahead of the
+-- code safely — the only direction that is safe.
+ALTER TABLE "Invoice" ADD COLUMN     "supplierGstScheme" "SellerGstScheme";

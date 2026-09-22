@@ -96,6 +96,31 @@ export function isPlatformIssuedInvoice(
 }
 
 /**
+ * Does this seller trade under the GST COMPOSITION scheme (Sec 10, CGST Act)?
+ *
+ * A composition dealer pays a flat percentage of turnover and MAY NOT collect tax on its supplies.
+ * So its document is a BILL OF SUPPLY carrying the Rule 5(1)(f) declaration, never a tax invoice,
+ * and every tax component on it is nil.
+ *
+ * ⚠️ Answered from `gstScheme` and NOTHING ELSE — specifically not from "did every line come out at
+ * 0% tax", which is what the invoice type used to be inferred from. Those two coincide numerically
+ * and mean different things: a REGULAR dealer selling only exempt goods also reaches all-zero tax,
+ * and stamping the composition declaration on that dealer's document would assert something untrue
+ * about a registered business. The numbers agreeing is a coincidence; the scheme is the fact.
+ *
+ * ⚠️ Deliberately false for the house store and for anything the platform issues. The store's own
+ * GST scheme is a property of `Company`, not of a `Seller` row, and a Sec 9(5) restaurant supply is
+ * the platform's deemed supply rather than the restaurant's — so neither can be resolved from a
+ * seller's `gstScheme` even when one is set.
+ */
+export function isCompositionSeller(
+  seller: { isHouse: boolean; vertical?: string | null; gstScheme?: string | null } | null | undefined,
+): boolean {
+  if (isPlatformIssuedInvoice(seller)) return false;
+  return seller!.gstScheme === "COMPOSITION";
+}
+
+/**
  * Snapshots an external seller's identity onto the invoice so the PDF/GSTR-1 are issued under
  * THE SELLER's GSTIN (Phase 6, CA-gated). The house seller — and, per Sec 9(5), any restaurant —
  * returns all-null → the PDF falls back to the store Company.
@@ -128,6 +153,7 @@ async function createOneInvoice(opts: {
   const { order, customer, items, seller, subOrderId, applyOrderDiscount } = opts;
   const isHouse = isStoreOwnSupply(seller);
   const issuedByPlatform = isPlatformIssuedInvoice(seller);
+  const isComposition = isCompositionSeller(seller);
   const supplier = supplierFromSeller(seller);
 
   // Supplier state = the ISSUING party's state (the store for a platform-issued invoice — house goods
@@ -149,6 +175,10 @@ async function createOneInvoice(opts: {
       cessRate: 0,
       isTaxInclusive: true,
       isInterState,
+      // A composition seller collects no tax, so the engine zeroes every component and the full
+      // amount charged becomes the value of supply. The customer pays the same rupees either way —
+      // the price was always GST-inclusive — only its composition on the document changes.
+      isComposition,
     }),
   );
 
@@ -159,8 +189,18 @@ async function createOneInvoice(opts: {
   const seriesPrefix = issuedByPlatform ? "INV" : `INV-${seller.slug}`;
   const invoiceNumber = await getNextInvoiceNumber(seriesPrefix);
   const supplyType = customer.gstin ? "B2B" : "B2CS";
+  // A Bill of Supply for either of two INDEPENDENT reasons, and they are tested separately on
+  // purpose. `isComposition` — the supplier may not collect tax at all — is checked FIRST and from
+  // the scheme, so the document type no longer depends on the arithmetic happening to come out at
+  // zero. `allExempt` remains for a REGULAR dealer whose lines are all 0%-GST, which is a different
+  // document for a different reason and carries no composition declaration.
+  //
+  // ⚠️ Without the explicit first test this would still "work", because the engine zeroes a
+  // composition seller's rates and `allExempt` would then be true — incidental correctness of
+  // exactly the kind this codebase has been bitten by twice. Anyone later changing how composition
+  // rates are handled would silently turn these into tax invoices.
   const allExempt = lineItemTaxResults.every((r) => r.gstRate === 0);
-  const invoiceType = allExempt ? "BILL_OF_SUPPLY" : "TAX_INVOICE";
+  const invoiceType = isComposition || allExempt ? "BILL_OF_SUPPLY" : "TAX_INVOICE";
   const isPaid = order.paymentStatus === "PAID";
 
   // Snapshot the store's OWN Company details at creation time for anything the platform issues — the
@@ -183,6 +223,10 @@ async function createOneInvoice(opts: {
         subOrderId: subOrderId,
         sellerId: seller?.id ?? null,
         ...supplier,
+        // Snapshotted, not looked up at render time: if this seller later moves to the regular
+        // scheme, every bill of supply already issued must still carry its declaration. Null for a
+        // regular seller and for anything the platform issues (see Invoice.supplierGstScheme).
+        supplierGstScheme: isComposition ? "COMPOSITION" : null,
         houseCompanySnapshot: houseCompanySnapshot ? (houseCompanySnapshot as any) : undefined,
 
         customerId: customer.id,

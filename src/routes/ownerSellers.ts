@@ -52,6 +52,7 @@ function shape(s: any) {
     gstin: s.gstin,
     pan: s.pan,
     entityType: s.entityType,
+    gstScheme: s.gstScheme,
     city: s.city,
     // Vertical + restaurant details (null/ignored for a SHOP seller).
     vertical: s.vertical,
@@ -272,6 +273,15 @@ const createSchema = z.object({
     (v) => !v || isValidGstin(v).valid,
     (v) => ({ message: v ? isValidGstin(v).error ?? "Invalid GSTIN" : "Invalid GSTIN" }),
   ),
+  // GST scheme, asked at onboarding rather than inherited (runbook step 14). A COMPOSITION dealer
+  // may not collect tax on supplies, so their document is a Bill of Supply carrying a mandatory
+  // declaration — see isCompositionSeller in services/orderInvoice.ts.
+  //
+  // ⚠️ The column defaults to REGULAR, which is right for every seller already on file and wrong
+  // for a composition dealer onboarded tomorrow: inheriting it silently would issue that dealer tax
+  // invoices charging GST they are not permitted to charge. Optional here, so the default still
+  // applies when nobody says otherwise, but the field exists so the answer can be given.
+  gstScheme: z.enum(["REGULAR", "COMPOSITION"]).optional(),
 });
 
 router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
@@ -341,6 +351,8 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           vertical,
           city: parsed.data.city ?? null,
           gstin: parsed.data.gstin ?? null,
+          // Absent ⇒ the column default, REGULAR, which is right for an ordinary registered dealer.
+          ...(parsed.data.gstScheme ? { gstScheme: parsed.data.gstScheme } : {}),
         },
         include: INCLUDE,
       });
@@ -370,6 +382,11 @@ const patchSchema = z.object({
   // constitution is verified — it defaults to OTHER (no exemption) on creation, deliberately, so
   // nobody is under-withheld by a wrong default.
   entityType: z.enum(["INDIVIDUAL_HUF", "OTHER"]).optional(),
+  // GST scheme (runbook step 14) — a composition dealer gets a Bill of Supply with the Rule 5(1)(f)
+  // declaration instead of a tax invoice. ⚠️ Changing this does NOT rewrite documents already
+  // issued: Invoice.supplierGstScheme snapshots the scheme at issue, precisely so a seller moving
+  // between schemes cannot retroactively alter bills a customer already holds.
+  gstScheme: z.enum(["REGULAR", "COMPOSITION"]).optional(),
   // Restaurant details. Ignored for a SHOP seller — no vertical switch here, because flipping a
   // seller with a live catalog/menu between the two would strand rows in the wrong model.
   cuisines: z.string().max(200).optional(),
@@ -384,7 +401,7 @@ router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     const id = String(req.params.id ?? "");
     const parsed = patchSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
-    const { status, commissionPct, name, isActive, entityType,
+    const { status, commissionPct, name, isActive, entityType, gstScheme,
             cuisines, openTime, closeTime, avgPrepMinutes, minOrderValue } = parsed.data;
 
     const seller = await prisma.seller.findUnique({ where: { id }, select: { id: true, isHouse: true } });
@@ -401,6 +418,7 @@ router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
         ...(name !== undefined ? { name: name.trim() } : {}),
         ...(isActive !== undefined ? { isActive } : {}),
         ...(entityType !== undefined ? { entityType } : {}),
+        ...(gstScheme !== undefined ? { gstScheme } : {}),
         ...(cuisines !== undefined ? { cuisines: cuisines.trim() || null } : {}),
         ...(openTime !== undefined ? { openTime: openTime || null } : {}),
         ...(closeTime !== undefined ? { closeTime: closeTime || null } : {}),

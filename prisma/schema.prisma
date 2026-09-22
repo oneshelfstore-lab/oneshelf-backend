@@ -2560,6 +2560,23 @@ model Invoice {
   supplierAddress String?
   supplierPhone   String?
 
+  // The GST scheme the SUPPLIER traded under when this invoice was issued (runbook step 14).
+  // NULL ⇒ REGULAR — which covers every house invoice, every legacy row, and every ordinary
+  // registered seller, so the column needs no backfill.
+  //
+  // ⚠️ SNAPSHOT, not a lookup, and the distinction is the whole reason the column exists. A
+  // composition dealer's document must carry the Rule 5(1)(f) declaration ("composition taxable
+  // person, not eligible to collect tax on supplies") FOREVER — so if that seller later opts into
+  // the regular scheme, every bill of supply already issued must still show it. Rendering the
+  // declaration from the seller's CURRENT scheme would silently rewrite documents that have already
+  // been given to customers and filed.
+  //
+  // ⚠️ Also NOT derivable from invoiceType. An ordinary REGULAR seller whose lines are all 0%-GST
+  // also gets a BILL_OF_SUPPLY, and putting the composition declaration on that document would be a
+  // false statement about a registered dealer. Same document type, different reason — which is
+  // exactly the conflation step 14 exists to undo.
+  supplierGstScheme SellerGstScheme?
+
   // A snapshot of the store's own Company row AT THE MOMENT this (house) invoice was created — so
   // editing the store's GSTIN/address/PAN in Settings later can never retroactively change what an
   // already-issued invoice's PDF shows (a real GST-compliance requirement: the document must reflect

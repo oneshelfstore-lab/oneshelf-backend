@@ -28,6 +28,13 @@ export interface LineItemTaxInput {
   isTaxInclusive?: boolean;
   /** Inter-state supply → the full rate goes to IGST instead of CGST+SGST. Default false (P0-3). */
   isInterState?: boolean;
+  /**
+   * The supplier trades under the GST COMPOSITION scheme, so it may not collect tax on supplies
+   * (Sec 10, CGST Act). The value of supply is the full amount charged and every tax component is
+   * nil — see the branch in calculateLineItemTax for why that is two assignments rather than a
+   * parallel code path. Default false (runbook step 14).
+   */
+  isComposition?: boolean;
 }
 
 export interface LineItemTaxResult {
@@ -91,11 +98,28 @@ export function calculateLineItemTax(input: LineItemTaxInput): LineItemTaxResult
     quantity,
     discountPercent = 0,
     discountAmount = 0,
-    gstRate,
-    cessRate = 0,
+    gstRate: rawGstRate,
+    cessRate: rawCessRate = 0,
     isTaxInclusive = true,
     isInterState = false,
+    isComposition = false,
   } = input;
+
+  // ── Composition scheme: two assignments, deliberately, rather than a second code path ─────────
+  //
+  // A composition dealer may not collect GST, so the value of supply is simply what was charged and
+  // every component is nil. Zeroing the rates HERE makes every formula below produce exactly that
+  // on its own: the tax-inclusive back-calculation is gated on `gstRate > 0`, so it is skipped and
+  // taxableValue lands on the full amount after discount; CGST, SGST, IGST and cess then each
+  // compute from a zero rate. Nothing downstream has to know what a composition dealer is.
+  //
+  // ⚠️ The invoice TYPE must NOT be inferred from the zeroes this produces. A regular dealer selling
+  // only 0%-GST goods arrives at identical numbers, and the two are different documents for
+  // different reasons — one is a Bill of Supply because the SUPPLY is exempt, the other because the
+  // SUPPLIER is composition and must carry a mandatory declaration. The caller branches on the
+  // scheme; see orderInvoice.ts.
+  const gstRate = isComposition ? 0 : rawGstRate;
+  const cessRate = isComposition ? 0 : rawCessRate;
 
   // Gross amount before discount
   const grossAmount = round2(unitPrice * quantity);

@@ -26,6 +26,7 @@ function invoice(lineCount: number, overrides: Partial<InvoiceData> = {}): Invoi
     customerGstin: "", customerState: "Uttar Pradesh", customerStateCode: "09",
     placeOfSupply: "Uttar Pradesh (09)", isReverseCharge: false,
     supplierIsComposition: false,
+    codeLabel: "HSN",
     lineItems: Array.from({ length: lineCount }, (_, i) => line(i + 1, `Item number ${i + 1}`)),
     subtotal: "148.57", totalCgst: "3.71", totalSgst: "3.72", totalCess: "0.00",
     roundOff: "0.00", grandTotal: "156.00",

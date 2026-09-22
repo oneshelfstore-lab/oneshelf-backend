@@ -1,10 +1,13 @@
 import prisma from "../lib/prisma.js";
 import { resolveStoreState, stateCodeFromGstin } from "../lib/stateCodes.js";
 import { getNextInvoiceNumber } from "./invoiceNumbering.js";
+import { INVOICE_KIND } from "../data/invoiceKinds.js";
+import { DELIVERY_SAC_CODE, DELIVERY_GST_RATE_PCT } from "../data/deliveryTax.js";
 import {
   calculateLineItemTax,
   calculateInvoiceTotals,
   convertAmountToWords,
+  round2,
   CURRENT_TAX_RULE_VERSION,
   type LineItemTaxResult,
 } from "./taxEngine.js";
@@ -324,6 +327,188 @@ async function createOneInvoice(opts: {
 }
 
 /**
+ * The PLATFORM's invoice to the customer for the delivery fee (runbook step 16).
+ *
+ * Delivery is the platform's own service, not the seller's and not part of the goods — which is why
+ * it gets its own document rather than a line on somebody else's. Until now the fee was charged and
+ * invoiced to nobody: the goods invoices are built from order ITEMS, so the delivery charge appeared
+ * in no invoice at all and the GST inside it was never declared.
+ *
+ * ⚠️ WHERE THIS HANGS, AND A CORRECTION TO THE RUNBOOK. The runbook says to hang it off
+ * `markOrderPaid`, "the same convergence point the goods invoice uses". markOrderPaid is not that
+ * point — it is the ONLINE-payment path only, and it reaches invoicing by CALLING
+ * generateOrderInvoice. A COD order invoices at placement, food at its own confirmation, bulk from
+ * quoteToOrder, subscriptions from the engine; none of them pass through markOrderPaid. So the real
+ * convergence point is generateOrderInvoice, and hanging it there is what makes a COD customer's
+ * delivery fee get a document too. The runbook's INTENT — never in a route handler, where it would
+ * only exist if the app survived the round trip — is honoured exactly.
+ *
+ * ⚠️ ONLY when a fee was actually charged. That is the CHARGED case from step 15; a fee waived by a
+ * coupon or a member tier is a supply whose value a discount reduced to nil (Sec 15(3)(a)), and
+ * whether that warrants a ₹0 document is a question for the CA rather than something to guess at by
+ * emitting one. A basket over the free-delivery threshold is not a supply at all — delivery is
+ * bundled into the goods, a composite supply — and must never produce a document.
+ */
+async function createDeliveryInvoice(order: any, customer: any): Promise<string | null> {
+  const fee = Number(order.deliveryCharge ?? 0);
+  if (!(fee > 0)) return null;
+
+  // Written by step 15 on every new order. A NULL means the order predates that step, so we have no
+  // honest split to invoice — better no document than an invented one.
+  if (order.deliveryTaxable == null || order.deliveryGst == null) return null;
+  const taxable = Number(order.deliveryTaxable);
+  const gst = Number(order.deliveryGst);
+
+  // Exactly-once, enforced by the DB rather than by this read (see Invoice.deliveryForOrderId).
+  const existing = await prisma.invoice.findUnique({ where: { deliveryForOrderId: order.id } });
+  if (existing) return existing.id;
+
+  // The platform supplies from its own place of business. Today the platform and the shop are one
+  // legal entity, so that is the store's state and the store's Company snapshot — when step 23 flips
+  // houseSellerIsSeparateEntity these become the platform entity's, and nothing else here changes.
+  const supplierStateCode = (await resolveStoreState()).code;
+  const customerStateCode = customer.gstin ? stateCodeFromGstin(customer.gstin) : supplierStateCode;
+  const isInterState = customerStateCode !== supplierStateCode;
+
+  // Inter-state sends the whole tax to IGST; intra-state splits it in half. Both halves are derived
+  // from the ALREADY-SPLIT figures rather than recomputed from a rate, so the invoice can never
+  // disagree with the order about what the customer paid.
+  const half = round2(gst / 2);
+  const cgstAmount = isInterState ? 0 : half;
+  const sgstAmount = isInterState ? 0 : round2(gst - half); // absorbs the odd paisa
+  const igstAmount = isInterState ? gst : 0;
+  // ⚠️ THE STATUTORY RATE, never one back-derived from the amounts. Dividing the rounded tax by
+  // the rounded base gives 4.58 / 25.42 = 18.02%, and an invoice — and the GSTR-1 built from it —
+  // that states 18.02% is simply wrong: there is no such rate. The AMOUNTS stay derived, so they
+  // close on the fee exactly; the RATE is the one the law sets.
+  //
+  // The two need not reconcile to the paisa, and that is inherent to inclusive pricing rather than
+  // a defect here: 18% of ₹41.53 is ₹7.4754, while the fee-anchored tax on a ₹49 delivery is ₹7.47.
+  // Every inclusive-priced line in this system has the same property — calculateLineItemTax rounds
+  // the goods the same way — so the delivery invoice is consistent with the rest of the book.
+  const rate = gst > 0 ? DELIVERY_GST_RATE_PCT : 0;
+
+  const isPaid = order.paymentStatus === "PAID";
+  // Its OWN series, not the shop's "INV". One GSTIN may keep several series and each must be
+  // consecutive; separating them now is correct today and still correct after step 23 splits the
+  // entities, whereas sharing "INV" would have to be untangled then.
+  const invoiceNumber = await getNextInvoiceNumber("DEL");
+
+  const houseCompanySnapshot = await prisma.company.findFirst({
+    select: { legalName: true, tradeName: true, gstin: true, pan: true, address: true, phone: true, email: true },
+  });
+
+  const invoice = await prisma.$transaction(async (tx) => {
+    const inv = await tx.invoice.create({
+      data: {
+        invoiceNumber,
+        invoiceDate: order.createdAt,
+        // A rate of zero means the fee carried no tax, so the document is a Bill of Supply — same
+        // rule as the goods path, for the same reason.
+        invoiceType: (gst > 0 ? "TAX_INVOICE" : "BILL_OF_SUPPLY") as any,
+        invoiceKind: INVOICE_KIND.DELIVERY,
+        supplyType: (customer.gstin ? "B2B" : "B2CS") as any,
+        orderId: order.id,
+        deliveryForOrderId: order.id,
+        // ⚠️ NULL on purpose. This is not any seller's supply, and step 13's seller scope would
+        // otherwise be the only thing keeping the platform's income out of a seller's own GSTR-1.
+        // Two independent guards are right here; one of them being data is better than both of them
+        // being code.
+        sellerId: null,
+        subOrderId: null,
+        houseCompanySnapshot: houseCompanySnapshot ? (houseCompanySnapshot as any) : undefined,
+
+        customerId: customer.id,
+        customerName: order.shippingName ?? order.customer?.name ?? customer.name,
+        customerGstin: customer.gstin,
+        billingAddress: order.shippingAddress
+          ? { address: order.shippingAddress, pincode: order.shippingPincode }
+          : undefined,
+        shippingAddress: order.shippingAddress
+          ? { address: order.shippingAddress, pincode: order.shippingPincode }
+          : undefined,
+
+        supplierStateCode,
+        placeOfSupplyCode: customerStateCode,
+        isInterState,
+        taxRuleVersion: CURRENT_TAX_RULE_VERSION,
+
+        subtotal: taxable,
+        totalCgst: cgstAmount,
+        totalSgst: sgstAmount,
+        totalIgst: igstAmount,
+        totalCess: 0,
+        totalDiscount: 0,
+        roundOff: 0,
+        // The fee, unchanged. taxable + gst === fee exactly by construction (step 15 derives the
+        // tax by subtraction precisely so this holds), so the customer is billed what they paid.
+        totalAmount: fee,
+        amountInWords: convertAmountToWords(fee),
+
+        status: isPaid ? "PAID" : "APPROVED",
+        paymentStatus: isPaid ? "PAID" : "UNPAID",
+        amountPaid: isPaid ? fee : 0,
+        amountDue: isPaid ? 0 : fee,
+
+        createdBy: "system",
+
+        lineItems: {
+          create: [{
+            lineNumber: 1,
+            description: "Delivery charge",
+            // ⚠️ A SAC, not an HSN — delivery is a SERVICE, and services are classified under the
+            // Service Accounting Code. The column is named hsnCode because it predates the platform
+            // supplying anything but goods; the PDF prints the right header off invoiceKind.
+            hsnCode: DELIVERY_SAC_CODE,
+            quantity: 1,
+            unit: "NOS",
+            unitPrice: taxable,
+            discountPercent: 0,
+            discountAmount: 0,
+            taxableValue: taxable,
+            gstRate: rate,
+            cgstRate: isInterState ? 0 : round2(rate / 2),
+            cgstAmount,
+            sgstRate: isInterState ? 0 : round2(rate / 2),
+            sgstAmount,
+            igstRate: isInterState ? rate : 0,
+            igstAmount,
+            cessRate: 0,
+            cessAmount: 0,
+            totalAmount: fee,
+          }],
+        },
+      },
+    });
+
+    // The delivery fee IS the platform's own revenue, unlike an external seller's goods, so a
+    // receipt belongs in the books. It also closes a real under-count: the goods invoices are built
+    // from order items and have never included the fee, so this money was collected and booked
+    // nowhere.
+    if (isPaid) {
+      const paymentMode = order.paymentMethod === "COD" ? "CASH"
+        : order.paymentMethod === "UPI" ? "UPI"
+        : "BANK_TRANSFER";
+      await tx.payment.create({
+        data: {
+          paymentType: "RECEIPT",
+          relatedType: "INVOICE",
+          relatedId: inv.id,
+          amount: fee,
+          paymentMode: paymentMode as any,
+          paymentDate: order.createdAt,
+          status: "COMPLETED",
+        },
+      });
+    }
+
+    return inv;
+  });
+
+  return invoice.id;
+}
+
+/**
  * Generates GST invoice(s) from a placed order — ONE per seller sub-order (Phase 6).
  * - A single-seller (house-only) order produces exactly one invoice (the pre-Phase-6 behaviour).
  * - A multi-seller order produces one invoice per seller, each billed under that seller's GSTIN.
@@ -394,6 +579,19 @@ export async function generateOrderInvoice(orderId: string): Promise<string | nu
       applyOrderDiscount: singleGroup,
     });
     if (created.isHouse || !primaryInvoiceId) primaryInvoiceId = created.id;
+  }
+
+  // The platform's own delivery invoice, alongside whatever the sellers issued. Best-effort and
+  // never allowed to take the goods invoices down with it: a failure here means one document is
+  // missing and regenerating the order will create it, whereas throwing would lose the lot.
+  //
+  // ⚠️ NOT assigned to primaryInvoiceId below. Order.invoiceId is what the customer's single-invoice
+  // PDF endpoint resolves, and pointing it at the delivery bill would show someone a ₹30 document
+  // where they expected their groceries.
+  try {
+    await createDeliveryInvoice(order, customer);
+  } catch (e) {
+    console.error("Delivery invoice generation failed:", e);
   }
 
   // Keep Order.invoiceId pointing at the house/primary invoice (back-compat single-invoice UI/PDF).

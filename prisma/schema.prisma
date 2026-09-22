@@ -2546,6 +2546,17 @@ model Invoice {
   // Marketplace (Phase 6): the per-seller SubOrder this invoice covers (one invoice / SubOrder).
   // Null for legacy single-invoice orders. @unique → idempotent regeneration keys off the sub-order.
   subOrderId      String? @unique
+  // The order whose DELIVERY FEE this invoice bills (runbook step 16). Null on every goods invoice.
+  //
+  // ⚠️ @unique is the point of the column, not a nicety. generateOrderInvoice is called from eight
+  // places, several of them concurrently reachable (a seller marking packed while markOrderPaid
+  // fires), and it is explicitly built to be idempotent. A goods invoice gets that for free from
+  // subOrderId's unique constraint; without an equivalent here the delivery invoice would be a
+  // read-then-write race whose failure mode is a DUPLICATE GST DOCUMENT in a filed return. One
+  // delivery supply per order, enforced by the database rather than by remembering to check.
+  //
+  // Not reusing orderId for this: an order legitimately has many GOODS invoices, one per seller.
+  deliveryForOrderId String? @unique
   // The seller whose supply this invoice bills. Null ⇒ house (store-issued, the pre-Phase-6 path).
   sellerId        String?
   // ⚠️ GST/CA: for an EXTERNAL seller the tax invoice is issued under THE SELLER'S identity (their

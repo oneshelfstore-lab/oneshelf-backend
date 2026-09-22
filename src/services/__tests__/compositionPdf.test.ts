@@ -61,6 +61,7 @@ function invoiceData(over: Partial<InvoiceData> = {}): InvoiceData {
     customerGstin: "", customerState: "Uttar Pradesh", customerStateCode: "09",
     placeOfSupply: "Uttar Pradesh (09)", isReverseCharge: false,
     supplierIsComposition: false,
+    codeLabel: "HSN",
     lineItems: [{
       sno: 1, description: "Toor Dal 1 kg", hsnCode: "0713", qty: "2", unit: "PCS",
       rate: "90.00", discount: "0.00", taxableValue: "171.43", cgstRate: "2.5%",

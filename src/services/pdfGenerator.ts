@@ -1,4 +1,5 @@
 import PDFDocument from "pdfkit";
+import { INVOICE_KIND } from "../data/invoiceKinds.js";
 import prisma from "../lib/prisma.js";
 import { stateNameFromCode, stateCodeFromGstin } from "../lib/stateCodes.js";
 
@@ -88,6 +89,14 @@ export interface InvoiceData {
    * registered business.
    */
   supplierIsComposition: boolean;
+
+  /**
+   * The lines are SERVICES, so their classification codes are SACs and the column must say so.
+   * Printing "HSN" over a Service Accounting Code is a small defect on a real GST document, and the
+   * only reason the underlying field is called hsnCode is that it predates the platform supplying
+   * anything but goods.
+   */
+  codeLabel: string;
 
   // Credit note reference
   originalInvoiceNumber?: string;
@@ -250,7 +259,7 @@ export function drawInvoice(doc: PDFKit.PDFDocument, data: InvoiceData): void {
   const headerCols: Col[] = [
     { text: "#", width: widths.sno, align: "center" },
     { text: "Description", width: widths.desc, align: "left" },
-    { text: "HSN", width: widths.hsn, align: "center" },
+    { text: data.codeLabel, width: widths.hsn, align: "center" },
     { text: "Qty", width: widths.qty, align: "right" },
     { text: "Unit", width: widths.unit, align: "center" },
     { text: "Rate", width: widths.rate, align: "right" },
@@ -546,7 +555,7 @@ function drawThermalInvoice(doc: PDFKit.PDFDocument, data: InvoiceData): number 
     const qty = [li.qty, li.unit].filter(Boolean).join(" ");
     pair("   " + qty + " x " + li.rate, li.total, { size: 7.5, bold: true, leftRatio: 0.58 });
     // The tax particulars Rule 46 requires, kept small: read by an accountant, not by the packer.
-    const hsn = li.hsnCode ? "HSN " + li.hsnCode + "  ·  " : "";
+    const hsn = li.hsnCode ? data.codeLabel + " " + li.hsnCode + "  ·  " : "";
     write(
       "   " + hsn + "Taxable " + li.taxableValue +
         "  ·  CGST " + li.cgstRate + " " + li.cgstAmount +
@@ -774,6 +783,9 @@ export async function generateInvoicePdf(
 
     invoiceTitle: titleMap[invoice.invoiceType] ?? "Tax Invoice",
     supplierIsComposition: invoice.supplierGstScheme === "COMPOSITION",
+    // Goods carry an HSN, services a SAC. Keyed on what the invoice IS rather than on whether the
+    // code happens to look like one, so a goods invoice can never be relabelled by a stray value.
+    codeLabel: invoice.invoiceKind === INVOICE_KIND.GOODS ? "HSN" : "SAC",
     invoiceNumber: invoice.invoiceNumber,
     invoiceDate: fmtDate(invoice.invoiceDate),
 

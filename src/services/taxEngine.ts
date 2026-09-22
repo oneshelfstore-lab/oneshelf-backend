@@ -74,8 +74,14 @@ export interface BackCalcResult {
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
-/** Round to 2 decimal places using banker's rounding */
-function round2(n: number): number {
+/**
+ * Round to 2 decimal places.
+ *
+ * Exported because the invoice layer needs the SAME rounding the tax math uses — a delivery
+ * invoice that halves its GST with a different rounding than the engine would disagree with the
+ * order by a paisa. Import it rather than writing a third copy.
+ */
+export function round2(n: number): number {
   return Math.round((n + Number.EPSILON) * 100) / 100;
 }
 

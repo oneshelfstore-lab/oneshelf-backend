@@ -62,11 +62,6 @@ export async function payoutSeller(
     select: { id: true, isHouse: true, name: true, pan: true, payoutAccountRef: true },
   });
   if (!seller) throw new NotFoundError("Seller", sellerId);
-  // Step 09. The platform cannot pay itself. Once the shop is a separate legal entity it has a real
-  // ledger and this guard has to let it through, so the test is on the flag, not on isHouse alone.
-  if (isSameLegalEntity(seller, await houseSellerIsSeparateEntity())) {
-    throw new ValidationError("The house store has no commission ledger to pay out.");
-  }
 
   const { payoutHoldDays, payoutRail } = await resolvePayoutSettings();
   const result = await prisma.$transaction((tx) =>
@@ -197,7 +192,7 @@ export function planAdjustmentAbsorption(
 export async function payoutSellerInTx(
   tx: Prisma.TransactionClient,
   sellerId: string,
-  seller: { id: string; name: string; pan: string | null },
+  seller: { id: string; name: string; pan: string | null; isHouse: boolean },
   opts: {
     mode?: string | null;
     reference?: string | null;
@@ -206,13 +201,30 @@ export async function payoutSellerInTx(
     now?: Date;
   } = {},
 ) {
+  // Step 09. The platform cannot pay itself: the house store's slices accrue no balance, so paying
+  // them out would decrement an outstandingBalance that was never credited and drive it negative.
+  //
+  // ⚠️ THE GUARD LIVES HERE, in the function that actually writes, and not only in payoutSeller
+  // above. It sat one level too high until a prove script imported this function directly and walked
+  // straight past it — with 8 house slices and ₹7,463 of net that would have been paid. A rule that
+  // only the polite entrance enforces is not a rule.
+  //
+  // The test is on the FLAG rather than on isHouse: once the shop is a separate legal entity it has
+  // a real ledger and this has to let it through (runbook step 23).
+  if (isSameLegalEntity(seller, await houseSellerIsSeparateEntity(tx))) {
+    throw new ValidationError("The house store has no commission ledger to pay out.");
+  }
+
   const payoutHoldDays = Math.max(0, opts.payoutHoldDays ?? 0);
   // See payableSubOrderWhere — delivered only, plus any configured hold. reverseSellerLedgerOnCancel
   // and cancelSubOrderAndRefund back a cancelled accrual out of outstandingBalance separately; this
   // is what keeps the payout itself honest.
   const unsettled = await tx.subOrder.findMany({
     where: payableSubOrderWhere({ sellerId, payoutHoldDays, now: opts.now }),
-    select: { id: true, subtotal: true, commissionAmount: true, tcsAmount: true, tdsAmount: true, netPayable: true },
+    select: {
+      id: true, subtotal: true, commissionAmount: true, commissionGstAmount: true,
+      tcsAmount: true, tdsAmount: true, netPayable: true,
+    },
   });
   // Adjustments ride along with the sub-orders: a clawback on a slice cancelled after it was paid,
   // or a correction owed to the seller. Oldest first, so a debt cannot be skipped by a newer one.
@@ -248,6 +260,10 @@ export async function payoutSellerInTx(
 
   const gross = +unsettled.reduce((s, o) => s + Number(o.subtotal), 0).toFixed(2);
   const commission = +unsettled.reduce((s, o) => s + Number(o.commissionAmount), 0).toFixed(2);
+  // ⚠️ Null on every slice placed before runbook step 07 - those withheld no GST on the commission,
+  // so 0 is the truthful reading rather than a missing value. A batch spanning the cutover sums
+  // correctly without a branch.
+  const commissionGst = +unsettled.reduce((s, o) => s + Number(o.commissionGstAmount ?? 0), 0).toFixed(2);
   const tcs = +unsettled.reduce((s, o) => s + Number(o.tcsAmount), 0).toFixed(2);
   const tds = +unsettled.reduce((s, o) => s + Number(o.tdsAmount), 0).toFixed(2);
   const subOrderNet = +unsettled.reduce((s, o) => s + Number(o.netPayable), 0).toFixed(2);
@@ -260,7 +276,7 @@ export async function payoutSellerInTx(
 
   const payout = await tx.sellerPayout.create({
     data: {
-      sellerId, grossAmount: gross, commission, tcs, tds,
+      sellerId, grossAmount: gross, commission, commissionGst, tcs, tds,
       adjustmentTotal: plan.applied, netPaid: net,
       mode: opts.mode ?? null, reference: opts.reference ?? null, note: opts.note ?? null,
     },

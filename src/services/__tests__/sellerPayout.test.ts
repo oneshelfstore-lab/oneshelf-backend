@@ -20,6 +20,7 @@ const SUB = (id: string) => ({
 
 function fakeTx(opts: {
   unsettled: string[];
+  houseIsSeparate?: boolean;
   claimedCount?: number;
   heldNet?: number;
   heldCount?: number;
@@ -72,11 +73,15 @@ function fakeTx(opts: {
       },
     },
     tdsRecord: { create: async (args: any) => { calls.push({ op: "tdsRecord.create", args }); return {}; } },
+    // The step-09 entity-split flag, read by the guard at the top of payoutSellerInTx. False here:
+    // the platform and the shop are one entity, which is what makes paying the house store refuse.
+    storeConfig: { findFirst: async () => ({ houseSellerIsSeparateEntity: opts.houseIsSeparate ?? false }) },
   };
   return { tx, calls };
 }
 
-const SELLER = { id: "s1", name: "Aman Medicos", pan: null };
+const SELLER = { id: "s1", name: "Aman Medicos", pan: null, isHouse: false };
+const HOUSE_SELLER = { id: "house", name: "Oneshelf", pan: null, isHouse: true };
 
 describe("payoutSellerInTx", () => {
   it("settles ONLY rows still unsettled — the claim carries settled: false", async () => {
@@ -364,5 +369,38 @@ describe("payoutSellerInTx — adjustments", () => {
 
     await expect(payoutSellerInTx(tx as never, "s1", SELLER)).rejects.toThrow();
     expect(calls.map((c) => c.op)).not.toContain("sellerPayout.create");
+  });
+});
+
+/**
+ * ⚠️ The guard that sat one level too high. It lived in payoutSeller, the polite entrance, while
+ * payoutSellerInTx — the function that actually writes — had none. A prove script importing the
+ * inner function walked straight past it, with 8 house slices and ₹7,463 of net behind it.
+ */
+describe("payoutSellerInTx — the house store", () => {
+  it("refuses to pay the house store while it is the same legal entity", async () => {
+    const { tx } = fakeTx({ unsettled: ["a", "b"] });
+    await expect(payoutSellerInTx(tx as never, "house", HOUSE_SELLER)).rejects.toThrow(/house store/i);
+  });
+
+  it("writes nothing at all when it refuses", async () => {
+    const { tx, calls } = fakeTx({ unsettled: ["a", "b"] });
+    await expect(payoutSellerInTx(tx as never, "house", HOUSE_SELLER)).rejects.toThrow();
+    expect(calls.filter((c) => /create|update/.test(c.op))).toEqual([]);
+  });
+
+  // Step 23 flips this. The house store then has a real ledger and must be payable like any seller.
+  it("lets it through once the shop is a separate legal entity", async () => {
+    const { tx, calls } = fakeTx({ unsettled: ["a", "b"], houseIsSeparate: true });
+    await payoutSellerInTx(tx as never, "house", HOUSE_SELLER);
+    expect(calls.some((c) => c.op === "sellerPayout.create")).toBe(true);
+  });
+
+  it("still pays an external seller, flag either way", async () => {
+    for (const houseIsSeparate of [false, true]) {
+      const { tx, calls } = fakeTx({ unsettled: ["a"], houseIsSeparate });
+      await payoutSellerInTx(tx as never, "s1", SELLER);
+      expect(calls.some((c) => c.op === "sellerPayout.create")).toBe(true);
+    }
   });
 });

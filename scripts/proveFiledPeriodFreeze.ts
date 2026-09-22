@@ -17,55 +17,30 @@
  * Run: railway run --service Postgres bash -c 'DATABASE_URL="$DATABASE_PUBLIC_URL" npx tsx scripts/proveFiledPeriodFreeze.ts'
  */
 import { PrismaClient } from "@prisma/client";
-import { TCS_RATE_PCT } from "../src/data/taxRates.js";
-import {
-  RETURN_TYPES,
-  cancellationCutoff,
-  reversibleFiledPeriods,
-  periodWindow,
-  periodOf,
-} from "../src/services/filedPeriods.js";
+import { RETURN_TYPES, periodWindow, periodOf } from "../src/services/filedPeriods.js";
+import { buildGstr8 } from "../src/services/gstr8.js";
 
 const prisma = new PrismaClient({
   datasources: { db: { url: process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL } },
 });
 
 /**
- * The GSTR-8 TCS total for a period, applying the same filed-period rule the route does.
+ * The GSTR-8 TCS total for a period, split into ordinary supply rows and reversals of already-filed
+ * periods.
  *
- * ⚠️ Restated here rather than imported, and that is the one weakness of this script: the route
- * builds its aggregate inline, so this is a second copy of the predicate. It is kept deliberately
- * short and beside the original. If the two ever drift, the freeze stops being tested.
+ * ⚠️ IT CALLS THE REAL AGGREGATE. Until runbook step 19 the route built its return inline, so this
+ * script could only RESTATE the filed-period predicate — a second copy that would keep passing after
+ * the real one broke. services/gstr8.ts is now the one implementation and this runs it, which is the
+ * only arrangement in which the word "prove" means anything.
+ *
+ * Reversal rows are told apart by `reversalOf`, never by matching their label: the label exists for
+ * a human reading the return and is free to be reworded.
  */
 async function gstr8Tcs(period: string): Promise<{ total: number; reversals: number }> {
-  const { start, end } = periodWindow(period);
-  const cutoff = await cancellationCutoff(RETURN_TYPES.GSTR8, period);
-  const live = cutoff
-    ? { OR: [{ status: { not: "CANCELLED" as const } }, { cancelledAt: { gt: cutoff } }] }
-    : { status: { not: "CANCELLED" as const } };
-
-  const rows = await prisma.subOrder.groupBy({
-    by: ["sellerId"],
-    where: { createdAt: { gte: start, lt: end }, tcsAmount: { gt: 0 }, order: { is: live } },
-    _sum: { tcsAmount: true },
-  });
-  const total = rows.reduce((t, r) => t + Number(r._sum.tcsAmount ?? 0), 0);
-
-  let reversals = 0;
-  for (const f of await reversibleFiledPeriods(RETURN_TYPES.GSTR8, period)) {
-    const w = periodWindow(f.period);
-    const rv = await prisma.subOrder.groupBy({
-      by: ["sellerId"],
-      where: {
-        createdAt: { gte: w.start, lt: w.end },
-        tcsAmount: { gt: 0 },
-        order: { is: { status: "CANCELLED", cancelledAt: { gt: f.filedAt, gte: start, lt: end } } },
-      },
-      _sum: { tcsAmount: true },
-    });
-    reversals -= rv.reduce((t, r) => t + Number(r._sum.tcsAmount ?? 0), 0);
-  }
-  return { total: Math.round(total * 100) / 100, reversals: Math.round(reversals * 100) / 100 };
+  const r = await buildGstr8(period);
+  const sum = (pred: (row: (typeof r.rows)[number]) => boolean) =>
+    Math.round(r.rows.filter(pred).reduce((t, row) => t + row.tcsTotal, 0) * 100) / 100;
+  return { total: sum((row) => row.reversalOf == null), reversals: sum((row) => row.reversalOf != null) };
 }
 
 async function main() {
@@ -154,7 +129,6 @@ async function main() {
     const filedNow = await prisma.filedTaxPeriod.count();
     const clean = restored?.status === original.status && restored?.cancelledAt === null && subsOk && filedNow === filedRowsBefore;
     console.log(`\nCLEANUP: order ${restored?.status} (was ${original.status}), cancelledAt ${restored?.cancelledAt ?? "null"}, sub-orders ${subsOk ? "restored" : "⚠️ WRONG"}, filed rows ${filedRowsBefore}→${filedNow}  ${clean ? "— database as found" : "— ⚠️ NOT CLEAN"}`);
-    void TCS_RATE_PCT;
   }
 }
 

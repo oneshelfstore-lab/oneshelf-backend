@@ -8,6 +8,7 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { payoutSeller } from "../services/sellerPayout.js";
+import { buildSettlementStatement, settlementToExcel } from "../services/settlementStatement.js";
 import { isValidGstin } from "../validators/index.js";
 import { parseHhMm, resolveFoodConfig } from "../services/foodMenu.js";
 
@@ -569,9 +570,36 @@ router.get("/:id/payouts", async (req: FirebaseAuthRequest, res: Response) => {
       success: true,
       data: payouts.map((p) => ({
         id: p.id, grossAmount: Number(p.grossAmount), commission: Number(p.commission),
+        // Withheld since runbook step 07, and 0 on anything older. Surfaced so the app can show a
+        // payout whose components add up to its total rather than one that mysteriously does not.
+        commissionGst: Number(p.commissionGst), tcs: Number(p.tcs), tds: Number(p.tds),
+        adjustmentTotal: Number(p.adjustmentTotal),
         netPaid: Number(p.netPaid), paidAt: p.paidAt, mode: p.mode, reference: p.reference, note: p.note,
       })),
     });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── GET /:id/statement — settlement statement (runbook step 19) ──────────────────────────────
+//
+// ?payoutId=<id>  a settlement that happened.  omitted  what is payable right now.
+// ?download=true  the three-tab xlsx; otherwise JSON.
+router.get("/:id/statement", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const payoutIdRaw = req.query.payoutId;
+    const payoutId = typeof payoutIdRaw === "string" && payoutIdRaw.length > 0 ? payoutIdRaw : null;
+    const statement = await buildSettlementStatement(id, payoutId);
+    if (req.query.download === "true") {
+      const buf = await settlementToExcel(statement);
+      const label = payoutId ? statement.payout!.paidAt.toISOString().slice(0, 10) : "pending";
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="settlement-${statement.seller.name.replace(/[^a-z0-9]+/gi, "-")}-${label}.xlsx"`);
+      return res.send(buf);
+    }
+    res.json({ success: true, data: statement });
   } catch (e) {
     sendError(res, e);
   }

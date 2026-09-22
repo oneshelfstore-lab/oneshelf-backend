@@ -531,6 +531,11 @@ router.get("/earnings", async (req: SellerRequest, res: Response) => {
           id: p.id,
           grossAmount: Number(p.grossAmount),
           commission: Number(p.commission),
+          // GST on that commission, withheld since runbook step 07 and 0 on anything older. Without
+          // it the seller sees a payout whose deductions do not account for its own total.
+          commissionGst: Number(p.commissionGst),
+          tds: Number(p.tds),
+          adjustmentTotal: Number(p.adjustmentTotal),
           tcs: Number(p.tcs),
           netPaid: Number(p.netPaid),
           paidAt: p.paidAt,

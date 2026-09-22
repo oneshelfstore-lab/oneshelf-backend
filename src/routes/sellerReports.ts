@@ -2,6 +2,7 @@ import { Router, type Response } from "express";
 import { sendError, ValidationError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
+import { buildSettlementStatement, settlementToExcel } from "../services/settlementStatement.js";
 import {
   getSalesRegister,
   getGstr1Summary,
@@ -89,6 +90,26 @@ router.get("/tcs", async (req: SellerRequest, res: Response) => {
   try {
     const data = await getSellerTcs(req.sellerId!, parsePeriod(req.query));
     res.json({ success: true, data });
+  } catch (e) { sendError(res, e); }
+});
+
+// ─── GET /settlement — the seller's own settlement statement (runbook step 19) ────────────────
+//
+// Hard-scoped to req.sellerId by the router's resolveSeller, and the payout lookup is scoped again
+// inside buildSettlementStatement — so a payoutId belonging to another seller reads as not found
+// rather than as somebody else's money.
+router.get("/settlement", async (req: SellerRequest, res: Response) => {
+  try {
+    const payoutId = reqStr(req.query, "payoutId") || null;
+    const statement = await buildSettlementStatement(req.sellerId!, payoutId);
+    if (reqStr(req.query, "download") === "true") {
+      const buf = await settlementToExcel(statement);
+      const label = payoutId ? statement.payout!.paidAt.toISOString().slice(0, 10) : "pending";
+      res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+      res.setHeader("Content-Disposition", `attachment; filename="settlement-${label}.xlsx"`);
+      return res.send(buf);
+    }
+    res.json({ success: true, data: statement });
   } catch (e) { sendError(res, e); }
 });
 

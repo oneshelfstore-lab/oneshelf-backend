@@ -1,0 +1,14 @@
+-- The commission GST a payout withheld (runbook step 19, closing what step 07 opened).
+--
+-- One ADD COLUMN, nullable-equivalent via a DEFAULT, zero DROP, zero ALTER COLUMN.
+--
+-- WHY IT IS NEEDED. SellerPayout.netPaid is the sum of SubOrder.netPayable, and since step 07 that
+-- is subtotal - commission - commissionGst - tcs - tds. The row stored every component of that
+-- subtraction EXCEPT the commission GST, so the first payout containing a post-step-07 slice would
+-- have had a total its own columns could not reproduce - and the settlement statement built on it
+-- would have stopped reconciling with nothing to say why.
+--
+-- WHY DEFAULT 0 IS SAFE HERE, on the same test the step-04 migration used: a default must be TRUE
+-- of every existing row. There are zero SellerPayout rows, and every historical SubOrder predates
+-- step 07 and withheld no commission GST, so 0 is true of everything this column can describe today.
+ALTER TABLE "SellerPayout" ADD COLUMN     "commissionGst" DECIMAL(12,2) NOT NULL DEFAULT 0;

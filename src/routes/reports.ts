@@ -56,6 +56,9 @@ function parseDateRange(from: string, to: string) {
 function parseScope(q: Request["query"]): InvoiceScope {
   const sellerId = typeof q.sellerId === "string" ? q.sellerId.trim() : "";
   if (sellerId) return { kind: "seller", sellerId };
+  // The platform's own service income (commission + delivery). Empty until steps 16/17 issue any,
+  // and deliberately NOT reachable from the seller router — a seller must never pull identity A.
+  if (q.scope === "platform") return { kind: "platform" };
   if (q.scope === "all") return { kind: "all" };
   return { kind: "house" };
 }

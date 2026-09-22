@@ -3,31 +3,66 @@ import ExcelJS from "exceljs";
 import { resolveStoreState, stateLabel, stateCodeFromGstin } from "../lib/stateCodes.js";
 import { isValidGstin } from "../validators/index.js";
 import { TCS_RATE_PCT } from "../data/taxRates.js";
+import { INVOICE_KIND, PLATFORM_INVOICE_KINDS } from "../data/invoiceKinds.js";
 
-// ─── Invoice scope (house vs external seller) — COMPLIANCE_PLAN.md P0-2 ───────────────────────────
+// ─── Invoice scope (three identities) — COMPLIANCE_PLAN.md P0-2, runbook step 13 ─────────────────
 //
-// The house store (identity B) and each external seller (identity C) are DISTINCT GST suppliers. The
-// store's own GSTR-1/3B/HSN/sales must contain ONLY the store's supplies; an external seller's
-// invoices belong in THEIR return. These reports therefore default to house-only.
+// There are THREE distinct GST suppliers in this system, and each files its own return:
 //
-// Discriminator: a house/store-issued invoice has NO supplier snapshot → `supplierName IS NULL`
-// (supplierName is set only for external-seller invoices, and always set for them since Seller.name is
-// required). This is more reliable than `sellerId` (which holds the *house seller's* id on marketplace
-// house orders, not null) or `supplierGstin` (which is null for a GSTIN-less external seller).
+//   A  the PLATFORM        — marketplace commission (to sellers) and the delivery fee (to customers)
+//   B  the HOUSE store     — its own stock, sold to customers
+//   C  each EXTERNAL seller — their stock, sold to customers under their own GSTIN
+//
+// Mixing any two puts someone else's income in a filed return. So a scope resolves on TWO questions,
+// not one: WHAT KIND of supply the invoice documents (`invoiceKind` — identity A vs the rest), and
+// WHOSE goods they were (`supplierName`/`sellerId` — identity B vs C).
+//
+// ⚠️ `invoiceKind` is load-bearing on the goods scopes, not decoration. A commission invoice is
+// issued BY the platform, so it carries no seller supplier-snapshot — which on the old
+// one-question predicate (`supplierName IS NULL` ⇒ house) made it indistinguishable from the shop's
+// own sale, and it would have been filed as the shop's income. Requiring GOODS is what keeps step
+// 17's commission invoices out of identity B's return. The seller scope is narrowed for the mirror
+// reason: a commission invoice names the seller it bills, and without the kind test that seller's
+// own GSTR-1 would report the platform's income as their outward supply.
+//
+// Why `supplierName IS NULL` still separates B from C rather than `sellerId`: a marketplace HOUSE
+// invoice carries the house seller's id (`sellerId` is null only on pre-marketplace rows), so
+// keying house on `sellerId IS NULL` would drop the store's own marketplace sales from its own
+// return. `supplierName` is set for every external-seller invoice — `Seller.name` is required — and
+// for no house one. Verified against live data when this landed: 374 invoices, 360 with no
+// snapshot, 14 with one, and zero where a snapshot-less invoice belonged to an external seller.
+//
+// ⚠️ ONE KNOWN SEAM, deliberately not closed here. Under Sec 9(5) a restaurant order is a DEEMED
+// supply BY the platform, so its invoice is platform-issued (supplierName IS NULL) while being the
+// restaurant's economic revenue — that is why orderInvoice.ts keeps `isStoreOwnSupply` separate
+// from `isPlatformIssuedInvoice` for the store REVENUE test. Such an invoice reads as identity B
+// here, which is correct only while the platform and the shop are ONE legal entity — true until
+// `StoreConfig.houseSellerIsSeparateEntity` is turned on (step 23), at which point food needs its
+// own kind and this block needs revisiting. No live invoice is in that state today: the single food
+// invoice predates the 9(5) change and still carries the restaurant's own snapshot.
 
 export type InvoiceScope =
-  | { kind: "house" }                      // the store's own supplies (identity B) — DEFAULT
-  | { kind: "seller"; sellerId: string }   // one external seller's supplies (identity C)
+  | { kind: "house" }                      // identity B — the store's own supplies. DEFAULT.
+  | { kind: "seller"; sellerId: string }   // identity C — one external seller's supplies
+  | { kind: "platform" }                   // identity A — commission + delivery. Empty until steps 16/17.
   | { kind: "all" };                       // everything (internal reconciliation only)
 
 export const HOUSE_SCOPE: InvoiceScope = { kind: "house" };
+export const PLATFORM_SCOPE: InvoiceScope = { kind: "platform" };
 
-/** Prisma `where` fragment selecting the invoices in a given scope. */
-function scopeFilter(scope: InvoiceScope): Record<string, unknown> {
+/**
+ * Prisma `where` fragment selecting the invoices in a given scope.
+ *
+ * Exported ONLY so it can be pinned by test. Every way this can be wrong is silent on screen and
+ * expensive on paper — a return that quietly gains or loses an identity's income still renders as a
+ * perfectly ordinary report. Nothing outside this file should call it; use a scope.
+ */
+export function scopeFilter(scope: InvoiceScope): Record<string, unknown> {
   switch (scope.kind) {
-    case "house": return { supplierName: null };
-    case "seller": return { sellerId: scope.sellerId };
-    case "all": return {};
+    case "house":    return { invoiceKind: INVOICE_KIND.GOODS, supplierName: null };
+    case "seller":   return { invoiceKind: INVOICE_KIND.GOODS, sellerId: scope.sellerId };
+    case "platform": return { invoiceKind: { in: PLATFORM_INVOICE_KINDS } };
+    case "all":      return {};
   }
 }
 

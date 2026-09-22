@@ -7,6 +7,12 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { TCS_RATE_PCT } from "../data/taxRates.js";
+import {
+  RETURN_TYPES,
+  cancellationCutoff,
+  reversibleFiledPeriods,
+  periodWindow,
+} from "../services/filedPeriods.js";
 
 // ⚠️ GST/CA (Phase 6): GSTR-8 is the monthly TCS return a GST e-commerce operator files (Sec-52).
 // This endpoint produces the per-seller TCS summary the owner / CA needs to file it. It does NOT
@@ -25,20 +31,68 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     const start = new Date(Date.UTC(yy!, mm! - 1, 1));
     const end = new Date(Date.UTC(yy!, mm!, 1));
 
-    // Sub-orders with TCS in the window, excluding cancelled parent orders. tcsAmount > 0 already
-    // excludes the house store (it never accrues TCS on its own supplies).
+    // ── The filed-period rule (runbook step 18) ────────────────────────────────────────────────
+    //
+    // An OPEN period reads current status: a cancelled order is simply not in the return.
+    //
+    // A FILED period is frozen. A row that was live when the period was filed STAYS in it, because
+    // that is what was reported to the government — otherwise cancelling an October order silently
+    // rewrites the September return that has already gone out. The cancellation instead shows up as
+    // a negative in the period it actually happened in, below.
+    const cutoff = await cancellationCutoff(RETURN_TYPES.GSTR8, period);
+    const liveInPeriod = cutoff
+      // ⚠️ cancelledAt NULL means the order was cancelled before that column existed, so it is
+      // treated as cancelled-before-filing and stays excluded — the pre-step-18 behaviour, and safe
+      // because no such row can be inside a filed period.
+      ? { OR: [{ status: { not: "CANCELLED" as const } }, { cancelledAt: { gt: cutoff } }] }
+      : { status: { not: "CANCELLED" as const } };
+
+    // Sub-orders with TCS in the window. tcsAmount > 0 already excludes the house store (it never
+    // accrues TCS on its own supplies).
     const grouped = await prisma.subOrder.groupBy({
       by: ["sellerId"],
       where: {
         createdAt: { gte: start, lt: end },
         tcsAmount: { gt: 0 },
-        order: { is: { status: { not: "CANCELLED" } } },
+        order: { is: liveInPeriod },
       },
       _sum: { subtotal: true, tcsAmount: true },
       _count: true,
     });
 
-    const sellerIds = grouped.map((g) => g.sellerId);
+    // ── Reversals of ALREADY-FILED periods that happened during this one ───────────────────────
+    //
+    // ⚠️ The other half of the rule, and not optional. Freezing alone would make a reversal vanish
+    // entirely: the TCS would be collected, reported, and then quietly never given back. These are
+    // NEGATIVE rows, reported in the period the cancellation happened.
+    const priorFiled = await reversibleFiledPeriods(RETURN_TYPES.GSTR8, period);
+    const reversals: { sellerId: string; subtotal: number; tcs: number; count: number; fromPeriod: string }[] = [];
+    for (const f of priorFiled) {
+      const w = periodWindow(f.period);
+      const rows = await prisma.subOrder.groupBy({
+        by: ["sellerId"],
+        where: {
+          createdAt: { gte: w.start, lt: w.end },
+          tcsAmount: { gt: 0 },
+          // Cancelled after that period was filed (so it was IN the filed return) and during this
+          // period (so this is where the reversal belongs).
+          order: { is: { status: "CANCELLED", cancelledAt: { gt: f.filedAt, gte: start, lt: end } } },
+        },
+        _sum: { subtotal: true, tcsAmount: true },
+        _count: true,
+      });
+      for (const r of rows) {
+        reversals.push({
+          sellerId: r.sellerId,
+          subtotal: -Number(r._sum.subtotal ?? 0),
+          tcs: -Number(r._sum.tcsAmount ?? 0),
+          count: r._count,
+          fromPeriod: f.period,
+        });
+      }
+    }
+
+    const sellerIds = [...new Set([...grouped.map((g) => g.sellerId), ...reversals.map((r) => r.sellerId)])];
     const sellers = await prisma.seller.findMany({
       where: { id: { in: sellerIds } },
       select: { id: true, name: true, gstin: true, pan: true },
@@ -65,6 +119,26 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
       };
     });
 
+    // Reversal rows carry negative values and name the filed period they unwind, so the owner and
+    // their CA can see WHY a month contains a minus rather than having to reconcile it blind.
+    for (const rv of reversals) {
+      const seller = sellerById.get(rv.sellerId);
+      const netLiable = +(rv.tcs / (TCS_RATE_PCT / 100)).toFixed(2);
+      const half = +(rv.tcs / 2).toFixed(2);
+      rows.push({
+        sellerId: rv.sellerId,
+        sellerName: `${seller?.name ?? "Unknown"} — reversal of ${rv.fromPeriod}`,
+        gstin: seller?.gstin ?? null,
+        pan: seller?.pan ?? null,
+        orderCount: rv.count,
+        grossSupplies: rv.subtotal,
+        netLiableValue: netLiable,
+        tcsCgst: half,
+        tcsSgst: +(rv.tcs - half).toFixed(2),
+        tcsTotal: rv.tcs,
+      });
+    }
+
     const totals = rows.reduce(
       (acc, r) => {
         acc.grossSupplies += r.grossSupplies;
@@ -78,6 +152,9 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     res.json({
       success: true,
       data: {
+        // So a caller can tell a frozen month from a live one without asking separately.
+        filed: cutoff != null,
+        filedAt: cutoff,
         period,
         tcsRatePct: TCS_RATE_PCT,
         sellerCount: rows.length,

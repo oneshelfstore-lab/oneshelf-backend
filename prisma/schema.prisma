@@ -1491,6 +1491,18 @@ model Order {
   // never split, so a zero here would assert the fee carried no tax. Null says "never split".
   // ⚠️ Step 15 is INCLUSIVE — deliveryTaxable + deliveryGst must equal deliveryCharge exactly, so
   // that ₹30 stays ₹30 to the customer and no order total moves.
+  // WHEN this order was cancelled (runbook step 18). Null while it is alive.
+  //
+  // ⚠️ It exists to answer one question a filed GST period depends on: did this reversal happen
+  // before or after the period it belongs to was filed? A cancellation in October must not change
+  // what September's return produced — it belongs in October as a reversal. Without a timestamp the
+  // only thing available is the CURRENT status, which is exactly what silently rewrites history.
+  //
+  // Stamped in cancelOrderInTx, the single compare-and-swap that cancels an order, so it cannot
+  // drift from the status it accompanies. Orders cancelled BEFORE this column existed have NULL,
+  // which reads as "cancelled at an unknown time" — harmless, because no period has ever been
+  // filed, so the first filed period will only contain cancellations that carry a stamp.
+  cancelledAt        DateTime?
   deliveryTaxable    Decimal? @db.Decimal(10, 2)
   deliveryGst        Decimal? @db.Decimal(10, 2)
   taxableValue       Decimal  @default(0) @db.Decimal(12, 2)
@@ -2845,6 +2857,39 @@ model TdsRecord {
   returnFiled     Boolean         @default(false)
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
+}
+
+// A GST period that has been FILED, and therefore must stop moving (runbook step 18).
+//
+// The problem this closes: every return in this system is computed live from current data, so
+// cancelling an October order silently changes what September's GSTR-8 and GSTR-1 would produce —
+// after September was filed with the old numbers. A reversal belongs in the period it HAPPENS in,
+// not retroactively in the one it reverses.
+//
+// ⚠️ One table for both returns rather than a marker per report. GSTR-1 and GSTR-8 are filed
+// separately, on different dates, and can legitimately disagree about which months are closed;
+// returnType keeps them independent while the freezing RULE stays in one place. Inventing a
+// parallel mechanism per return is how the two rules drift apart.
+//
+// Filing GSTR-1 also stamps Invoice.gstr1Period / gstr1Filed on that period's invoices. Those two
+// columns have existed since the compliance work and were READ in two places and WRITTEN by none —
+// so issueCancellationCreditNote, the code meant to issue a reversing credit note instead of
+// silently cancelling a filed invoice, has never once fired. This is what makes it live.
+model FiledTaxPeriod {
+  id         String   @id @default(cuid())
+  /** "GSTR1" | "GSTR8" — a String, not an enum, so a new return needs no migration. */
+  returnType String
+  /** "YYYY-MM". */
+  period     String
+  filedAt    DateTime @default(now())
+  /** Whoever pressed the button, for the audit trail. */
+  filedBy    String?
+  note       String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([returnType, period])
+  @@index([returnType])
 }
 
 model InvoiceCounter {

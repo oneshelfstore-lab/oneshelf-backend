@@ -144,7 +144,11 @@ export async function cancelOrderInTx(
 ): Promise<CancelOutcome> {
   const won = await tx.order.updateMany({
     where: { id: orderId, status: { in: [...allowedFrom] } },
-    data: { status: "CANCELLED" },
+    // ⚠️ Stamped INSIDE the compare-and-swap, not alongside it, so the timestamp and the status can
+    // never disagree. A filed GST period decides what to freeze by asking whether a reversal
+    // happened before or after it was filed (runbook step 18), and a CANCELLED order with no
+    // cancelledAt is a reversal with no date — unanswerable.
+    data: { status: "CANCELLED", cancelledAt: new Date() },
   });
 
   if (won.count === 0) {

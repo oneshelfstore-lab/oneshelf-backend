@@ -11,6 +11,7 @@ import { payoutSeller } from "../services/sellerPayout.js";
 import { buildSettlementStatement, settlementToExcel } from "../services/settlementStatement.js";
 import { isValidGstin } from "../validators/index.js";
 import { parseHhMm, resolveFoodConfig } from "../services/foodMenu.js";
+import { houseSellerIsSeparateEntity } from "../services/entitySplit.js";
 
 // Owner-managed marketplace sellers. Mounted at /api/app/owner/sellers (Firebase auth + OWNER).
 // Onboard a seller BY PHONE (no UIDs): promote an existing user to SELLER + link, or pre-create a
@@ -407,8 +408,27 @@ router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
 
     const seller = await prisma.seller.findUnique({ where: { id }, select: { id: true, isHouse: true } });
     if (!seller) throw new NotFoundError("Seller", id);
-    if (seller.isHouse && (status !== undefined || commissionPct !== undefined || isActive !== undefined)) {
-      throw new ValidationError("The house store can't be suspended or commissioned (manage it in Store Settings).");
+    // ⚠️ TWO REFUSALS THAT USED TO BE ONE, and runbook step 23 is what forced them apart.
+    //
+    // Suspending or de-activating the house store stays refused FOREVER. SELLER_TRADING in
+    // catalog.ts filters a suspended or inactive seller's products out of every customer-facing
+    // query, so flipping either of those here takes the shop's own 700-odd products off its own
+    // storefront - from a screen whose job is managing OTHER people's shops. That is a Store
+    // Settings decision and it stays there.
+    //
+    // Charging it commission is refused only while the platform and the shop are ONE legal entity,
+    // where a rate would be the business billing itself. Once StoreConfig.houseSellerIsSeparateEntity
+    // is on the house store is a seller like any other, and its rate HAS to be settable - otherwise
+    // step 23 splits the entities and the shop carries on at 0%, which reads as the split working
+    // while no commission is actually being charged on the busiest catalog in the store.
+    if (seller.isHouse && (status !== undefined || isActive !== undefined)) {
+      throw new ValidationError("The house store can't be suspended or de-activated (manage it in Store Settings).");
+    }
+    if (seller.isHouse && commissionPct !== undefined && !(await houseSellerIsSeparateEntity())) {
+      throw new ValidationError(
+        "The house store and the platform are one legal entity, so it can't be charged commission. " +
+        "Split them first (runbook step 23).",
+      );
     }
 
     const updated = await prisma.seller.update({

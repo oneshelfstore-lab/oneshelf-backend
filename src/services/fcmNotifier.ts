@@ -461,6 +461,23 @@ export async function notifyOrderMessage(info: {
   }
 }
 
+// A new message inside a complaint: customer → pings the owner topic; store → pings the customer.
+export async function notifyComplaintMessage(info: {
+  complaintId: string;
+  fromSender: string; // "CUSTOMER" | "OWNER"
+  customerUserId: string;
+  preview: string;
+}) {
+  const data = { type: "complaint_message", complaintId: info.complaintId };
+  if (info.fromSender === "CUSTOMER") {
+    await sendToTopic("owner_orders", { ...data, title: "New message on a complaint", body: info.preview });
+  } else {
+    const tokens = await getUserTokens(info.customerUserId);
+    if (tokens.length === 0) return;
+    await sendToTokens(tokens, { ...data, title: "The store replied to your complaint", body: info.preview });
+  }
+}
+
 // Tells the customer their bulk-quote estimate is ready to review/approve.
 export async function notifyQuoteReady(
   userId: string,

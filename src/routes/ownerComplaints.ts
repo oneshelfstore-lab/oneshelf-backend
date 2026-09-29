@@ -7,8 +7,9 @@ import {
   requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
-import { shapeComplaint } from "./appUser.js";
-import { notifyComplaintForwarded } from "../services/fcmNotifier.js";
+import { shapeComplaint, quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
+import { shapeOrderMessage } from "../services/orderMessages.js";
+import { notifyComplaintForwarded, notifyComplaintMessage } from "../services/fcmNotifier.js";
 
 // Owner complaint inbox. Mounted at /api/app/owner/complaints.
 const router = Router();
@@ -204,6 +205,40 @@ router.post("/:id/refund", async (req: FirebaseAuthRequest, res: Response) => {
     if (e?.code === "P2002") {
       return sendError(res, new ConflictError("This order already has a refund on record — check the wallet ledger before refunding again."));
     }
+    sendError(res, e);
+  }
+});
+
+// ─── Complaint chat (owner side) — the store replies to the customer inside the complaint ───────
+router.get("/:id/messages", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const complaint = await prisma.complaint.findUnique({ where: { id: String(req.params.id) }, select: { id: true } });
+    if (!complaint) throw new NotFoundError("Complaint", String(req.params.id));
+    const messages = await prisma.complaintMessage.findMany({ where: { complaintId: complaint.id }, orderBy: { createdAt: "asc" } });
+    res.json({ success: true, data: messages.map(shapeOrderMessage) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+router.post("/:id/messages", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = quoteMessageSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid message", parsed.error.errors);
+    const complaint = await prisma.complaint.findUnique({ where: { id: String(req.params.id) }, select: { id: true, userId: true } });
+    if (!complaint) throw new NotFoundError("Complaint", String(req.params.id));
+    await prisma.complaintMessage.create({
+      data: {
+        complaintId: complaint.id, sender: "OWNER",
+        text: parsed.data.text?.trim() || null, voiceUrl: parsed.data.voiceUrl || null, imageUrls: parsed.data.imageUrls ?? [],
+      },
+    });
+    notifyComplaintMessage({
+      complaintId: complaint.id, fromSender: "OWNER", customerUserId: complaint.userId, preview: quoteMessagePreview(parsed.data),
+    }).catch((e: unknown) => console.error("[background task failed]", e));
+    const messages = await prisma.complaintMessage.findMany({ where: { complaintId: complaint.id }, orderBy: { createdAt: "asc" } });
+    res.status(201).json({ success: true, data: messages.map(shapeOrderMessage) });
+  } catch (e) {
     sendError(res, e);
   }
 });

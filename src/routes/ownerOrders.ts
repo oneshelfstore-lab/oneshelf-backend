@@ -93,6 +93,9 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
           deliveryOtpRequired: true, deliveryBoyId: true, couponCode: true,
           shippingName: true, shippingPhone: true, shippingAddress: true,
           source: true, // "BULK_QUOTE" → owner board shows a BULK badge
+          // The window the customer picked at checkout. Without it the store never learns the
+          // customer asked for "6 – 9 PM", which makes the slot picker a promise nobody sees.
+          deliverySlot: true,
           // A failed drop returns the order to PACKED, which is otherwise indistinguishable from a
           // freshly-packed order. These are what tell the owner it came back and why.
           deliveryAttempts: true, lastDeliveryFailure: true, lastDeliveryFailedAt: true,

@@ -10,7 +10,8 @@ import { admin, isFirebaseInitialized } from "../lib/firebase.js";
 import { formatProductForApp } from "./catalog.js";
 import { computeUserSavings } from "../services/savings.js";
 import { computeUserLoyalty } from "../services/loyalty.js";
-import { notifyNewComplaint, notifyNewQuoteRequest, notifyQuoteMessage } from "../services/fcmNotifier.js";
+import { notifyNewComplaint, notifyNewQuoteRequest, notifyQuoteMessage, notifyComplaintMessage } from "../services/fcmNotifier.js";
+import { shapeOrderMessage } from "../services/orderMessages.js";
 import { mintReferralWelcomeCoupon, istMonthKey, maskName, getAvailableReferralBalance, withdrawReferralBalance } from "../services/referralRewards.js";
 import { createTopup, creditTopup, reconcileUserTopups } from "../services/walletTopup.js";
 import { verifyPaymentSignature, createRazorpayOrder, isRazorpayConfigured } from "../services/razorpay.js";
@@ -1054,6 +1055,41 @@ router.get("/complaints", async (req: FirebaseAuthRequest, res: Response) => {
       orderBy: { createdAt: "desc" },
     });
     res.json({ success: true, data: complaints.map((c) => shapeComplaint({ ...c })) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── Complaint chat (customer side) ─────────────────────────────────────────────────────────
+// Same message shape as the order/quote threads, so the app renders it with the same QuoteThread.
+router.get("/complaints/:id/messages", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const complaint = await prisma.complaint.findFirst({ where: { id: String(req.params.id), userId: req.appUser!.id }, select: { id: true } });
+    if (!complaint) throw new NotFoundError("Complaint", String(req.params.id));
+    const messages = await prisma.complaintMessage.findMany({ where: { complaintId: complaint.id }, orderBy: { createdAt: "asc" } });
+    res.json({ success: true, data: messages.map(shapeOrderMessage) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+router.post("/complaints/:id/messages", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = quoteMessageSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid message", parsed.error.errors);
+    const complaint = await prisma.complaint.findFirst({ where: { id: String(req.params.id), userId: req.appUser!.id }, select: { id: true, userId: true } });
+    if (!complaint) throw new NotFoundError("Complaint", String(req.params.id));
+    await prisma.complaintMessage.create({
+      data: {
+        complaintId: complaint.id, sender: "CUSTOMER",
+        text: parsed.data.text?.trim() || null, voiceUrl: parsed.data.voiceUrl || null, imageUrls: parsed.data.imageUrls ?? [],
+      },
+    });
+    notifyComplaintMessage({
+      complaintId: complaint.id, fromSender: "CUSTOMER", customerUserId: complaint.userId, preview: quoteMessagePreview(parsed.data),
+    }).catch((e: unknown) => console.error("[background task failed]", e));
+    const messages = await prisma.complaintMessage.findMany({ where: { complaintId: complaint.id }, orderBy: { createdAt: "asc" } });
+    res.status(201).json({ success: true, data: messages.map(shapeOrderMessage) });
   } catch (e) {
     sendError(res, e);
   }

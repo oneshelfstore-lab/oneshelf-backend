@@ -712,6 +712,10 @@ model Complaint {
   sellerResponse      String? // seller's reply, visible only to the owner
   sellerRespondedAt   DateTime?
 
+  // Customer ↔ store conversation about this complaint. The seller's reply above stays separate
+  // and owner-only; this thread is what the customer sees.
+  messages ComplaintMessage[]
+
   @@index([userId])
   @@index([status])
   @@index([forwardedToSellerId])
@@ -777,6 +781,20 @@ model QuoteMessage {
 // question, or the owner/whichever seller has a slice of it, both reply here. Kept as its own
 // model rather than widening QuoteMessage's FK (Prisma has no clean "exactly one of two optional
 // FKs" — a second same-shape model is less code than that workaround).
+// Same shape as OrderMessage/QuoteMessage: the customer ↔ store chat inside one complaint.
+model ComplaintMessage {
+  id          String    @id @default(cuid())
+  complaintId String
+  complaint   Complaint @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+  sender      String // "CUSTOMER" | "OWNER"
+  text        String?
+  voiceUrl    String?
+  imageUrls   String[]  @default([])
+  createdAt   DateTime  @default(now())
+
+  @@index([complaintId])
+}
+
 model OrderMessage {
   id        String   @id @default(cuid())
   orderId   String

@@ -197,6 +197,8 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         paymentMethod: true, paymentStatus: true, totalAmount: true,
         deliveryOtpRequired: true, shippingName: true, shippingPhone: true,
         shippingAddress: true, shippingPincode: true,
+        // The customer's chosen delivery window, so the rider can see when they are expected.
+        deliverySlot: true,
         createdAt: true, updatedAt: true,
         // Pre-dispatch (see DISPATCH_LEAD_MINUTES): a pooled order may still be cooking, so the card
         // can say "ready in ~6 min" instead of offering a Picked-up button that 400s. (`source` is

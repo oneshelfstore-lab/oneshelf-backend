@@ -93,7 +93,16 @@ router.post("/login", async (req: Request, res: Response) => {
 router.post("/refresh", async (req: Request, res: Response) => {
   try {
     const { refreshToken } = z.object({ refreshToken: z.string() }).parse(req.body);
-    const payload = verifyToken(refreshToken) as JwtPayload & { type?: string };
+    let payload: JwtPayload & { type?: string };
+    try {
+      payload = verifyToken(refreshToken) as JwtPayload & { type?: string };
+    } catch {
+      // Expired / tampered / junk token → a normal "sign in again", not a 500.
+      return res.status(401).json({
+        success: false,
+        error: { code: "TOKEN_EXPIRED", message: "Session expired. Please sign in again.", details: [] },
+      });
+    }
 
     if (payload.type !== "refresh") {
       return res.status(400).json({

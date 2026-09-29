@@ -159,7 +159,7 @@ router.get("/", async (req: SellerRequest, res: Response) => {
 // ─── PATCH /:id/status — mark ACCEPTED / PACKED (ownership-checked) ─
 router.patch("/:id/status", async (req: SellerRequest, res: Response) => {
   try {
-    const id = req.params.id as string;
+    const id = String(req.params.id);
     const parsed = z.object({ status: z.enum(["ACCEPTED", "PACKED"]) }).safeParse(req.body);
     if (!parsed.success) throw new ValidationError("status must be ACCEPTED or PACKED");
     const { status } = parsed.data;
@@ -230,7 +230,7 @@ const rejectSchema = z.object({
 });
 router.post("/:id/reject", async (req: SellerRequest, res: Response) => {
   try {
-    const id = req.params.id as string;
+    const id = String(req.params.id);
     const parsed = rejectSchema.safeParse(req.body ?? {});
     if (!parsed.success) throw new ValidationError("Pick a reason for rejecting this order");
     const { reason, note } = parsed.data;
@@ -362,7 +362,7 @@ router.post("/:id/reject", async (req: SellerRequest, res: Response) => {
 const flagSchema = z.object({ note: z.string().max(500).optional() });
 router.post("/:id/flag-unavailable", async (req: SellerRequest, res: Response) => {
   try {
-    const id = req.params.id as string;
+    const id = String(req.params.id);
     const parsed = flagSchema.safeParse(req.body ?? {});
     if (!parsed.success) throw new ValidationError("Invalid data");
 

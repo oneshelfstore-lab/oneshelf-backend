@@ -272,7 +272,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
 
 router.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const productId = req.params.id as string;
+    const productId = String(req.params.id);
     const existing = await prisma.catalogProduct.findUnique({
       where: { id: productId },
       // Active only, matching the GET above: toRemove derives from this list, so an already
@@ -392,7 +392,7 @@ router.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
 
 router.delete("/:id", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const productId = req.params.id as string;
+    const productId = String(req.params.id);
     const existing = await prisma.catalogProduct.findUnique({ where: { id: productId } });
     if (!existing) throw new NotFoundError("Product", productId);
 
@@ -408,7 +408,7 @@ router.delete("/:id", async (req: FirebaseAuthRequest, res: Response) => {
 
 router.patch("/:id/toggle", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const productId = req.params.id as string;
+    const productId = String(req.params.id);
     const { isActive } = z.object({ isActive: z.boolean() }).parse(req.body);
     const existing = await prisma.catalogProduct.findUnique({ where: { id: productId } });
     if (!existing) throw new NotFoundError("Product", productId);
@@ -425,7 +425,7 @@ router.patch("/:id/toggle", async (req: FirebaseAuthRequest, res: Response) => {
 
 router.patch("/:id/stock", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const productId = req.params.id as string;
+    const productId = String(req.params.id);
     const { variantId, stock } = z.object({
       variantId: z.string().min(1),
       stock: z.number().min(0),
@@ -478,7 +478,7 @@ const receiveStockSchema = z.object({
 
 router.post("/:id/stock/receive", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const productId = req.params.id as string;
+    const productId = String(req.params.id);
     const { variantId, qty, unitCost, note, vendorId, billNumber, paymentDueDate } = receiveStockSchema.parse(req.body);
 
     const variant = await prisma.productVariant.findFirst({
@@ -645,7 +645,7 @@ router.post("/categories", async (req: FirebaseAuthRequest, res: Response) => {
 // DELETE /categories/:id — delete category
 router.delete("/categories/:id", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const catId = req.params.id as string;
+    const catId = String(req.params.id);
     const cat = await prisma.category.findUnique({ where: { id: catId } });
     if (!cat) throw new NotFoundError("Category", catId);
 

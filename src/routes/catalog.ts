@@ -571,11 +571,11 @@ publicCatalogRouter.post("/stock-check", async (req: Request, res: Response) => 
 publicCatalogRouter.get("/:id/alternatives", cacheControl(CATALOG_LIST_TTL), async (req: Request, res: Response) => {
   try {
     const product = await prisma.catalogProduct.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       select: { id: true, categoryId: true, isActive: true },
     });
     if (!product || !product.isActive) {
-      throw new NotFoundError("Product", req.params.id!);
+      throw new NotFoundError("Product", String(req.params.id));
     }
 
     const alternatives = await prisma.catalogProduct.findMany({
@@ -618,7 +618,7 @@ publicCatalogRouter.get("/:id", cacheControl(CATALOG_LIST_TTL), async (req: Requ
     });
 
     if (!product || !product.isActive) {
-      throw new NotFoundError("Product", req.params.id!);
+      throw new NotFoundError("Product", String(req.params.id));
     }
 
     const badges = await loadActiveFreeGiftBadges();
@@ -762,8 +762,8 @@ adminCatalogRouter.post("/", requireRole("OWNER") as any, async (req: Request, r
 // PUT /api/catalog/:id — update product + upsert variants
 adminCatalogRouter.put("/:id", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.catalogProduct.findUnique({ where: { id: req.params.id }, include: { variants: true } });
-    if (!existing) throw new NotFoundError("Product", req.params.id!);
+    const existing = await prisma.catalogProduct.findUnique({ where: { id: String(req.params.id) }, include: { variants: true } });
+    if (!existing) throw new NotFoundError("Product", String(req.params.id));
 
     const updateSchema = productCreateSchema.partial().omit({ variants: true }).extend({
       variants: z.array(variantCreateSchema.extend({ id: z.string().optional() })).optional(),
@@ -785,7 +785,7 @@ adminCatalogRouter.put("/:id", requireRole("OWNER") as any, async (req: Request,
 
     await prisma.$transaction(async (tx) => {
       if (Object.keys(productData).length > 0) {
-        await tx.catalogProduct.update({ where: { id: req.params.id }, data: productData });
+        await tx.catalogProduct.update({ where: { id: String(req.params.id) }, data: productData });
       }
 
       if (variantUpdates) {
@@ -805,7 +805,7 @@ adminCatalogRouter.put("/:id", requireRole("OWNER") as any, async (req: Request,
             await applyStockEdit(tx, vid, v.stock, v.costPrice, "Edited via product editor");
           } else {
             const { id: _unused, stock: _stock, costPrice: _costPrice, ...data } = v as any;
-            const created = await tx.productVariant.create({ data: { ...data, stock: 0, productId: req.params.id! } });
+            const created = await tx.productVariant.create({ data: { ...data, stock: 0, productId: String(req.params.id) } });
             if (v.stock > 0) await receiveBatch(tx, created.id, v.stock, v.costPrice ?? 0, "Initial stock");
           }
         }
@@ -813,7 +813,7 @@ adminCatalogRouter.put("/:id", requireRole("OWNER") as any, async (req: Request,
     });
 
     const updated = await prisma.catalogProduct.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       include: { variants: { orderBy: { packageSize: "asc" } }, category: { select: { slug: true, name: true } } },
     });
 
@@ -826,10 +826,10 @@ adminCatalogRouter.put("/:id", requireRole("OWNER") as any, async (req: Request,
 // DELETE /api/catalog/:id — soft-delete
 adminCatalogRouter.delete("/:id", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.catalogProduct.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Product", req.params.id!);
+    const existing = await prisma.catalogProduct.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Product", String(req.params.id));
 
-    await prisma.catalogProduct.update({ where: { id: req.params.id }, data: { isActive: false } });
+    await prisma.catalogProduct.update({ where: { id: String(req.params.id) }, data: { isActive: false } });
     res.json({ success: true, message: "Product deactivated" });
   } catch (e) {
     sendError(res, e);

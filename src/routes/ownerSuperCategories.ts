@@ -65,7 +65,7 @@ router.post("/", async (req: Request, res: Response) => {
 // PUT /:id — update fields.
 router.put("/:id", async (req: Request, res: Response) => {
   try {
-    const id = req.params.id as string;
+    const id = String(req.params.id);
     const existing = await prisma.superCategory.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError("SuperCategory", id);
 
@@ -82,7 +82,7 @@ router.put("/:id", async (req: Request, res: Response) => {
 // DELETE /:id — remove. onDelete:SetNull unlinks the child categories (products untouched).
 router.delete("/:id", async (req: Request, res: Response) => {
   try {
-    const id = req.params.id as string;
+    const id = String(req.params.id);
     const existing = await prisma.superCategory.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError("SuperCategory", id);
 
@@ -98,7 +98,7 @@ router.delete("/:id", async (req: Request, res: Response) => {
 // unlinked (superCategoryId=null). A category belongs to at most one super-category.
 router.post("/:id/assign", async (req: Request, res: Response) => {
   try {
-    const id = req.params.id as string;
+    const id = String(req.params.id);
     const existing = await prisma.superCategory.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError("SuperCategory", id);
 

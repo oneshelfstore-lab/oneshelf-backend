@@ -69,10 +69,10 @@ ownerBrandRouter.post("/", async (req: Request, res: Response) => {
 
 ownerBrandRouter.delete("/:id", async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.brand.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Brand", req.params.id!);
+    const existing = await prisma.brand.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Brand", String(req.params.id));
 
-    await prisma.brand.delete({ where: { id: req.params.id } });
+    await prisma.brand.delete({ where: { id: String(req.params.id) } });
     memoCache.bust("brands");
     res.json({ success: true, message: "Brand deleted" });
   } catch (e) {

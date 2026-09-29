@@ -161,7 +161,7 @@ export async function calculateCartTotals(
 
   for (const item of cartItems) {
     const isLoose = isLooseType(item.variant.product.productType);
-    const converted = toAppFormat(item.variant, isLoose);
+    const converted = toAppFormat({ ...item.variant, stock: 0 }, isLoose); // pricing only — stock unused here
     const unitPrice = converted.sellingPrice;
 
     const isBulk = item.variant.bulkMinQty > 0 &&

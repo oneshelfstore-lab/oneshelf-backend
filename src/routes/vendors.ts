@@ -159,10 +159,10 @@ router.get("/search", async (req: Request, res: Response) => {
 router.get("/:id", async (req: Request, res: Response) => {
   try {
     const vendor = await prisma.vendor.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
     });
     if (!vendor || !vendor.isActive) {
-      throw new NotFoundError("Vendor", req.params.id!);
+      throw new NotFoundError("Vendor", String(req.params.id));
     }
 
     // Outstanding summary
@@ -241,9 +241,9 @@ router.get("/:id", async (req: Request, res: Response) => {
 
 router.put("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.vendor.findUnique({ where: { id: req.params.id } });
+    const existing = await prisma.vendor.findUnique({ where: { id: String(req.params.id) } });
     if (!existing || !existing.isActive) {
-      throw new NotFoundError("Vendor", req.params.id!);
+      throw new NotFoundError("Vendor", String(req.params.id));
     }
 
     const parsed = updateVendorSchema.safeParse(req.body);
@@ -262,7 +262,7 @@ router.put("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, re
     if (data.email === "") data.email = undefined;
 
     const vendor = await prisma.vendor.update({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       data,
     });
 
@@ -284,11 +284,11 @@ router.put("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, re
 
 router.delete("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.vendor.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Vendor", req.params.id!);
+    const existing = await prisma.vendor.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Vendor", String(req.params.id));
 
     await prisma.vendor.update({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       data: { isActive: false },
       select: { id: true },
     });

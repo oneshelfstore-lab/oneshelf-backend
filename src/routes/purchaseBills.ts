@@ -248,13 +248,13 @@ router.get("/", async (req: Request, res: Response) => {
 router.get("/:id", async (req: Request, res: Response) => {
   try {
     const bill = await prisma.purchaseBill.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       include: {
         vendor: true,
         lineItems: true,
       },
     });
-    if (!bill) throw new NotFoundError("PurchaseBill", req.params.id!);
+    if (!bill) throw new NotFoundError("PurchaseBill", String(req.params.id));
 
     const payments = await prisma.payment.findMany({
       where: { relatedType: "PURCHASE_BILL", relatedId: bill.id },
@@ -286,7 +286,7 @@ router.post("/:id/payment", requireRole(...FINANCE_ROLES) as any, async (req: Re
     const input = parsed.data;
 
     const payment = await prisma.$transaction((tx) =>
-      recordVendorPayment(tx, req.params.id!, {
+      recordVendorPayment(tx, String(req.params.id), {
         amount: input.amount,
         paymentMode: input.paymentMode,
         paymentDate: input.paymentDate ? new Date(input.paymentDate) : undefined,

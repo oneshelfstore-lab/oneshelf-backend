@@ -201,11 +201,11 @@ router.get("/search", async (req: Request, res: Response) => {
 router.get("/:id", async (req: Request, res: Response) => {
   try {
     const product = await prisma.product.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
     });
 
     if (!product || !product.isActive) {
-      throw new NotFoundError("Product", req.params.id!);
+      throw new NotFoundError("Product", String(req.params.id));
     }
 
     // Fetch HSN details for context
@@ -230,10 +230,10 @@ router.get("/:id", async (req: Request, res: Response) => {
 router.put("/:id", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
     const existing = await prisma.product.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
     });
     if (!existing || !existing.isActive) {
-      throw new NotFoundError("Product", req.params.id!);
+      throw new NotFoundError("Product", String(req.params.id));
     }
 
     const parsed = updateProductSchema.safeParse(req.body);
@@ -270,7 +270,7 @@ router.put("/:id", requireRole("OWNER") as any, async (req: Request, res: Respon
     }
 
     const product = await prisma.product.update({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       data,
     });
 
@@ -285,14 +285,14 @@ router.put("/:id", requireRole("OWNER") as any, async (req: Request, res: Respon
 router.delete("/:id", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
     const existing = await prisma.product.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
     });
     if (!existing) {
-      throw new NotFoundError("Product", req.params.id!);
+      throw new NotFoundError("Product", String(req.params.id));
     }
 
     await prisma.product.update({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       data: { isActive: false },
     });
 

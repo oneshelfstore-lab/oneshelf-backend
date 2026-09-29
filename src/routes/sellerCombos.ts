@@ -45,7 +45,7 @@ sellerComboRouter.put("/:id", async (req: SellerRequest, res: Response) => {
   try {
     const parsed = comboSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid combo", parsed.error.errors);
-    res.json({ success: true, data: await updateComboRecord(req.params.id as string, parsed.data) });
+    res.json({ success: true, data: await updateComboRecord(String(req.params.id), parsed.data) });
   } catch (e) {
     sendError(res, e);
   }
@@ -54,7 +54,7 @@ sellerComboRouter.put("/:id", async (req: SellerRequest, res: Response) => {
 sellerComboRouter.delete("/:id", async (req: SellerRequest, res: Response) => {
   if (!requireHouse(req, res)) return;
   try {
-    await deleteComboRecord(req.params.id as string);
+    await deleteComboRecord(String(req.params.id));
     res.json({ success: true, message: "Combo removed" });
   } catch (e) {
     sendError(res, e);

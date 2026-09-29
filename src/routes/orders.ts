@@ -584,9 +584,9 @@ router.post("/:id/pay", async (req: FirebaseAuthRequest, res: Response) => {
     const { razorpayPaymentId, razorpaySignature } = parsed.data;
 
     const order = await prisma.order.findFirst({
-      where: { id: req.params.id, customerId: req.appUser!.id },
+      where: { id: String(req.params.id), customerId: req.appUser!.id },
     });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
     if (!order.razorpayOrderId) throw new ValidationError("This order does not have a pending online payment");
     // Already confirmed — most likely the webhook won the race and flipped it first. The customer's
     // payment genuinely succeeded, so this must read as success, not an error (was previously a hard
@@ -617,10 +617,10 @@ router.post("/:id/pay", async (req: FirebaseAuthRequest, res: Response) => {
 router.post("/:id/reconcile", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const order = await prisma.order.findFirst({
-      where: { id: req.params.id, customerId: req.appUser!.id },
+      where: { id: String(req.params.id), customerId: req.appUser!.id },
       select: { id: true },
     });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
 
     const result = await reconcileOrderPayment(order.id);
     res.json({ success: true, data: result });
@@ -634,9 +634,9 @@ router.post("/:id/reconcile", async (req: FirebaseAuthRequest, res: Response) =>
 router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const order = await prisma.order.findFirst({
-      where: { id: req.params.id, customerId: req.appUser!.id },
+      where: { id: String(req.params.id), customerId: req.appUser!.id },
     });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
 
     // Compare-and-swap: flips the status and restores stock in one transaction, and only for the
     // caller that actually wins the row. The status check used to live out here, which let a double
@@ -712,10 +712,10 @@ router.post("/:id/rating", async (req: FirebaseAuthRequest, res: Response) => {
     if (!parsed.success) throw new ValidationError("Invalid rating", parsed.error.errors);
 
     const order = await prisma.order.findFirst({
-      where: { id: req.params.id, customerId: userId },
+      where: { id: String(req.params.id), customerId: userId },
       select: { id: true, status: true },
     });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
     if (order.status !== "DELIVERED") {
       throw new ValidationError("Only delivered orders can be rated.");
     }
@@ -747,10 +747,10 @@ router.get("/:id/rating", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
     const order = await prisma.order.findFirst({
-      where: { id: req.params.id, customerId: userId },
+      where: { id: String(req.params.id), customerId: userId },
       select: { id: true },
     });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
 
     const rating = await prisma.orderRating.findUnique({ where: { orderId: order.id } });
     res.json({ success: true, data: rating });
@@ -765,9 +765,9 @@ router.get("/:id/invoice/pdf", async (req: FirebaseAuthRequest, res: Response) =
   try {
     const userId = req.appUser!.id;
     const order = await prisma.order.findFirst({
-      where: { id: req.params.id, customerId: userId },
+      where: { id: String(req.params.id), customerId: userId },
     });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
     if (order.status === "CANCELLED") {
       throw new ValidationError("This order was cancelled, so there is no invoice for it.");
     }
@@ -796,16 +796,16 @@ router.get("/:id/invoices/:invoiceId/pdf", async (req: FirebaseAuthRequest, res:
   try {
     const userId = req.appUser!.id;
     const order = await prisma.order.findFirst({
-      where: { id: req.params.id, customerId: userId },
+      where: { id: String(req.params.id), customerId: userId },
       select: { id: true, orderNumber: true },
     });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
 
     const invoice = await prisma.invoice.findFirst({
-      where: { id: req.params.invoiceId, orderId: order.id },
+      where: { id: String(req.params.invoiceId), orderId: order.id },
       select: { id: true, invoiceNumber: true, status: true },
     });
-    if (!invoice) throw new NotFoundError("Invoice", req.params.invoiceId!);
+    if (!invoice) throw new NotFoundError("Invoice", String(req.params.invoiceId));
     if (invoice.status === "CANCELLED") {
       throw new ValidationError("This invoice was cancelled along with the order.");
     }
@@ -897,7 +897,7 @@ router.get("/:id/celebration", async (req: FirebaseAuthRequest, res: Response) =
   try {
     const userId = req.appUser!.id;
     const order = await prisma.order.findFirst({
-      where: { id: req.params.id, customerId: userId },
+      where: { id: String(req.params.id), customerId: userId },
       select: {
         id: true, status: true, fulfillmentType: true, deliverySlot: true,
         savedAmount: true, totalAmount: true, walletApplied: true, estimatedReadyAt: true,
@@ -908,7 +908,7 @@ router.get("/:id/celebration", async (req: FirebaseAuthRequest, res: Response) =
         shippingAddress: true, addressId: true,
       },
     });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
 
     const [savings, eta, scratch, items, addr] = await Promise.all([
       computeUserSavings(userId),
@@ -979,13 +979,13 @@ router.post("/:id/scratch", async (req: FirebaseAuthRequest, res: Response) => {
     const userId = req.appUser!.id;
     // Authorize: the order must belong to this user.
     const order = await prisma.order.findFirst({
-      where: { id: req.params.id, customerId: userId },
+      where: { id: String(req.params.id), customerId: userId },
       select: { id: true },
     });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
 
     const result = await revealScratchReward(order.id, userId);
-    if (!result) throw new NotFoundError("ScratchReward", req.params.id!);
+    if (!result) throw new NotFoundError("ScratchReward", String(req.params.id));
     res.json({ success: true, data: result });
   } catch (e) {
     sendError(res, e);
@@ -998,8 +998,8 @@ router.post("/:id/scratch", async (req: FirebaseAuthRequest, res: Response) => {
 
 router.get("/:id/messages", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const order = await prisma.order.findFirst({ where: { id: req.params.id, customerId: req.appUser!.id }, select: { id: true } });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    const order = await prisma.order.findFirst({ where: { id: String(req.params.id), customerId: req.appUser!.id }, select: { id: true } });
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
     const messages = await prisma.orderMessage.findMany({ where: { orderId: order.id }, orderBy: { createdAt: "asc" } });
     res.json({ success: true, data: messages.map(shapeOrderMessage) });
   } catch (e) {
@@ -1011,8 +1011,8 @@ router.post("/:id/messages", async (req: FirebaseAuthRequest, res: Response) => 
   try {
     const parsed = quoteMessageSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid message", parsed.error.errors);
-    const order = await prisma.order.findFirst({ where: { id: req.params.id, customerId: req.appUser!.id }, select: { id: true, orderNumber: true, customerId: true } });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    const order = await prisma.order.findFirst({ where: { id: String(req.params.id), customerId: req.appUser!.id }, select: { id: true, orderNumber: true, customerId: true } });
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
 
     const msg = await prisma.orderMessage.create({
       data: {
@@ -1057,7 +1057,7 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
         address: true,
       },
     });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
 
     // Include OTP for the customer only once handover is imminent (out for delivery / ready for
     // pickup) and it's not yet verified — never while PLACED/CONFIRMED/PACKED.
@@ -1280,13 +1280,13 @@ router.post("/:orderId/items/:itemId/substitute/respond", async (req: FirebaseAu
     const userId = req.appUser!.id;
 
     const order = await prisma.order.findFirst({
-      where: { id: req.params.orderId as string, customerId: userId },
+      where: { id: String(req.params.orderId), customerId: userId },
       include: { items: true },
     });
-    if (!order) throw new NotFoundError("Order", req.params.orderId as string);
+    if (!order) throw new NotFoundError("Order", String(req.params.orderId));
 
-    const item = order.items.find((i) => i.id === (req.params.itemId as string));
-    if (!item) throw new NotFoundError("OrderItem", req.params.itemId as string);
+    const item = order.items.find((i) => i.id === (String(req.params.itemId)));
+    if (!item) throw new NotFoundError("OrderItem", String(req.params.itemId));
 
     if (item.substitutionStatus !== "PROPOSED") {
       throw new ValidationError(`Item substitution is '${item.substitutionStatus}', not PROPOSED`);

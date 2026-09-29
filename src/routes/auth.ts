@@ -7,6 +7,7 @@ import {
   generateToken,
   generateRefreshToken,
   verifyToken,
+  isTokenRevoked,
   authMiddleware,
   type AuthRequest,
   type JwtPayload,
@@ -33,7 +34,7 @@ router.post("/login", async (req: Request, res: Response) => {
     const { email, password } = loginSchema.parse(req.body);
 
     const user = await prisma.user.findUnique({ where: { email } });
-    if (!user || !user.isActive) {
+    if (!user || !user.isActive || !user.passwordHash) {
       return res.status(401).json({
         success: false,
         error: { code: "INVALID_CREDENTIALS", message: "Invalid email or password", details: [] },
@@ -51,7 +52,7 @@ router.post("/login", async (req: Request, res: Response) => {
     await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
 
     await prisma.auditLog.create({
-      data: { userId: user.email, action: "LOGIN", entityType: "User", entityId: user.id, ipAddress: req.ip || "" },
+      data: { userId: email, action: "LOGIN", entityType: "User", entityId: user.id, ipAddress: req.ip || "" },
     });
 
     // mustChangePassword rides in the token so requirePasswordChanged can refuse every dashboard
@@ -59,7 +60,7 @@ router.post("/login", async (req: Request, res: Response) => {
     // the client needs a token to be able to CALL change-password.
     const payload: JwtPayload = {
       userId: user.id,
-      email: user.email,
+      email: email,
       role: user.role,
       name: user.name,
       mustChangePassword: user.mustChangePassword,
@@ -102,10 +103,18 @@ router.post("/refresh", async (req: Request, res: Response) => {
     }
 
     const user = await prisma.user.findUnique({ where: { id: payload.userId } });
-    if (!user || !user.isActive) {
+    if (!user || !user.isActive || !user.email) {
       return res.status(401).json({
         success: false,
         error: { code: "ACCOUNT_DISABLED", message: "Account is disabled", details: [] },
+      });
+    }
+    // ⚠️ Without this a stolen refresh token outlives a password change: it would re-mint a fresh
+    // pair carrying the NEW tokenVersion read below, silently undoing the revocation for 7 days.
+    if (isTokenRevoked(payload.tokenVersion, user.tokenVersion)) {
+      return res.status(401).json({
+        success: false,
+        error: { code: "TOKEN_REVOKED", message: "Session ended. Please sign in again.", details: [] },
       });
     }
 
@@ -155,7 +164,7 @@ router.post("/change-password", authMiddleware, async (req: AuthRequest, res: Re
     const { currentPassword, newPassword } = changePasswordSchema.parse(req.body);
 
     const user = await prisma.user.findUnique({ where: { id: req.user!.userId } });
-    if (!user) {
+    if (!user || !user.passwordHash) {
       return res.status(404).json({
         success: false,
         error: { code: "NOT_FOUND", message: "User not found", details: [] },

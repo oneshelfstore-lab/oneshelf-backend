@@ -244,10 +244,10 @@ router.put("/:itemId", async (req: FirebaseAuthRequest, res: Response) => {
     const userId = req.appUser!.id;
 
     const item = await prisma.cartItem.findFirst({
-      where: { id: req.params.itemId, userId },
+      where: { id: String(req.params.itemId), userId },
       include: { variant: { include: { product: { select: { productType: true } } } } },
     });
-    if (!item) throw new NotFoundError("CartItem", req.params.itemId!);
+    if (!item) throw new NotFoundError("CartItem", String(req.params.itemId));
 
     const variant = item.variant;
     const isLoose = isLooseType(variant.product.productType);
@@ -272,8 +272,8 @@ router.put("/:itemId", async (req: FirebaseAuthRequest, res: Response) => {
 router.delete("/:itemId", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
-    const item = await prisma.cartItem.findFirst({ where: { id: req.params.itemId, userId } });
-    if (!item) throw new NotFoundError("CartItem", req.params.itemId!);
+    const item = await prisma.cartItem.findFirst({ where: { id: String(req.params.itemId), userId } });
+    if (!item) throw new NotFoundError("CartItem", String(req.params.itemId));
 
     await prisma.cartItem.delete({ where: { id: item.id } });
     res.json({ success: true, message: "Item removed from cart" });
@@ -288,9 +288,9 @@ router.post("/:itemId/save-for-later", async (req: FirebaseAuthRequest, res: Res
   try {
     const userId = req.appUser!.id;
     const item = await prisma.cartItem.findFirst({
-      where: { id: req.params.itemId, userId, savedForLater: false },
+      where: { id: String(req.params.itemId), userId, savedForLater: false },
     });
-    if (!item) throw new NotFoundError("CartItem", req.params.itemId!);
+    if (!item) throw new NotFoundError("CartItem", String(req.params.itemId));
 
     await prisma.cartItem.update({ where: { id: item.id }, data: { savedForLater: true } });
     res.json({ success: true, message: "Item saved for later" });
@@ -305,10 +305,10 @@ router.post("/:itemId/move-to-cart", async (req: FirebaseAuthRequest, res: Respo
   try {
     const userId = req.appUser!.id;
     const item = await prisma.cartItem.findFirst({
-      where: { id: req.params.itemId, userId, savedForLater: true },
+      where: { id: String(req.params.itemId), userId, savedForLater: true },
       include: { variant: { include: { product: { select: { productType: true } } } } },
     });
-    if (!item) throw new NotFoundError("CartItem", req.params.itemId!);
+    if (!item) throw new NotFoundError("CartItem", String(req.params.itemId));
 
     // Re-validate stock
     const isLoose = isLooseType(item.variant.product.productType);

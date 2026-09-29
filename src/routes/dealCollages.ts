@@ -95,7 +95,7 @@ ownerDealCollageRouter.post("/", async (req: Request, res: Response) => {
 
 ownerDealCollageRouter.put("/:id", async (req: Request, res: Response) => {
   try {
-    const id = req.params.id as string;
+    const id = String(req.params.id);
     const existing = await prisma.dealCollage.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError("DealCollage", id);
     const parsed = collageSchema.partial().safeParse(req.body);
@@ -114,7 +114,7 @@ ownerDealCollageRouter.put("/:id", async (req: Request, res: Response) => {
 
 ownerDealCollageRouter.delete("/:id", async (req: Request, res: Response) => {
   try {
-    const id = req.params.id as string;
+    const id = String(req.params.id);
     const existing = await prisma.dealCollage.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError("DealCollage", id);
     await prisma.dealCollage.delete({ where: { id } }); // cascades to cards
@@ -129,7 +129,7 @@ ownerDealCollageRouter.delete("/:id", async (req: Request, res: Response) => {
 
 ownerDealCollageRouter.post("/:id/cards", async (req: Request, res: Response) => {
   try {
-    const id = req.params.id as string;
+    const id = String(req.params.id);
     const collage = await prisma.dealCollage.findUnique({
       where: { id },
       include: { cards: true },
@@ -152,8 +152,8 @@ ownerDealCollageRouter.post("/:id/cards", async (req: Request, res: Response) =>
 
 ownerDealCollageRouter.put("/:id/cards/:cardId", async (req: Request, res: Response) => {
   try {
-    const id = req.params.id as string;
-    const cardId = req.params.cardId as string;
+    const id = String(req.params.id);
+    const cardId = String(req.params.cardId);
     const existing = await prisma.dealCollageCard.findFirst({
       where: { id: cardId, collageId: id },
     });
@@ -173,8 +173,8 @@ ownerDealCollageRouter.put("/:id/cards/:cardId", async (req: Request, res: Respo
 
 ownerDealCollageRouter.delete("/:id/cards/:cardId", async (req: Request, res: Response) => {
   try {
-    const id = req.params.id as string;
-    const cardId = req.params.cardId as string;
+    const id = String(req.params.id);
+    const cardId = String(req.params.cardId);
     const existing = await prisma.dealCollageCard.findFirst({
       where: { id: cardId, collageId: id },
     });

@@ -67,7 +67,7 @@ router.get("/", async (req: Request, res: Response) => {
 router.get("/:id", async (req: Request, res: Response) => {
   try {
     const order = await prisma.order.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       include: {
         items: true,
         address: true,
@@ -75,7 +75,7 @@ router.get("/:id", async (req: Request, res: Response) => {
         deliveryBoy: { select: { id: true, name: true, phone: true } },
       },
     });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
     res.json({ success: true, data: await signOrderMedia(order) });
   } catch (e) {
     sendError(res, e);
@@ -101,8 +101,8 @@ router.put("/:id/status", requireRole("OWNER", "ACCOUNTANT", "BILLING_CLERK") as
     if (!parsed.success) throw new ValidationError("Invalid status", parsed.error.errors);
     const { status: newStatus } = parsed.data;
 
-    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    const order = await prisma.order.findUnique({ where: { id: String(req.params.id) } });
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
 
     const allowed = VALID_TRANSITIONS[order.status];
     if (!allowed || !allowed.includes(newStatus)) {

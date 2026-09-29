@@ -193,7 +193,7 @@ async function buildCreateInput(p: any, indexLabel: string): Promise<BuildResult
 
 router.post("/:id/approve", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const id = req.params.id as string;
+    const id = String(req.params.id);
     const submission = await prisma.productIntake.findUnique({ where: { id } });
     if (!submission) throw new NotFoundError("Submission", id);
     if (submission.status === "IMPORTED") {
@@ -261,7 +261,7 @@ router.post("/:id/approve", async (req: FirebaseAuthRequest, res: Response) => {
 
 router.post("/:id/reject", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const id = req.params.id as string;
+    const id = String(req.params.id);
     const parsed = z.object({ notes: z.string().max(500).optional() }).safeParse(req.body ?? {});
     const submission = await prisma.productIntake.findUnique({ where: { id } });
     if (!submission) throw new NotFoundError("Submission", id);
@@ -280,7 +280,7 @@ router.post("/:id/reject", async (req: FirebaseAuthRequest, res: Response) => {
 
 router.delete("/:id", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const id = req.params.id as string;
+    const id = String(req.params.id);
     await prisma.productIntake.delete({ where: { id } });
     res.json({ success: true, message: "Submission deleted" });
   } catch (e) {

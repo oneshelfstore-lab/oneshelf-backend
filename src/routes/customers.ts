@@ -173,11 +173,11 @@ router.get("/search", async (req: Request, res: Response) => {
 router.get("/:id", async (req: Request, res: Response) => {
   try {
     const customer = await prisma.customer.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
     });
 
     if (!customer || !customer.isActive) {
-      throw new NotFoundError("Customer", req.params.id!);
+      throw new NotFoundError("Customer", String(req.params.id));
     }
 
     // Purchase history summary
@@ -215,10 +215,10 @@ router.get("/:id", async (req: Request, res: Response) => {
 router.put("/:id", requireRole(...BILLING_ROLES) as any, async (req: Request, res: Response) => {
   try {
     const existing = await prisma.customer.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
     });
     if (!existing || !existing.isActive) {
-      throw new NotFoundError("Customer", req.params.id!);
+      throw new NotFoundError("Customer", String(req.params.id));
     }
 
     const parsed = updateCustomerSchema.safeParse(req.body);
@@ -242,7 +242,7 @@ router.put("/:id", requireRole(...BILLING_ROLES) as any, async (req: Request, re
     if (data.email === "") data.email = undefined;
 
     const customer = await prisma.customer.update({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       data,
     });
 

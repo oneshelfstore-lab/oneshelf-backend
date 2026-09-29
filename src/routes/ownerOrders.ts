@@ -135,7 +135,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
 router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const order = await prisma.order.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       include: {
         items: true,
         address: true,
@@ -143,7 +143,7 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
         deliveryBoy: { select: { id: true, name: true, phone: true } },
       },
     });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
 
     res.json({ success: true, data: await signOrderMedia(order) });
   } catch (e) {
@@ -156,9 +156,9 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
 
 router.post("/:id/sample-packed", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const ok = await markSamplePacked(req.params.id!);
-    if (!ok) throw new NotFoundError("FreeSample", req.params.id!);
-    res.json({ success: true, data: { orderId: req.params.id, freeSamplePacked: true } });
+    const ok = await markSamplePacked(String(req.params.id));
+    if (!ok) throw new NotFoundError("FreeSample", String(req.params.id));
+    res.json({ success: true, data: { orderId: String(req.params.id), freeSamplePacked: true } });
   } catch (e) {
     sendError(res, e);
   }
@@ -176,8 +176,8 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
     if (!parsed.success) throw new ValidationError("Invalid status", parsed.error.errors);
     const { status: newStatus } = parsed.data;
 
-    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    const order = await prisma.order.findUnique({ where: { id: String(req.params.id) } });
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
     assertPaymentSettled(order);
 
     const allowed = VALID_TRANSITIONS[order.status];
@@ -285,8 +285,8 @@ router.post("/:id/assign", async (req: FirebaseAuthRequest, res: Response) => {
     if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
     const { deliveryBoyId } = parsed.data;
 
-    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    const order = await prisma.order.findUnique({ where: { id: String(req.params.id) } });
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
     assertPaymentSettled(order);
 
     if (order.fulfillmentType !== "DELIVERY") {
@@ -379,10 +379,10 @@ router.post("/:orderId/items/:itemId/substitute", async (req: FirebaseAuthReques
     const { substituteVariantId } = parsed.data;
 
     const order = await prisma.order.findUnique({
-      where: { id: req.params.orderId as string },
+      where: { id: String(req.params.orderId) },
       include: { items: true },
     });
-    if (!order) throw new NotFoundError("Order", req.params.orderId as string);
+    if (!order) throw new NotFoundError("Order", String(req.params.orderId));
     assertPaymentSettled(order);
 
     // Only allow substitutions on orders being packed (CONFIRMED or PACKED).
@@ -390,8 +390,8 @@ router.post("/:orderId/items/:itemId/substitute", async (req: FirebaseAuthReques
       throw new ValidationError(`Cannot propose substitutions on '${order.status}' orders. Must be CONFIRMED or PACKED.`);
     }
 
-    const item = order.items.find((i) => i.id === (req.params.itemId as string));
-    if (!item) throw new NotFoundError("OrderItem", req.params.itemId as string);
+    const item = order.items.find((i) => i.id === (String(req.params.itemId)));
+    if (!item) throw new NotFoundError("OrderItem", String(req.params.itemId));
 
     // A free-gift line is a promised bonus, not a purchase — it can't be swapped for something else.
     if (item.isFreeGift) {
@@ -460,8 +460,8 @@ router.post("/:orderId/items/:itemId/substitute", async (req: FirebaseAuthReques
 // ─── Order message thread — owner replies as the store on any order ────────────────────────────
 router.get("/:id/messages", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const order = await prisma.order.findUnique({ where: { id: req.params.id }, select: { id: true } });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    const order = await prisma.order.findUnique({ where: { id: String(req.params.id) }, select: { id: true } });
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
     const messages = await prisma.orderMessage.findMany({ where: { orderId: order.id }, orderBy: { createdAt: "asc" } });
     res.json({ success: true, data: messages.map(shapeOrderMessage) });
   } catch (e) {
@@ -473,8 +473,8 @@ router.post("/:id/messages", async (req: FirebaseAuthRequest, res: Response) => 
   try {
     const parsed = quoteMessageSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid message", parsed.error.errors);
-    const order = await prisma.order.findUnique({ where: { id: req.params.id }, select: { id: true, orderNumber: true, customerId: true } });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    const order = await prisma.order.findUnique({ where: { id: String(req.params.id) }, select: { id: true, orderNumber: true, customerId: true } });
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
 
     await prisma.orderMessage.create({
       data: {

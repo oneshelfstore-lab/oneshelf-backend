@@ -43,7 +43,7 @@ publicCategoryRouter.get("/", cacheControl(PUBLIC_TTL_SECONDS), async (_req: Req
 // is hidden. Powers the category → sub-category browsing rail.
 publicCategoryRouter.get("/:slug/subcategories", cacheControl(PUBLIC_TTL_SECONDS), async (req: Request, res: Response) => {
   try {
-    const slug = req.params.slug!;
+    const slug = String(req.params.slug);
     const data = await memoCache.get(`categories:sub:${slug}`, PUBLIC_TTL_MS, async () => {
       const category = await prisma.category.findUnique({ where: { slug }, select: { id: true } });
       if (!category) return [] as { slug: string; name: string; productCount: number }[];
@@ -111,7 +111,7 @@ publicSuperCategoryRouter.get("/", cacheControl(PUBLIC_TTL_SECONDS), async (_req
 // storefront page. The app then loads products per child via the existing /products endpoint.
 publicSuperCategoryRouter.get("/:slug", cacheControl(PUBLIC_TTL_SECONDS), async (req: Request, res: Response) => {
   try {
-    const slug = req.params.slug as string;
+    const slug = String(req.params.slug);
     const data = await memoCache.get(`super-cats:${slug}`, PUBLIC_TTL_MS, async () => {
       const sup = await prisma.superCategory.findUnique({
         where: { slug },
@@ -180,8 +180,8 @@ adminCategoryRouter.post("/", requireRole("OWNER") as any, async (req: Request, 
 
 adminCategoryRouter.put("/:id", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.category.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Category", req.params.id!);
+    const existing = await prisma.category.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Category", String(req.params.id));
 
     const parsed = categorySchema.partial().safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid category data", parsed.error.errors);
@@ -191,7 +191,7 @@ adminCategoryRouter.put("/:id", requireRole("OWNER") as any, async (req: Request
       if (dup) throw new ConflictError(`Category slug '${parsed.data.slug}' already exists`);
     }
 
-    const category = await prisma.category.update({ where: { id: req.params.id }, data: parsed.data });
+    const category = await prisma.category.update({ where: { id: String(req.params.id) }, data: parsed.data });
     memoCache.bust("categories", "super-cats");
     res.json({ success: true, data: category });
   } catch (e) {
@@ -201,10 +201,10 @@ adminCategoryRouter.put("/:id", requireRole("OWNER") as any, async (req: Request
 
 adminCategoryRouter.delete("/:id", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.category.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Category", req.params.id!);
+    const existing = await prisma.category.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Category", String(req.params.id));
 
-    await prisma.category.update({ where: { id: req.params.id }, data: { isActive: false } });
+    await prisma.category.update({ where: { id: String(req.params.id) }, data: { isActive: false } });
     memoCache.bust("categories", "super-cats");
     res.json({ success: true, message: "Category deactivated" });
   } catch (e) {

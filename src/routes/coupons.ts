@@ -186,8 +186,8 @@ adminCouponRouter.post("/", requireRole("OWNER") as any, async (req: Request, re
 // PUT /api/coupons/:id — update
 adminCouponRouter.put("/:id", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.coupon.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Coupon", req.params.id!);
+    const existing = await prisma.coupon.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Coupon", String(req.params.id));
 
     const parsed = couponSchema.partial().safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid coupon data", parsed.error.errors);
@@ -197,7 +197,7 @@ adminCouponRouter.put("/:id", requireRole("OWNER") as any, async (req: Request, 
       if (dup) throw new ConflictError(`Coupon '${parsed.data.code}' already exists`);
     }
 
-    const coupon = await prisma.coupon.update({ where: { id: req.params.id }, data: parsed.data });
+    const coupon = await prisma.coupon.update({ where: { id: String(req.params.id) }, data: parsed.data });
     res.json({ success: true, data: coupon });
   } catch (e) {
     sendError(res, e);
@@ -207,10 +207,10 @@ adminCouponRouter.put("/:id", requireRole("OWNER") as any, async (req: Request, 
 // DELETE /api/coupons/:id — deactivate
 adminCouponRouter.delete("/:id", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.coupon.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Coupon", req.params.id!);
+    const existing = await prisma.coupon.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Coupon", String(req.params.id));
 
-    await prisma.coupon.update({ where: { id: req.params.id }, data: { isActive: false } });
+    await prisma.coupon.update({ where: { id: String(req.params.id) }, data: { isActive: false } });
     res.json({ success: true, message: "Coupon deactivated" });
   } catch (e) {
     sendError(res, e);
@@ -263,8 +263,8 @@ ownerCouponRouter.post("/", async (req: FirebaseAuthRequest, res: Response) => {
 // PUT /:id — update a coupon.
 ownerCouponRouter.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const existing = await prisma.coupon.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Coupon", req.params.id!);
+    const existing = await prisma.coupon.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Coupon", String(req.params.id));
 
     const parsed = couponSchema.partial().safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid coupon data", parsed.error.errors);
@@ -274,7 +274,7 @@ ownerCouponRouter.put("/:id", async (req: FirebaseAuthRequest, res: Response) =>
       if (dup) throw new ConflictError(`Coupon '${parsed.data.code}' already exists`);
     }
 
-    const coupon = await prisma.coupon.update({ where: { id: req.params.id }, data: parsed.data });
+    const coupon = await prisma.coupon.update({ where: { id: String(req.params.id) }, data: parsed.data });
     res.json({ success: true, data: coupon });
   } catch (e) {
     sendError(res, e);
@@ -284,10 +284,10 @@ ownerCouponRouter.put("/:id", async (req: FirebaseAuthRequest, res: Response) =>
 // DELETE /:id — soft-deactivate (keeps the coupon + its redemption history for the record).
 ownerCouponRouter.delete("/:id", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const existing = await prisma.coupon.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Coupon", req.params.id!);
+    const existing = await prisma.coupon.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Coupon", String(req.params.id));
 
-    await prisma.coupon.update({ where: { id: req.params.id }, data: { isActive: false } });
+    await prisma.coupon.update({ where: { id: String(req.params.id) }, data: { isActive: false } });
     res.json({ success: true, message: "Coupon deactivated" });
   } catch (e) {
     sendError(res, e);

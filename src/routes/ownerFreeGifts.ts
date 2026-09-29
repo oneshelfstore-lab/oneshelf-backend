@@ -51,7 +51,7 @@ ownerFreeGiftRouter.put("/:id", async (req: FirebaseAuthRequest, res: Response) 
   try {
     const parsed = freeGiftOfferSchema.partial().safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid free-gift offer", parsed.error.errors);
-    const offer = await updateFreeGiftOfferRecord(req.params.id as string, parsed.data);
+    const offer = await updateFreeGiftOfferRecord(String(req.params.id), parsed.data);
     res.json({ success: true, data: offer });
   } catch (e) {
     sendError(res, e);
@@ -61,7 +61,7 @@ ownerFreeGiftRouter.put("/:id", async (req: FirebaseAuthRequest, res: Response) 
 // DELETE /:id — hard delete (this is just a promo config, not user/order data).
 ownerFreeGiftRouter.delete("/:id", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    await deleteFreeGiftOfferRecord(req.params.id as string);
+    await deleteFreeGiftOfferRecord(String(req.params.id));
     res.json({ success: true, message: "Free-gift offer removed" });
   } catch (e) {
     sendError(res, e);

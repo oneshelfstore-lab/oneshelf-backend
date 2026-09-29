@@ -16,8 +16,8 @@ publicComboRouter.get("/", cacheControl(60), async (_req: Request, res: Response
 
 publicComboRouter.get("/:id", cacheControl(60), async (req: Request, res: Response) => {
   try {
-    const combo = (await getPublicCombos()).find((c) => c.id === (req.params.id as string));
-    if (!combo) throw new NotFoundError("Combo", req.params.id as string);
+    const combo = (await getPublicCombos()).find((c) => c.id === (String(req.params.id)));
+    if (!combo) throw new NotFoundError("Combo", String(req.params.id));
     res.json({ success: true, data: combo });
   } catch (e) {
     sendError(res, e);

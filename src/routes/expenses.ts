@@ -139,10 +139,10 @@ router.get("/", async (req: Request, res: Response) => {
 router.get("/:id", async (req: Request, res: Response) => {
   try {
     const expense = await prisma.expense.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       include: { vendor: { select: { id: true, name: true } } },
     });
-    if (!expense) throw new NotFoundError("Expense", req.params.id!);
+    if (!expense) throw new NotFoundError("Expense", String(req.params.id));
     res.json({ success: true, data: expense });
   } catch (error) {
     sendError(res, error);
@@ -153,8 +153,8 @@ router.get("/:id", async (req: Request, res: Response) => {
 
 router.put("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.expense.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Expense", req.params.id!);
+    const existing = await prisma.expense.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Expense", String(req.params.id));
 
     const parsed = updateExpenseSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -168,7 +168,7 @@ router.put("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, re
     }
 
     const expense = await prisma.expense.update({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       data: {
         ...input,
         expenseDate: input.expenseDate ? new Date(input.expenseDate) : undefined,
@@ -192,10 +192,10 @@ router.put("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, re
 
 router.delete("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.expense.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Expense", req.params.id!);
+    const existing = await prisma.expense.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Expense", String(req.params.id));
 
-    await prisma.expense.delete({ where: { id: req.params.id } });
+    await prisma.expense.delete({ where: { id: String(req.params.id) } });
 
     res.json({ success: true, message: "Expense deleted" });
   } catch (error) {

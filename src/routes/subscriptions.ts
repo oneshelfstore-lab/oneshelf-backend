@@ -300,7 +300,7 @@ router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid update", parsed.error.errors);
     const d = parsed.data;
-    const existing = await ownedSub(userId, req.params.id as string);
+    const existing = await ownedSub(userId, String(req.params.id));
 
     if (d.addressId) {
       const address = await prisma.address.findFirst({ where: { id: d.addressId, userId } });
@@ -361,7 +361,7 @@ router.post("/:id/pause", async (req: FirebaseAuthRequest, res: Response) => {
     const userId = req.appUser!.id;
     const parsed = pauseSchema.safeParse(req.body ?? {});
     if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
-    const existing = await ownedSub(userId, req.params.id as string);
+    const existing = await ownedSub(userId, String(req.params.id));
     if (existing.status === "CANCELLED") throw new ValidationError("Subscription is cancelled");
 
     const until = parsed.data.until ? istMidnight(new Date(parsed.data.until)) : null;
@@ -379,7 +379,7 @@ router.post("/:id/pause", async (req: FirebaseAuthRequest, res: Response) => {
 router.post("/:id/resume", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
-    const existing = await ownedSub(userId, req.params.id as string);
+    const existing = await ownedSub(userId, String(req.params.id));
     if (existing.status === "CANCELLED") throw new ValidationError("Subscription is cancelled");
     const today = istMidnight(new Date());
     const next = firstDeliveryOnOrAfter(toCadence(existing), today);
@@ -397,7 +397,7 @@ router.post("/:id/resume", async (req: FirebaseAuthRequest, res: Response) => {
 router.post("/:id/skip-next", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
-    const existing = await ownedSub(userId, req.params.id as string);
+    const existing = await ownedSub(userId, String(req.params.id));
     if (existing.status === "CANCELLED") throw new ValidationError("Subscription is cancelled");
     const from = existing.nextDeliveryDate ? istMidnight(existing.nextDeliveryDate) : istMidnight(new Date());
     const next = computeNextDeliveryDate(toCadence(existing), from);
@@ -415,7 +415,7 @@ router.post("/:id/skip-next", async (req: FirebaseAuthRequest, res: Response) =>
 router.delete("/:id", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
-    const existing = await ownedSub(userId, req.params.id as string);
+    const existing = await ownedSub(userId, String(req.params.id));
     await prisma.subscription.update({ where: { id: existing.id }, data: { status: "CANCELLED" } });
     res.json({ success: true, data: { id: existing.id, status: "CANCELLED" } });
   } catch (e) {
@@ -427,7 +427,7 @@ router.delete("/:id", async (req: FirebaseAuthRequest, res: Response) => {
 router.get("/:id/upcoming", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
-    const existing = await ownedSub(userId, req.params.id as string);
+    const existing = await ownedSub(userId, String(req.params.id));
     const dates = upcomingDates({ ...toCadence(existing), nextDeliveryDate: existing.nextDeliveryDate }, 10);
     res.json({ success: true, data: dates.map((d) => d.toISOString()) });
   } catch (e) {
@@ -441,7 +441,7 @@ router.get("/:id/upcoming", async (req: FirebaseAuthRequest, res: Response) => {
 router.get("/:id/calendar", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
-    const existing = await ownedSub(userId, req.params.id as string);
+    const existing = await ownedSub(userId, String(req.params.id));
     const cutoffHour = await getCutoffHour();
     const firstEditable = firstEditableDate(cutoffHour);
 
@@ -486,7 +486,7 @@ const skipDateSchema = z.object({ date: z.string().min(1) });
 router.post("/:id/skip-date", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
-    const existing = await ownedSub(userId, req.params.id as string);
+    const existing = await ownedSub(userId, String(req.params.id));
     if (existing.status === "CANCELLED") throw new ValidationError("Subscription is cancelled");
     const parsed = skipDateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
@@ -515,8 +515,8 @@ router.post("/:id/skip-date", async (req: FirebaseAuthRequest, res: Response) =>
 router.delete("/:id/skip-date/:date", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const userId = req.appUser!.id;
-    const existing = await ownedSub(userId, req.params.id as string);
-    const date = istMidnight(new Date(req.params.date as string));
+    const existing = await ownedSub(userId, String(req.params.id));
+    const date = istMidnight(new Date(String(req.params.date)));
     if (isNaN(date.getTime())) throw new ValidationError("Invalid date");
     const cutoffHour = await getCutoffHour();
     if (date.getTime() < firstEditableDate(cutoffHour).getTime()) {

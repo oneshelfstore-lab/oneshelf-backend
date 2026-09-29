@@ -290,7 +290,7 @@ router.post("/", async (req: SellerRequest, res: Response) => {
 // ─── PUT /:id — update (ownership-checked; can't self-activate) ────
 router.put("/:id", async (req: SellerRequest, res: Response) => {
   try {
-    const productId = req.params.id as string;
+    const productId = String(req.params.id);
     const existing = await prisma.catalogProduct.findFirst({
       where: { id: productId, sellerId: req.sellerId },
       // Active only, matching the GET above: toRemove is derived from this list, so an
@@ -410,7 +410,7 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
 // ─── DELETE /:id — soft-delete (ownership-checked) ────────────────
 router.delete("/:id", async (req: SellerRequest, res: Response) => {
   try {
-    const productId = req.params.id as string;
+    const productId = String(req.params.id);
     const existing = await prisma.catalogProduct.findFirst({ where: { id: productId, sellerId: req.sellerId } });
     if (!existing) throw new NotFoundError("Product", productId);
     await prisma.catalogProduct.update({ where: { id: productId }, data: { isActive: false } });
@@ -423,7 +423,7 @@ router.delete("/:id", async (req: SellerRequest, res: Response) => {
 // ─── PATCH /:id/stock — quick variant stock update (ownership) ────
 router.patch("/:id/stock", async (req: SellerRequest, res: Response) => {
   try {
-    const productId = req.params.id as string;
+    const productId = String(req.params.id);
     const { variantId, stock } = z.object({ variantId: z.string().min(1), stock: z.number().min(0) }).parse(req.body);
 
     const variant = await prisma.productVariant.findFirst({
@@ -708,7 +708,7 @@ const receiveStockSchema = z.object({
 
 router.post("/:id/stock/receive", async (req: SellerRequest, res: Response) => {
   try {
-    const productId = req.params.id as string;
+    const productId = String(req.params.id);
     const { variantId, qty, unitCost, note, vendorId, billNumber, paymentDueDate } = receiveStockSchema.parse(req.body);
 
     const variant = await prisma.productVariant.findFirst({

@@ -17,7 +17,7 @@ const companySchema = z.object({
     (v) => isUpGstin(v).valid,
     (v) => ({ message: isUpGstin(v).error || "Invalid GSTIN" }),
   ),
-  address: z.any(),
+  address: z.union([z.string().min(1), z.record(z.string(), z.any())]),
   phone: z.string().regex(/^[6-9]\d{9}$/, "Invalid phone"),
   email: z.string().email(),
   logoUrl: z.string().optional().nullable(),

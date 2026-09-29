@@ -443,7 +443,7 @@ router.get("/", async (req: Request, res: Response) => {
 router.get("/:id", async (req: Request, res: Response) => {
   try {
     const invoice = await prisma.invoice.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       include: {
         lineItems: { orderBy: { lineNumber: "asc" } },
         customer: true,
@@ -454,7 +454,7 @@ router.get("/:id", async (req: Request, res: Response) => {
     });
 
     if (!invoice) {
-      throw new NotFoundError("Invoice", req.params.id!);
+      throw new NotFoundError("Invoice", String(req.params.id));
     }
 
     // Fetch related payments
@@ -483,12 +483,12 @@ router.post("/:id/cancel", requireRole(...FINANCE_ROLES) as any, async (req: Req
     const { cancellationReason } = parsed.data;
 
     const invoice = await prisma.invoice.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       include: { creditDebitNotes: { select: { id: true, invoiceNumber: true, status: true } } },
     });
 
     if (!invoice) {
-      throw new NotFoundError("Invoice", req.params.id!);
+      throw new NotFoundError("Invoice", String(req.params.id));
     }
 
     if (invoice.status === "CANCELLED") {
@@ -530,7 +530,7 @@ router.post("/:id/cancel", requireRole(...FINANCE_ROLES) as any, async (req: Req
     }
 
     const updated = await prisma.invoice.update({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       data: {
         status: "CANCELLED",
         cancelledAt: new Date(),
@@ -849,10 +849,10 @@ router.post("/debit-note", requireRole(...FINANCE_ROLES) as any, async (req: Req
 router.get("/:id/pdf", async (req: Request, res: Response) => {
   try {
     const invoice = await prisma.invoice.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
     });
     if (!invoice) {
-      throw new NotFoundError("Invoice", req.params.id!);
+      throw new NotFoundError("Invoice", String(req.params.id));
     }
 
     const pdfBuffer = await generateInvoicePdf(invoice.id);

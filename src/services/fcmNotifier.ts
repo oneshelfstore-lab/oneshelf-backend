@@ -595,6 +595,17 @@ export async function notifySubscriptionLowBalance(userId: string, productName: 
   });
 }
 
+// A fixed-duration subscription ends in 3 days — nudge the customer to renew before deliveries stop.
+export async function notifySubscriptionEndingSoon(userId: string, productName: string, endLabel: string) {
+  const tokens = await getUserTokens(userId);
+  if (tokens.length === 0) return;
+  await sendToTokens(tokens, {
+    type: "subscription_ending_soon",
+    title: "Your subscription ends soon",
+    body: `Your ${productName} subscription ends on ${endLabel}. Renew it to keep deliveries coming.`,
+  });
+}
+
 // A customer tapped "Notify me" on an out-of-stock item and it's just been restocked.
 export async function notifyBackInStock(userId: string, productName: string) {
   const tokens = await getUserTokens(userId);

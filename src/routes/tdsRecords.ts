@@ -138,8 +138,8 @@ router.get("/", async (req: Request, res: Response) => {
 
 router.get("/:id", async (req: Request, res: Response) => {
   try {
-    const record = await prisma.tdsRecord.findUnique({ where: { id: req.params.id } });
-    if (!record) throw new NotFoundError("TdsRecord", req.params.id!);
+    const record = await prisma.tdsRecord.findUnique({ where: { id: String(req.params.id) } });
+    if (!record) throw new NotFoundError("TdsRecord", String(req.params.id));
     res.json({ success: true, data: record });
   } catch (error) {
     sendError(res, error);
@@ -150,8 +150,8 @@ router.get("/:id", async (req: Request, res: Response) => {
 
 router.put("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.tdsRecord.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("TdsRecord", req.params.id!);
+    const existing = await prisma.tdsRecord.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("TdsRecord", String(req.params.id));
     if (existing.returnFiled) {
       throw new ValidationError("This TDS record's return has already been filed and can't be edited.");
     }
@@ -168,7 +168,7 @@ router.put("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, re
     const paymentDate = input.paymentDate ? new Date(input.paymentDate) : existing.paymentDate;
 
     const record = await prisma.tdsRecord.update({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       data: {
         deducteeType: input.deducteeType ?? undefined,
         deducteeId: input.deducteeId ?? undefined,
@@ -201,13 +201,13 @@ router.put("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, re
 
 router.delete("/:id", requireRole(...FINANCE_ROLES) as any, async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.tdsRecord.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("TdsRecord", req.params.id!);
+    const existing = await prisma.tdsRecord.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("TdsRecord", String(req.params.id));
     if (existing.returnFiled || existing.depositedToGovt) {
       throw new ValidationError("A deposited/filed TDS record can't be deleted.");
     }
 
-    await prisma.tdsRecord.delete({ where: { id: req.params.id } });
+    await prisma.tdsRecord.delete({ where: { id: String(req.params.id) } });
 
     res.json({ success: true, message: "TDS record deleted" });
   } catch (error) {

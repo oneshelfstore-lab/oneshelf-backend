@@ -416,9 +416,9 @@ router.put("/addresses/:id", async (req: FirebaseAuthRequest, res: Response) => 
   try {
     const userId = req.appUser!.id;
     const existing = await prisma.address.findFirst({
-      where: { id: req.params.id, userId },
+      where: { id: String(req.params.id), userId },
     });
-    if (!existing) throw new NotFoundError("Address", req.params.id!);
+    if (!existing) throw new NotFoundError("Address", String(req.params.id));
 
     const parsed = addressSchema.partial().safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid address", parsed.error.errors);
@@ -446,9 +446,9 @@ router.delete("/addresses/:id", async (req: FirebaseAuthRequest, res: Response) 
   try {
     const userId = req.appUser!.id;
     const existing = await prisma.address.findFirst({
-      where: { id: req.params.id, userId },
+      where: { id: String(req.params.id), userId },
     });
-    if (!existing) throw new NotFoundError("Address", req.params.id!);
+    if (!existing) throw new NotFoundError("Address", String(req.params.id));
 
     await prisma.address.delete({ where: { id: existing.id } });
     res.json({ success: true, message: "Address deleted" });
@@ -522,7 +522,7 @@ router.delete("/favorites/:productId", async (req: FirebaseAuthRequest, res: Res
   try {
     const userId = req.appUser!.id;
     await prisma.favorite.deleteMany({
-      where: { userId, productId: req.params.productId },
+      where: { userId, productId: String(req.params.productId) },
     });
     res.json({ success: true, message: "Removed from favorites" });
   } catch (e) {
@@ -807,9 +807,9 @@ router.post("/wallet/topup/:id/pay", async (req: FirebaseAuthRequest, res: Respo
     const { razorpayPaymentId, razorpaySignature } = parsed.data;
 
     const topup = await prisma.walletTopup.findFirst({
-      where: { id: req.params.id, userId: req.appUser!.id },
+      where: { id: String(req.params.id), userId: req.appUser!.id },
     });
-    if (!topup) throw new NotFoundError("WalletTopup", req.params.id!);
+    if (!topup) throw new NotFoundError("WalletTopup", String(req.params.id));
     if (!topup.razorpayOrderId) throw new ValidationError("This top-up has no pending payment");
 
     const isValid = verifyPaymentSignature(topup.razorpayOrderId, razorpayPaymentId, razorpaySignature);

@@ -81,13 +81,13 @@ adminBannerRouter.post("/", requireRole("OWNER") as any, async (req: Request, re
 
 adminBannerRouter.put("/:id", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.banner.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Banner", req.params.id!);
+    const existing = await prisma.banner.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Banner", String(req.params.id));
 
     const parsed = bannerSchema.partial().safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid banner data", parsed.error.errors);
 
-    const banner = await prisma.banner.update({ where: { id: req.params.id }, data: parsed.data });
+    const banner = await prisma.banner.update({ where: { id: String(req.params.id) }, data: parsed.data });
     memoCache.bust("banners");
     res.json({ success: true, data: banner });
   } catch (e) {
@@ -97,10 +97,10 @@ adminBannerRouter.put("/:id", requireRole("OWNER") as any, async (req: Request, 
 
 adminBannerRouter.delete("/:id", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.banner.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Banner", req.params.id!);
+    const existing = await prisma.banner.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Banner", String(req.params.id));
 
-    await prisma.banner.update({ where: { id: req.params.id }, data: { isActive: false } });
+    await prisma.banner.update({ where: { id: String(req.params.id) }, data: { isActive: false } });
     memoCache.bust("banners");
     res.json({ success: true, message: "Banner deactivated" });
   } catch (e) {
@@ -143,12 +143,12 @@ ownerBannerRouter.post("/", async (req: Request, res: Response) => {
 
 ownerBannerRouter.delete("/:id", async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.banner.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Banner", req.params.id!);
+    const existing = await prisma.banner.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Banner", String(req.params.id));
 
     // Hard delete — the owner tapped the trash icon expecting it gone (the public list filters by
     // isActive, so a soft-delete would also disappear, but hard delete avoids accumulating rows).
-    await prisma.banner.delete({ where: { id: req.params.id } });
+    await prisma.banner.delete({ where: { id: String(req.params.id) } });
     memoCache.bust("banners");
     res.json({ success: true, message: "Banner deleted" });
   } catch (e) {

@@ -67,7 +67,7 @@ sellerFreeGiftRouter.put("/:id", async (req: SellerRequest, res: Response) => {
   try {
     const parsed = freeGiftOfferSchema.partial().safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid free-gift offer", parsed.error.errors);
-    const offer = await updateFreeGiftOfferRecord(req.params.id as string, parsed.data);
+    const offer = await updateFreeGiftOfferRecord(String(req.params.id), parsed.data);
     res.json({ success: true, data: offer });
   } catch (e) {
     sendError(res, e);
@@ -78,7 +78,7 @@ sellerFreeGiftRouter.put("/:id", async (req: SellerRequest, res: Response) => {
 sellerFreeGiftRouter.delete("/:id", async (req: SellerRequest, res: Response) => {
   if (!requireHouse(req, res)) return;
   try {
-    await deleteFreeGiftOfferRecord(req.params.id as string);
+    await deleteFreeGiftOfferRecord(String(req.params.id));
     res.json({ success: true, message: "Free-gift offer removed" });
   } catch (e) {
     sendError(res, e);

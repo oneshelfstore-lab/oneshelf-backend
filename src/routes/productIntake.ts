@@ -188,7 +188,7 @@ router.get("/admin", adminAuth, async (req: Request, res: Response) => {
 // PATCH /admin/:id → mark IMPORTED/REJECTED + optional notes
 router.patch("/admin/:id", adminAuth, async (req: Request, res: Response) => {
   try {
-    const id = req.params.id as string;
+    const id = String(req.params.id);
     const parsed = z.object({
       status: z.enum(["PENDING", "IMPORTED", "REJECTED"]).optional(),
       notes: z.string().max(2000).optional(),
@@ -208,7 +208,7 @@ router.patch("/admin/:id", adminAuth, async (req: Request, res: Response) => {
 // DELETE /admin/:id → hard delete (small table, no soft-delete needed)
 router.delete("/admin/:id", adminAuth, async (req: Request, res: Response) => {
   try {
-    const id = req.params.id as string;
+    const id = String(req.params.id);
     await prisma.productIntake.delete({ where: { id } });
     res.json({ success: true });
   } catch (e) {

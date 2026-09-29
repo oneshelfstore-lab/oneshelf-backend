@@ -648,7 +648,7 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     const isOwner = req.appUser!.role === "OWNER";
 
     const order = await prisma.order.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       include: {
         items: { select: { productName: true, quantity: true, lineTotal: true, isLoose: true, stepSize: true, stepUnit: true } },
         address: true,
@@ -666,7 +666,7 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
         },
       },
     });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
 
     // Delivery agent can only see their assigned orders; owner sees all
     if (!isOwner && order.deliveryBoyId !== userId) {
@@ -771,11 +771,11 @@ router.post("/:id/accept", async (req: FirebaseAuthRequest, res: Response) => {
     const userId = req.appUser!.id;
 
     const order = await prisma.order.findUnique({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       // subOrders only so isPreDispatchEligible can require the restaurant to have ACCEPTED.
       include: { subOrders: { select: { status: true } } },
     });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
     // PACKED = ready now. A food order still cooking but within the pre-dispatch window is also
     // claimable, so the rider can start riding during prep — /picked-up still gates on PACKED.
     if (order.status !== "PACKED" && !isPreDispatchEligible(order)) {
@@ -876,8 +876,8 @@ router.post("/:id/collect/:subOrderId", async (req: FirebaseAuthRequest, res: Re
   try {
     const userId = req.appUser!.id;
     const isOwner = req.appUser!.role === "OWNER";
-    const orderId = req.params.id as string;
-    const subOrderId = req.params.subOrderId as string;
+    const orderId = String(req.params.id);
+    const subOrderId = String(req.params.subOrderId);
 
     const order = await prisma.order.findUnique({ where: { id: orderId } });
     if (!order) throw new NotFoundError("Order", orderId);
@@ -987,8 +987,8 @@ router.post("/:id/deliver", async (req: FirebaseAuthRequest, res: Response) => {
     const userId = req.appUser!.id;
     const isOwner = req.appUser!.role === "OWNER";
 
-    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    const order = await prisma.order.findUnique({ where: { id: String(req.params.id) } });
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
 
     // Auth: must be assigned agent OR owner
     if (!isOwner && order.deliveryBoyId !== userId) {
@@ -1290,8 +1290,8 @@ router.post("/:id/arrived", async (req: FirebaseAuthRequest, res: Response) => {
     const userId = req.appUser!.id;
     const isOwner = req.appUser!.role === "OWNER";
 
-    const order = await prisma.order.findUnique({ where: { id: req.params.id } });
-    if (!order) throw new NotFoundError("Order", req.params.id!);
+    const order = await prisma.order.findUnique({ where: { id: String(req.params.id) } });
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
     if (!isOwner && order.deliveryBoyId !== userId) {
       throw new AppError(403, "FORBIDDEN", "Not assigned to you");
     }

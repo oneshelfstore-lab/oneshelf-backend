@@ -115,8 +115,8 @@ router.get("/", async (req: Request, res: Response) => {
 
 router.get("/:id", async (req: Request, res: Response) => {
   try {
-    const employee = await prisma.employee.findUnique({ where: { id: req.params.id } });
-    if (!employee || !employee.isActive) throw new NotFoundError("Employee", req.params.id!);
+    const employee = await prisma.employee.findUnique({ where: { id: String(req.params.id) } });
+    if (!employee || !employee.isActive) throw new NotFoundError("Employee", String(req.params.id));
     res.json({ success: true, data: employee });
   } catch (error) {
     sendError(res, error);
@@ -127,8 +127,8 @@ router.get("/:id", async (req: Request, res: Response) => {
 
 router.put("/:id", async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.employee.findUnique({ where: { id: req.params.id } });
-    if (!existing || !existing.isActive) throw new NotFoundError("Employee", req.params.id!);
+    const existing = await prisma.employee.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing || !existing.isActive) throw new NotFoundError("Employee", String(req.params.id));
 
     const parsed = updateEmployeeSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -142,7 +142,7 @@ router.put("/:id", async (req: Request, res: Response) => {
     }
 
     const employee = await prisma.employee.update({
-      where: { id: req.params.id },
+      where: { id: String(req.params.id) },
       data: {
         ...input,
         joiningDate: input.joiningDate ? new Date(input.joiningDate) : undefined,
@@ -160,10 +160,10 @@ router.put("/:id", async (req: Request, res: Response) => {
 
 router.delete("/:id", async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.employee.findUnique({ where: { id: req.params.id } });
-    if (!existing) throw new NotFoundError("Employee", req.params.id!);
+    const existing = await prisma.employee.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Employee", String(req.params.id));
 
-    await prisma.employee.update({ where: { id: req.params.id }, data: { isActive: false } });
+    await prisma.employee.update({ where: { id: String(req.params.id) }, data: { isActive: false } });
 
     res.json({ success: true, message: "Employee deactivated" });
   } catch (error) {
@@ -211,8 +211,8 @@ function money(v: number): number {
 
 router.post("/:id/salary", async (req: Request, res: Response) => {
   try {
-    const employee = await prisma.employee.findUnique({ where: { id: req.params.id } });
-    if (!employee || !employee.isActive) throw new NotFoundError("Employee", req.params.id!);
+    const employee = await prisma.employee.findUnique({ where: { id: String(req.params.id) } });
+    if (!employee || !employee.isActive) throw new NotFoundError("Employee", String(req.params.id));
 
     const parsed = createSalarySchema.safeParse(req.body);
     if (!parsed.success) {
@@ -258,8 +258,8 @@ router.post("/:id/salary", async (req: Request, res: Response) => {
 
 router.get("/:id/salary", async (req: Request, res: Response) => {
   try {
-    const employee = await prisma.employee.findUnique({ where: { id: req.params.id } });
-    if (!employee) throw new NotFoundError("Employee", req.params.id!);
+    const employee = await prisma.employee.findUnique({ where: { id: String(req.params.id) } });
+    if (!employee) throw new NotFoundError("Employee", String(req.params.id));
 
     const records = await prisma.salaryRecord.findMany({
       where: { employeeId: employee.id },
@@ -278,8 +278,8 @@ router.get("/:id/salary", async (req: Request, res: Response) => {
 
 router.put("/salary/:recordId", async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.salaryRecord.findUnique({ where: { id: req.params.recordId } });
-    if (!existing) throw new NotFoundError("SalaryRecord", req.params.recordId!);
+    const existing = await prisma.salaryRecord.findUnique({ where: { id: String(req.params.recordId) } });
+    if (!existing) throw new NotFoundError("SalaryRecord", String(req.params.recordId));
     if (existing.status === "PAID") {
       throw new ValidationError("A paid salary record can't be edited — it's already settled.");
     }
@@ -306,7 +306,7 @@ router.put("/salary/:recordId", async (req: Request, res: Response) => {
     }
 
     const record = await prisma.salaryRecord.update({
-      where: { id: req.params.recordId },
+      where: { id: String(req.params.recordId) },
       data: {
         basicSalary,
         hra,
@@ -335,13 +335,13 @@ router.put("/salary/:recordId", async (req: Request, res: Response) => {
 
 router.delete("/salary/:recordId", async (req: Request, res: Response) => {
   try {
-    const existing = await prisma.salaryRecord.findUnique({ where: { id: req.params.recordId } });
-    if (!existing) throw new NotFoundError("SalaryRecord", req.params.recordId!);
+    const existing = await prisma.salaryRecord.findUnique({ where: { id: String(req.params.recordId) } });
+    if (!existing) throw new NotFoundError("SalaryRecord", String(req.params.recordId));
     if (existing.status === "PAID") {
       throw new ValidationError("A paid salary record can't be deleted — it's already settled.");
     }
 
-    await prisma.salaryRecord.delete({ where: { id: req.params.recordId } });
+    await prisma.salaryRecord.delete({ where: { id: String(req.params.recordId) } });
 
     res.json({ success: true, message: "Salary record deleted" });
   } catch (error) {

@@ -43,8 +43,8 @@ router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
 // could cancel (routes/subscriptions.ts DELETE /:id), leaving the owner with no lever to intervene.
 router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const existing = await prisma.subscription.findUnique({ where: { id: req.params.id as string } });
-    if (!existing) throw new NotFoundError("Subscription", req.params.id as string);
+    const existing = await prisma.subscription.findUnique({ where: { id: String(req.params.id) } });
+    if (!existing) throw new NotFoundError("Subscription", String(req.params.id));
     if (existing.status === "CANCELLED") {
       return res.json({ success: true, data: { id: existing.id, status: "CANCELLED" } });
     }
@@ -173,8 +173,8 @@ router.put("/settings", async (req: FirebaseAuthRequest, res: Response) => {
 // ─── POST /statements/:id/mark-paid  — COD monthly settlement (D6) ───
 router.post("/statements/:id/mark-paid", async (req: FirebaseAuthRequest, res: Response) => {
   try {
-    const statement = await prisma.subscriptionStatement.findUnique({ where: { id: req.params.id as string } });
-    if (!statement) throw new NotFoundError("Statement", req.params.id as string);
+    const statement = await prisma.subscriptionStatement.findUnique({ where: { id: String(req.params.id) } });
+    if (!statement) throw new NotFoundError("Statement", String(req.params.id));
     if (statement.status === "PAID") {
       return res.json({ success: true, data: { id: statement.id, status: "PAID" } });
     }

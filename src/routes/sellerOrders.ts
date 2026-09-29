@@ -442,9 +442,12 @@ router.get("/:id/invoice/pdf", async (req: SellerRequest, res: Response) => {
     const id = String(req.params.id ?? "");
     const sub = await prisma.subOrder.findFirst({
       where: { id, sellerId: req.sellerId, ...PAYMENT_SETTLED },
-      select: { id: true, orderId: true },
+      select: { id: true, orderId: true, status: true },
     });
     if (!sub) throw new NotFoundError("SubOrder", id);
+    if (sub.status === "CANCELLED") {
+      throw new ValidationError("This order was cancelled, so there is no invoice to print.");
+    }
 
     let invoice = await prisma.invoice.findUnique({
       where: { subOrderId: sub.id },

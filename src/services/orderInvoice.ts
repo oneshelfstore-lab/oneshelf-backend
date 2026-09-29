@@ -545,6 +545,9 @@ export async function generateOrderInvoice(orderId: string): Promise<string | nu
   });
 
   if (!order) return null;
+  // A cancelled order is not a supply — never mint a tax invoice for it. This is also what stops
+  // the two PDF routes' "generate on demand" fallback from invoicing a cancelled order.
+  if (order.status === "CANCELLED") return null;
 
   // Ensure the app user has a billing Customer record
   const customerId = await ensureBillingCustomer(order.customerId);
@@ -614,6 +617,15 @@ export async function generateOrderInvoice(orderId: string): Promise<string | nu
       where: { id: order.id },
       data: { invoiceId: primaryInvoiceId },
     });
+  }
+
+  // ⚠️ Race: placement fires this fire-and-forget, so a customer who cancels within seconds can
+  // have the cancel's syncInvoicePaymentStatus run BEFORE these invoices exist — and they'd be
+  // left live on a cancelled order. Re-check now that they're written and void them if so.
+  const after = await prisma.order.findUnique({ where: { id: order.id }, select: { status: true } });
+  if (after?.status === "CANCELLED") {
+    await syncInvoicePaymentStatus(order.id);
+    return null;
   }
 
   return primaryInvoiceId;

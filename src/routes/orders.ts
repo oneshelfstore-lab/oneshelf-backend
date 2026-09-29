@@ -768,6 +768,9 @@ router.get("/:id/invoice/pdf", async (req: FirebaseAuthRequest, res: Response) =
       where: { id: req.params.id, customerId: userId },
     });
     if (!order) throw new NotFoundError("Order", req.params.id!);
+    if (order.status === "CANCELLED") {
+      throw new ValidationError("This order was cancelled, so there is no invoice for it.");
+    }
 
     // Auto-generate invoice if it doesn't exist yet
     let invoiceId = order.invoiceId;
@@ -800,9 +803,12 @@ router.get("/:id/invoices/:invoiceId/pdf", async (req: FirebaseAuthRequest, res:
 
     const invoice = await prisma.invoice.findFirst({
       where: { id: req.params.invoiceId, orderId: order.id },
-      select: { id: true, invoiceNumber: true },
+      select: { id: true, invoiceNumber: true, status: true },
     });
     if (!invoice) throw new NotFoundError("Invoice", req.params.invoiceId!);
+    if (invoice.status === "CANCELLED") {
+      throw new ValidationError("This invoice was cancelled along with the order.");
+    }
 
     const pdfBuffer = await generateInvoicePdf(invoice.id);
     res.setHeader("Content-Type", "application/pdf");
@@ -1079,7 +1085,9 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     // Per-seller tax invoices for this order (Phase 6 — one per seller). The customer can view/
     // download each. supplierName is null for the house store → the app labels it "Store".
     const invoiceRows = await prisma.invoice.findMany({
-      where: { orderId: order.id },
+      // Voided invoices are hidden — a cancelled order shows no bill. A CREDIT_NOTE still shows
+      // (only issued when the original was already in a filed GSTR-1, so the customer needs both).
+      where: { orderId: order.id, status: { not: "CANCELLED" } },
       orderBy: { invoiceNumber: "asc" },
       select: { id: true, invoiceNumber: true, sellerId: true, supplierName: true, totalAmount: true, invoiceType: true },
     });

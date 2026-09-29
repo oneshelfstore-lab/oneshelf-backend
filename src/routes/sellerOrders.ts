@@ -100,6 +100,12 @@ async function shape(so: any) {
     createdAt: so.createdAt,
     customerName: so.order?.shippingName ?? null,
     customerPhone: so.order?.shippingPhone ?? null,
+    // Where it's going (owner's call: the seller sees the address). The order's text snapshot, plus the
+    // pin when the customer dropped one so the app can open the exact spot in Maps. Null on pickup.
+    customerAddress: so.order?.fulfillmentType === "PICKUP" ? null : (so.order?.shippingAddress ?? null),
+    customerPincode: so.order?.fulfillmentType === "PICKUP" ? null : (so.order?.shippingPincode ?? null),
+    customerLat: so.order?.address?.lat != null ? Number(so.order.address.lat) : null,
+    customerLng: so.order?.address?.lng != null ? Number(so.order.address.lng) : null,
     subtotal: Number(so.subtotal),
     commissionAmount: Number(so.commissionAmount),
     netPayable: Number(so.netPayable),
@@ -136,7 +142,7 @@ const PAYMENT_SETTLED: Prisma.SubOrderWhereInput = {
 };
 
 const ORDER_INCLUDE = {
-  order: { select: { orderNumber: true, status: true, fulfillmentType: true, shippingName: true, shippingPhone: true, notes: true, voiceNoteUrl: true, subscriptionId: true } },
+  order: { select: { orderNumber: true, status: true, fulfillmentType: true, shippingName: true, shippingPhone: true, shippingAddress: true, shippingPincode: true, address: { select: { lat: true, lng: true } }, notes: true, voiceNoteUrl: true, subscriptionId: true } },
   items: { select: { id: true, productName: true, variantSku: true, imageUrl: true, quantity: true, unitPrice: true, lineTotal: true, isLoose: true, stepSize: true, stepUnit: true } },
 } as const;
 

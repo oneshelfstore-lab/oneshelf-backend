@@ -49,6 +49,8 @@ function shape(s: any) {
     status: s.status,
     isHouse: s.isHouse,
     isActive: s.isActive,
+    // Shop closed by its seller (sellerAccount.ts POST /store-status). Null = open.
+    closedSince: s.closedSince ? s.closedSince.toISOString() : null,
     commissionPct: Number(s.commissionPct),
     outstandingBalance: Number(s.outstandingBalance),
     gstin: s.gstin,

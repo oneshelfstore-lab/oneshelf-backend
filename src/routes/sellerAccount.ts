@@ -4,6 +4,8 @@ import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { memoCache } from "../lib/httpCache.js";
+import { SELLER_SALE } from "../services/sellerSales.js";
+import { isSellerBusy } from "../services/foodMenu.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
 import {
@@ -112,6 +114,12 @@ async function shapeSellerProfile(s: any, agreementCurrent: boolean) {
     closeTime: s.closeTime,
     avgPrepMinutes: s.avgPrepMinutes,
     minOrderValue: Number(s.minOrderValue),
+    // Busy mode auto-expires, so a past value is sent as null — the app only has to ask "is this
+    // non-null". (It was missing here entirely, so the app lost busy mode on every reload.)
+    busyUntil: isSellerBusy(s.busyUntil) ? s.busyUntil.toISOString() : null,
+    busyExtraMinutes: isSellerBusy(s.busyUntil) ? s.busyExtraMinutes : 0,
+    // Shop closed by the seller (POST /store-status). Null = open.
+    closedSince: s.closedSince ? s.closedSince.toISOString() : null,
     // ─── Onboarding KYC (Phase 1) ──
     fssaiNumber: s.fssaiNumber,
     fssaiExpiry: s.fssaiExpiry,
@@ -615,6 +623,28 @@ router.post("/busy", async (req: SellerRequest, res: Response) => {
   }
 });
 
+// ─── POST /store-status — the seller's Open/Closed switch ────────────────────────────────────────
+// Closing does NOT hide anything or refuse orders: customers keep buying, and the orders wait for the
+// seller to open again (the dashboard tells them so). No expiry either — only a tap reopens the shop,
+// because a timer reopening a shop whose owner has gone home is worse than one left closed.
+router.post("/store-status", async (req: SellerRequest, res: Response) => {
+  try {
+    const parsed = z.object({ open: z.boolean() }).safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Say whether the store is open");
+    const current = await prisma.seller.findUnique({ where: { id: req.sellerId! }, select: { closedSince: true } });
+    // Closing an already-closed shop keeps the ORIGINAL time — "closed since 6 PM" stays true.
+    const closedSince = parsed.data.open ? null : (current?.closedSince ?? new Date());
+    const seller = await prisma.seller.update({
+      where: { id: req.sellerId! },
+      data: { closedSince },
+      select: { closedSince: true },
+    });
+    res.json({ success: true, data: { closedSince: seller.closedSince ? seller.closedSince.toISOString() : null } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 router.get("/earnings", async (req: SellerRequest, res: Response) => {
   try {
     const seller = await prisma.seller.findUnique({
@@ -675,7 +705,8 @@ router.get("/earnings", async (req: SellerRequest, res: Response) => {
 //
 // "Revenue" here = GROSS sales (SubOrder.subtotal / OrderItem.lineTotal), NOT net-after-commission —
 // it's the sales-performance signal; the take-home net stays in the money cards on the Earnings tab.
-// All of it excludes CANCELLED (a cancelled slice isn't a sale).
+// All of it counts only real sales: not CANCELLED, and not an online order still awaiting payment
+// (SELLER_SALE in services/sellerSales.ts).
 
 const SELLER_ANALYTICS_TTL_MS = 3 * 60 * 1000;
 const SELLER_VALID_RANGES = ["today", "week", "month", "quarter"];
@@ -690,13 +721,6 @@ function sellerIstMidnightUtc(now: Date): Date {
   const shifted = new Date(now.getTime() + SELLER_IST_OFFSET_MS);
   const dayStartShifted = Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate());
   return new Date(dayStartShifted - SELLER_IST_OFFSET_MS);
-}
-
-function sellerRangeSince(range: string): Date {
-  const now = new Date();
-  if (range === "today") return sellerIstMidnightUtc(now);
-  const days = SELLER_RANGE_DAYS[range] ?? SELLER_RANGE_DAYS.month;
-  return new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
 }
 
 function sellerRupees(n: number): string {
@@ -715,6 +739,8 @@ interface SellerRankedRow {
   value: number;
   displayValue: string;
   sublabel?: string;
+  productId?: string | null;
+  imageUrl?: string | null;
 }
 
 interface SellerTrendRow {
@@ -723,42 +749,69 @@ interface SellerTrendRow {
   orders: number | null;
 }
 
+/**
+ * The current window and the one it is compared against.
+ *
+ * ⚠️ "today" is compared with YESTERDAY UP TO THE SAME CLOCK TIME, not with the equal-length window
+ * just before midnight. At 8 PM, today = 00:00–20:00, and the old rule compared it with yesterday
+ * 04:00–24:00 — a window that contains yesterday's whole evening rush against today's partial day,
+ * so "today" read as down every evening. Other ranges keep equal-length back-to-back windows.
+ */
+export function sellerAnalyticsWindows(range: string, now: Date = new Date()) {
+  const DAY = 24 * 60 * 60 * 1000;
+  if (range === "today") {
+    const since = sellerIstMidnightUtc(now);
+    return { since, prevSince: new Date(since.getTime() - DAY), prevUntil: new Date(now.getTime() - DAY) };
+  }
+  const days = SELLER_RANGE_DAYS[range] ?? SELLER_RANGE_DAYS.month;
+  const since = new Date(now.getTime() - days * DAY);
+  return { since, prevSince: new Date(since.getTime() - days * DAY), prevUntil: since };
+}
+
+// A "sale" = SELLER_SALE (services/sellerSales.ts): not cancelled, not an unpaid online order.
+
 async function buildSellerAnalytics(sellerId: string, range: string) {
-  const since = sellerRangeSince(range);
-  const durationMs = Date.now() - since.getTime();
-  const prevSince = new Date(since.getTime() - durationMs); // equal-length window ending where current begins
+  const { since, prevSince, prevUntil } = sellerAnalyticsWindows(range);
   const bucketUnit: "day" | "week" = range === "today" || range === "week" ? "day" : "week";
+  // Items count when their slice is a sale (see SELLER_SALE) — which also drops the items of a slice
+  // the seller rejected on an order that otherwise went ahead.
+  const itemWhere = (from: Date): Prisma.OrderItemWhereInput => ({
+    sellerId,
+    createdAt: { gte: from },
+    subOrder: SELLER_SALE,
+  });
 
   const [trendRows, currentAgg, prevAgg, topProductsRaw, unitsByVariant, activeProducts] =
     await Promise.all([
       // Sales trend — gross subtotal + sub-order count per IST calendar day/week. bucketUnit is
       // chosen from a 2-value whitelist (never taken from req.query) and still passed as a bound
-      // param; sellerId is a bound param too.
+      // param; sellerId is a bound param too. The join applies SELLER_SALE's payment rule.
       prisma.$queryRaw<SellerTrendRow[]>`
-        SELECT date_trunc(${bucketUnit}, "createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') as bucket,
-               SUM("subtotal")::float as revenue,
+        SELECT date_trunc(${bucketUnit}, so."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') as bucket,
+               SUM(so."subtotal")::float as revenue,
                COUNT(*)::int as orders
-        FROM "SubOrder"
-        WHERE "sellerId" = ${sellerId} AND status != 'CANCELLED' AND "createdAt" >= ${since}
+        FROM "SubOrder" so
+        JOIN "Order" o ON o.id = so."orderId"
+        WHERE so."sellerId" = ${sellerId} AND so.status != 'CANCELLED' AND so."createdAt" >= ${since}
+          AND NOT (o."paymentMethod"::text IN ('ONLINE', 'UPI') AND o."paymentStatus"::text = 'PENDING')
         GROUP BY bucket
         ORDER BY bucket ASC`,
       prisma.subOrder.aggregate({
-        _sum: { subtotal: true },
+        _sum: { subtotal: true, netPayable: true },
         _count: true,
-        where: { sellerId, status: { not: "CANCELLED" }, createdAt: { gte: since } },
+        where: { sellerId, ...SELLER_SALE, createdAt: { gte: since } },
       }),
       prisma.subOrder.aggregate({
         _sum: { subtotal: true },
         _count: true,
-        where: { sellerId, status: { not: "CANCELLED" }, createdAt: { gte: prevSince, lt: since } },
+        where: { sellerId, ...SELLER_SALE, createdAt: { gte: prevSince, lt: prevUntil } },
       }),
-      // Top products by gross revenue. Grouped by the item's snapshot productName (a clean label with
-      // no variant→product join needed); these rows aren't tap-to-drill in the seller tab, same as the
-      // owner's agent/seller rows, so the name doubling as the id is harmless.
+      // Top products by gross revenue, grouped by the item's snapshot productName (one row per
+      // product even when it was sold in several sizes). Image + productId are looked up below.
       prisma.orderItem.groupBy({
         by: ["productName"],
         _sum: { lineTotal: true, quantity: true },
-        where: { sellerId, order: { status: { not: "CANCELLED" }, createdAt: { gte: since } } },
+        where: itemWhere(since),
         orderBy: { _sum: { lineTotal: "desc" } },
         take: 8,
       }),
@@ -766,11 +819,7 @@ async function buildSellerAnalytics(sellerId: string, range: string) {
       prisma.orderItem.groupBy({
         by: ["variantId"],
         _sum: { quantity: true },
-        where: {
-          sellerId,
-          variantId: { not: null },
-          order: { status: { not: "CANCELLED" }, createdAt: { gte: since } },
-        },
+        where: { ...itemWhere(since), variantId: { not: null } },
       }),
       // This seller's own active catalog (dead-stock / restock is scoped to their products only).
       prisma.catalogProduct.findMany({
@@ -783,8 +832,61 @@ async function buildSellerAnalytics(sellerId: string, range: string) {
       }),
     ]);
 
+  // A photo + the live product id for each top-seller name, so the app can show a thumbnail and
+  // open that product. Newest line wins; a product deleted since has no id and simply isn't tappable.
+  const topNames = topProductsRaw.map((r) => r.productName);
+  const topRefs = topNames.length === 0 ? [] : await prisma.orderItem.findMany({
+    where: { sellerId, productName: { in: topNames } },
+    orderBy: { createdAt: "desc" },
+    distinct: ["productName"],
+    select: { productName: true, imageUrl: true, variant: { select: { productId: true } } },
+  });
+  const refByName = new Map(topRefs.map((r) => [r.productName, r]));
+
+  // Distinct customers + take-home for both windows (the ▲% on every tile), and — for "today" only —
+  // the last 7 IST days of sales, drawn as the little bar chart on Home's sales card.
+  const customersIn = async (from: Date, until: Date) => {
+    const rows = await prisma.$queryRaw<{ n: number }[]>`
+      SELECT COUNT(DISTINCT o."customerId")::int as n
+      FROM "SubOrder" so JOIN "Order" o ON o.id = so."orderId"
+      WHERE so."sellerId" = ${sellerId} AND so.status != 'CANCELLED'
+        AND so."createdAt" >= ${from} AND so."createdAt" < ${until}
+        AND NOT (o."paymentMethod"::text IN ('ONLINE', 'UPI') AND o."paymentStatus"::text = 'PENDING')`;
+    return rows[0]?.n ?? 0;
+  };
+  const weekStart = new Date(since.getTime() - 6 * 24 * 60 * 60 * 1000);
+  const [customers, prevCustomers, prevEarningsAgg, last7Rows] = await Promise.all([
+    customersIn(since, new Date()),
+    customersIn(prevSince, prevUntil),
+    prisma.subOrder.aggregate({
+      _sum: { netPayable: true },
+      where: { sellerId, ...SELLER_SALE, createdAt: { gte: prevSince, lt: prevUntil } },
+    }),
+    range === "today"
+      ? prisma.$queryRaw<SellerTrendRow[]>`
+          SELECT date_trunc('day', so."createdAt" AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata') as bucket,
+                 SUM(so."subtotal")::float as revenue, COUNT(*)::int as orders
+          FROM "SubOrder" so JOIN "Order" o ON o.id = so."orderId"
+          WHERE so."sellerId" = ${sellerId} AND so.status != 'CANCELLED' AND so."createdAt" >= ${weekStart}
+            AND NOT (o."paymentMethod"::text IN ('ONLINE', 'UPI') AND o."paymentStatus"::text = 'PENDING')
+          GROUP BY bucket ORDER BY bucket ASC`
+      : Promise.resolve([] as SellerTrendRow[]),
+  ]);
+  // 7 slots oldest→today, zero-filled: a day with no sales is a real gap in the chart, not a missing bar.
+  const last7 = (() => {
+    if (range !== "today") return [] as number[];
+    const byDay = new Map(last7Rows.map((r) => [new Date(r.bucket).toISOString().slice(0, 10), Number(r.revenue ?? 0)]));
+    const IST = 5.5 * 60 * 60 * 1000;
+    return Array.from({ length: 7 }, (_, i) => {
+      const d = new Date(since.getTime() + IST - (6 - i) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      return byDay.get(d) ?? 0;
+    });
+  })();
+
   // ── Summary (current period + previous period → the ▲/▼% delta) ──
   const revenue = Number(currentAgg._sum.subtotal ?? 0);
+  // What the seller actually takes home from these sales (after commission / TCS / TDS).
+  const earnings = Number(currentAgg._sum.netPayable ?? 0);
   const orders = currentAgg._count;
   const prevRevenue = Number(prevAgg._sum.subtotal ?? 0);
   const prevOrders = prevAgg._count;
@@ -808,6 +910,8 @@ async function buildSellerAnalytics(sellerId: string, range: string) {
       value: Number(r._sum.lineTotal ?? 0),
       displayValue: sellerRupees(Number(r._sum.lineTotal ?? 0)),
       sublabel: `${Number(r._sum.quantity ?? 0)} sold`,
+      productId: refByName.get(r.productName)?.variant?.productId ?? null,
+      imageUrl: refByName.get(r.productName)?.imageUrl ?? null,
     }));
 
   // ── Inventory health: roll variant units/stock up to the parent product ──
@@ -857,13 +961,69 @@ async function buildSellerAnalytics(sellerId: string, range: string) {
   return {
     range,
     since: since.toISOString(),
-    summary: { revenue, orders, avgOrderValue, prevRevenue, prevOrders, revenueDeltaPct },
+    summary: {
+      revenue, earnings, orders, avgOrderValue, prevRevenue, prevOrders, revenueDeltaPct,
+      prevEarnings: Number(prevEarningsAgg._sum.netPayable ?? 0),
+      customers, prevCustomers,
+      last7,
+    },
     trend,
     topProducts,
     deadStock,
     restockPriority,
   };
 }
+
+// ─── GET /customers — who buys from this shop (More → Customers) ───────────────────────────────
+// Built from the seller's own sales in the last 365 days (SELLER_SALE: no cancelled slices, no unpaid
+// online orders), most recent buyer first. Name/phone are the order's delivery snapshot — the same
+// details the seller already sees on each order, nothing more. No schema change: aggregated in JS
+// over a bounded window, like the owner analytics' basket-affinity pass.
+router.get("/customers", async (req: SellerRequest, res: Response) => {
+  try {
+    const sellerId = req.sellerId as string;
+    const data = await memoCache.get(`sellerCustomers:${sellerId}`, SELLER_ANALYTICS_TTL_MS, async () => {
+      const since = new Date(Date.now() - 365 * 24 * 60 * 60 * 1000);
+      const rows = await prisma.subOrder.findMany({
+        where: { sellerId, ...SELLER_SALE, createdAt: { gte: since } },
+        orderBy: { createdAt: "desc" },
+        select: {
+          subtotal: true,
+          createdAt: true,
+          order: { select: { customerId: true, shippingName: true, shippingPhone: true, customer: { select: { name: true } } } },
+        },
+      });
+      const byCustomer = new Map<string, { customerId: string; name: string; phone: string | null; orders: number; totalSpent: number; lastOrderAt: Date }>();
+      for (const r of rows) {
+        const id = r.order.customerId;
+        const seen = byCustomer.get(id);
+        if (seen) {
+          seen.orders += 1;
+          seen.totalSpent += Number(r.subtotal);
+        } else {
+          // Rows arrive newest first, so the first one carries the latest name/phone and date.
+          byCustomer.set(id, {
+            customerId: id,
+            name: r.order.shippingName || r.order.customer?.name || "Customer",
+            phone: r.order.shippingPhone ?? null,
+            orders: 1,
+            totalSpent: Number(r.subtotal),
+            lastOrderAt: r.createdAt,
+          });
+        }
+      }
+      const list = [...byCustomer.values()].slice(0, 200).map((c) => ({
+        ...c,
+        totalSpent: Math.round(c.totalSpent * 100) / 100,
+        lastOrderAt: c.lastOrderAt.toISOString(),
+      }));
+      return { total: byCustomer.size, repeat: [...byCustomer.values()].filter((c) => c.orders > 1).length, customers: list };
+    });
+    res.json({ success: true, data });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
 
 router.get("/analytics", async (req: SellerRequest, res: Response) => {
   try {

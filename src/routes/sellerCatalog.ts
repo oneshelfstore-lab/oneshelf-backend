@@ -6,6 +6,7 @@ import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAu
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
 import { formatVariantForApp, fromAppFormat, toAppFormat, assertVariantFloors } from "../utils/looseUnitConverter.js";
 import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
+import { SELLER_SALE } from "../services/sellerSales.js";
 import { calculateLineItemTax, calculateInvoiceTotals } from "../services/taxEngine.js";
 import {
   createCommissionRequest,
@@ -857,6 +858,63 @@ const commissionRequestSchema = z.object({
 router.get("/commission-requests", async (req: SellerRequest, res: Response) => {
   try {
     res.json({ success: true, data: await listCommissionRequests({ sellerId: req.sellerId! }) });
+  } catch (e) { sendError(res, e); }
+});
+
+// GET /:id/stats — how one of the seller's products is selling, for the product page: units sold
+// in the last 30 days vs the 30 before, 30-day revenue, and a 7-day daily series for the sparkline.
+// Same definition of a sale as the analytics (SELLER_SALE): no cancelled slices, no unpaid online
+// orders. ⚠️ Quantity is summed as stored, so for a loose item it is in its sell unit (kg/L), not
+// packs — the app labels it with the product's unit.
+router.get("/:id/stats", async (req: SellerRequest, res: Response) => {
+  try {
+    const productId = String(req.params.id ?? "");
+    const owned = await prisma.catalogProduct.findFirst({
+      where: { id: productId, sellerId: req.sellerId! },
+      select: { id: true },
+    });
+    if (!owned) throw new NotFoundError("Product", productId);
+
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const since30 = new Date(now - 30 * DAY);
+    const since60 = new Date(now - 60 * DAY);
+    const items = await prisma.orderItem.findMany({
+      where: {
+        sellerId: req.sellerId!,
+        variant: { productId },
+        createdAt: { gte: since60 },
+        subOrder: SELLER_SALE,
+      },
+      select: { quantity: true, lineTotal: true, createdAt: true },
+    });
+
+    let units30 = 0, unitsPrev30 = 0, revenue30 = 0;
+    // 7 IST calendar days, oldest first; index 6 = today.
+    const daily7 = [0, 0, 0, 0, 0, 0, 0];
+    const IST = 5.5 * 60 * 60 * 1000;
+    const todayIst = Math.floor((now + IST) / DAY);
+    for (const it of items) {
+      const q = Number(it.quantity);
+      if (it.createdAt >= since30) {
+        units30 += q;
+        revenue30 += Number(it.lineTotal);
+      } else {
+        unitsPrev30 += q;
+      }
+      const daysAgo = todayIst - Math.floor((it.createdAt.getTime() + IST) / DAY);
+      if (daysAgo >= 0 && daysAgo < 7) daily7[6 - daysAgo] += q;
+    }
+    res.json({
+      success: true,
+      data: {
+        productId,
+        unitsSold30d: units30,
+        unitsSoldPrev30d: unitsPrev30,
+        revenue30d: Math.round(revenue30 * 100) / 100,
+        daily7d: daily7,
+      },
+    });
   } catch (e) { sendError(res, e); }
 });
 

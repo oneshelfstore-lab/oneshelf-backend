@@ -2108,6 +2108,10 @@ model Seller {
   // "busy" and forgets would otherwise look slow forever and quietly lose orders. Past = not busy.
   busyUntil        DateTime?
   busyExtraMinutes Int       @default(0) // minutes added to the prep estimate while busy
+  // Shop closed by its seller (the dashboard's Open/Closed switch). Null = open. Deliberately NOT an
+  // auto-expiry and NOT a storefront filter: a closed shop's products stay on sale, orders still come
+  // in, and they're fulfilled the next day it opens. Only the seller (or owner) reopens it by hand.
+  closedSince      DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

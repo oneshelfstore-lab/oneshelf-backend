@@ -726,3 +726,9 @@ export async function notifyCourierFailed(info: { bookingId: string; number: str
     body: `${info.number}: ${info.reason}. The parcel is still with the rider.`,
   });
 }
+
+// A courier job was put on / handed back to a specific rider by the owner.
+export async function notifyCourierRider(riderId: string, info: { bookingId: string; title: string; body: string }) {
+  const tokens = await getUserTokens(riderId);
+  await sendToTokens(tokens, { type: "courier_assigned", bookingId: info.bookingId, title: info.title, body: info.body });
+}

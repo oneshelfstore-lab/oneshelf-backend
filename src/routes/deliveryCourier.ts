@@ -162,7 +162,11 @@ router.post("/:id/release", async (req: FirebaseAuthRequest, res: Response) => {
 });
 
 // ─── The two handoffs share one shape ────────────────────────────────
-const handoffSchema = fixSchema.extend({ code: z.string().regex(/^\d{6}$/, "Enter the 6-digit code") });
+// photoPath = a Storage OBJECT PATH the rider's app uploaded (camera-only, courier_photos/{firebaseUid}/…).
+const handoffSchema = fixSchema.extend({
+  code: z.string().regex(/^\d{6}$/, "Enter the 6-digit code"),
+  photoPath: z.string().max(300).optional(),
+});
 
 async function handoff(
   req: FirebaseAuthRequest,
@@ -174,6 +178,11 @@ async function handoff(
   const p = handoffSchema.safeParse(req.body);
   if (!p.success) throw new ValidationError(p.error.errors[0]?.message ?? "Invalid request", p.error.errors);
 
+  // A photo path is accepted only under THIS rider's own folder, so a rider can't attach someone else's upload.
+  const photoPath = p.data.photoPath?.trim() || undefined;
+  if (photoPath && !photoPath.startsWith(`courier_photos/${req.appUser!.firebaseUid}/`)) {
+    throw new ValidationError("That photo doesn't belong to you.");
+  }
   const from = kind === "PICKUP" ? "ASSIGNED" : "PICKED_UP";
   const b = await loadMine(id, me);
   if (!b) throw new NotFoundError("Courier booking", id);
@@ -224,14 +233,16 @@ async function handoff(
     // CAS again inside the transaction — the read above and this write are not atomic.
     const upd = await tx.courierBooking.updateMany({
       where: { id, riderId: me, status: from },
-      data: kind === "PICKUP" ? { status: to, pickedUpAt: new Date() } : { status: to, deliveredAt: new Date() },
+      data: kind === "PICKUP"
+        ? { status: to, pickedUpAt: new Date(), ...(photoPath ? { pickupPhotoPath: photoPath } : {}) }
+        : { status: to, deliveredAt: new Date(), ...(photoPath ? { dropPhotoPath: photoPath } : {}) },
     });
     if (upd.count === 0) return false;
     await tx.courierSecret.update({
       where: { bookingId: id },
       data: kind === "PICKUP" ? { pickupAttempts: 0, pickupLockedUntil: null } : { deliveryAttempts: 0, deliveryLockedUntil: null },
     });
-    await recordCourierEvent(tx, { bookingId: id, type: to, ...evidence, metadata: { distanceM: result.distanceM, codeVerified: true } });
+    await recordCourierEvent(tx, { bookingId: id, type: to, ...evidence, metadata: { distanceM: result.distanceM, codeVerified: true, photo: !!photoPath } });
     return true;
   });
   if (!done) throw new ValidationError("This booking just changed. Refresh and try again.");

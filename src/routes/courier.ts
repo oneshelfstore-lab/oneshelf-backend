@@ -20,6 +20,7 @@ import {
   loadBookingView,
   shapeBooking,
   shapeBookingFull,
+  ensureTrackingToken,
 } from "../services/courier.js";
 
 /**
@@ -179,6 +180,20 @@ router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
     }
     const view = await loadBookingView({ id, customerId: req.appUser!.id });
     res.json({ success: true, data: await shapeBookingFull(view!) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /:id/share-link — the recipient's tracking page ────────────
+router.post("/:id/share-link", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id);
+    const b = await prisma.courierBooking.findFirst({ where: { id, customerId: req.appUser!.id }, select: { id: true } });
+    if (!b) throw new NotFoundError("Courier booking", id);
+    const token = await ensureTrackingToken(id);
+    const base = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
+    res.json({ success: true, data: { url: `${base.replace(/\/$/, "")}/t/${token}` } });
   } catch (e) {
     sendError(res, e);
   }

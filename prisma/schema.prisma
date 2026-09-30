@@ -3158,6 +3158,10 @@ model CourierBooking {
   pickupPhotoPath String?
   dropPhotoPath   String?
 
+  // Unguessable handle for the public recipient tracking page (/t/:token). Created lazily the first time
+  // the sender taps Share, so there is nothing to backfill; NULL = never shared.
+  trackingToken String? @unique
+
   ratingStars   Int?
   ratingComment String?
 

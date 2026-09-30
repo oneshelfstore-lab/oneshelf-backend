@@ -413,9 +413,13 @@ export async function computeRiderMonth(userId: string) {
   const istNow = new Date(Date.now() + IST_OFFSET_MS);
   const monthStartUtc = new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), 1) - IST_OFFSET_MS);
 
-  const [delivered, config, ratings] = await Promise.all([
+  const [shopDelivered, courierDelivered, config, ratings] = await Promise.all([
     prisma.order.count({
       where: { deliveryBoyId: userId, status: "DELIVERED", deliveredAt: { gte: monthStartUtc } },
+    }),
+    // A delivered parcel is a delivery: it earns the same per-delivery incentive as a shop order.
+    prisma.courierBooking.count({
+      where: { riderId: userId, status: "DELIVERED", deliveredAt: { gte: monthStartUtc } },
     }),
     prisma.storeConfig.findFirst({ select: { perDeliveryIncentive: true } }),
     // Same join ownerAnalytics.ts already uses for the owner's per-agent scorecard — the rider has
@@ -426,6 +430,7 @@ export async function computeRiderMonth(userId: string) {
     }),
   ]);
 
+  const delivered = shopDelivered + courierDelivered;
   const rate = Number(config?.perDeliveryIncentive ?? 0);
   const avg = ratings.length > 0 ? ratings.reduce((s, r) => s + r.stars, 0) / ratings.length : null;
 

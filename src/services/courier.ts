@@ -2,7 +2,9 @@ import prisma from "../lib/prisma.js";
 import { memoCache } from "../lib/httpCache.js";
 import { AppError, ValidationError } from "../lib/errors.js";
 import { generateOtp } from "../lib/otp.js";
+import { randomBytes } from "crypto";
 import { haversineKm } from "../lib/distance.js";
+import { signStoragePath } from "../lib/storageUrls.js";
 import { getRiderRoute } from "./riderRoute.js";
 import { notifyNewCourierAvailable, notifyCourierCustomer } from "./fcmNotifier.js";
 import { getCurrentFinancialYear } from "./invoiceNumbering.js";
@@ -388,7 +390,7 @@ export async function cancelCourierBooking(
     actorId?: string;
     customerId?: string;
     reason: string;
-    allowedFrom: Array<"PENDING_PAYMENT" | "SEARCHING" | "ASSIGNED" | "PICKED_UP">;
+    allowedFrom: Array<"PENDING_PAYMENT" | "SEARCHING" | "ASSIGNED" | "PICKED_UP" | "FAILED">;
   },
 ): Promise<"CANCELLED" | "NOT_CANCELLABLE"> {
   const won = await prisma.$transaction(async (tx) => {
@@ -528,7 +530,28 @@ export async function riderLiveFor(b: {
 
 /** [shapeBooking] plus the live rider block — for the single-booking responses (the list stays cheap). */
 export async function shapeBookingFull(b: NonNullable<BookingWithView>) {
-  return { ...shapeBooking(b), rider: await riderLiveFor(b) };
+  return {
+    ...shapeBooking(b),
+    rider: await riderLiveFor(b),
+    // Stored as Storage object PATHS and signed on read (never a permanent download token) — lib/storageUrls.ts.
+    pickupPhotoUrl: await signStoragePath(b.pickupPhotoPath),
+    dropPhotoUrl: await signStoragePath(b.dropPhotoPath),
+  };
+}
+
+/**
+ * The handle for the recipient's public tracking page. Created the first time the sender taps Share
+ * (so there is nothing to backfill), then stable. The unique column makes a collision impossible to
+ * store; 18 random bytes makes one impossible to hit.
+ */
+export async function ensureTrackingToken(bookingId: string): Promise<string> {
+  const existing = await prisma.courierBooking.findUnique({ where: { id: bookingId }, select: { trackingToken: true } });
+  if (existing?.trackingToken) return existing.trackingToken;
+  const token = randomBytes(18).toString("base64url");
+  // Guarded on NULL so two racing Share taps settle on ONE token instead of the second overwriting the first.
+  await prisma.courierBooking.updateMany({ where: { id: bookingId, trackingToken: null }, data: { trackingToken: token } });
+  const row = await prisma.courierBooking.findUnique({ where: { id: bookingId }, select: { trackingToken: true } });
+  return row!.trackingToken!;
 }
 
 // ─── Sweeper ─────────────────────────────────────────────────────────

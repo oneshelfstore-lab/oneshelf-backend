@@ -19,6 +19,7 @@ import {
   cancelCourierBooking,
   loadBookingView,
   shapeBooking,
+  shapeBookingFull,
 } from "../services/courier.js";
 
 /**
@@ -79,7 +80,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     const { prohibitedAck: _ack, ...input } = p.data;
     const booking = await createCourierBooking(req.appUser!, input);
     const view = await loadBookingView({ id: booking.id, customerId: req.appUser!.id });
-    res.json({ success: true, data: shapeBooking(view!) });
+    res.json({ success: true, data: await shapeBookingFull(view!) });
   } catch (e) {
     sendError(res, e);
   }
@@ -106,7 +107,7 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     const id = String(req.params.id);
     const view = await loadBookingView({ id, customerId: req.appUser!.id });
     if (!view) throw new NotFoundError("Courier booking", id);
-    res.json({ success: true, data: shapeBooking(view) });
+    res.json({ success: true, data: await shapeBookingFull(view) });
   } catch (e) {
     sendError(res, e);
   }
@@ -135,7 +136,7 @@ router.post("/:id/pay", async (req: FirebaseAuthRequest, res: Response) => {
       await confirmCourierPayment(b.id, p.data.razorpayPaymentId);
     }
     const view = await loadBookingView({ id, customerId: req.appUser!.id });
-    res.json({ success: true, data: shapeBooking(view!) });
+    res.json({ success: true, data: await shapeBookingFull(view!) });
   } catch (e) {
     sendError(res, e);
   }
@@ -149,7 +150,7 @@ router.post("/:id/reconcile", async (req: FirebaseAuthRequest, res: Response) =>
     if (!view) throw new NotFoundError("Courier booking", id);
     await reconcileCourierPayment(id);
     const fresh = await loadBookingView({ id, customerId: req.appUser!.id });
-    res.json({ success: true, data: shapeBooking(fresh!) });
+    res.json({ success: true, data: await shapeBookingFull(fresh!) });
   } catch (e) {
     sendError(res, e);
   }
@@ -177,7 +178,27 @@ router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
       }
     }
     const view = await loadBookingView({ id, customerId: req.appUser!.id });
-    res.json({ success: true, data: shapeBooking(view!) });
+    res.json({ success: true, data: await shapeBookingFull(view!) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /:id/rating — rate a delivered courier ─────────────────────
+// One rating per booking; the first submission stands (a rating is feedback, not a thing to re-litigate).
+router.post("/:id/rating", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const p = z.object({ stars: z.number().int().min(1).max(5), comment: z.string().trim().max(500).optional() }).safeParse(req.body);
+    if (!p.success) throw new ValidationError("Invalid rating", p.error.errors);
+    const id = String(req.params.id);
+    const upd = await prisma.courierBooking.updateMany({
+      where: { id, customerId: req.appUser!.id, status: "DELIVERED", ratingStars: null },
+      data: { ratingStars: p.data.stars, ratingComment: p.data.comment ?? null },
+    });
+    const view = await loadBookingView({ id, customerId: req.appUser!.id });
+    if (!view) throw new NotFoundError("Courier booking", id);
+    if (upd.count === 0 && view.ratingStars == null) throw new ValidationError("You can rate a courier once it has been delivered.");
+    res.json({ success: true, data: await shapeBookingFull(view) });
   } catch (e) {
     sendError(res, e);
   }

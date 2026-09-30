@@ -1,4 +1,5 @@
 import { admin, isFirebaseInitialized } from "../lib/firebase.js";
+import { haversineKm } from "../lib/distance.js";
 import prisma from "../lib/prisma.js";
 
 async function getUserTokens(userId: string): Promise<string[]> {
@@ -672,5 +673,56 @@ export async function notifySubscriptionStatement(
     body: info.autoPaid
       ? `Your ${info.periodLabel} subscription bill of Rs.${Math.round(info.amount)} was paid from your store credit.`
       : `Your ${info.periodLabel} subscription bill is Rs.${Math.round(info.amount)}. Please settle it at the store.`,
+  });
+}
+
+// ─── Courier (COURIER_PLAN.md) ───────────────────────────────────────
+
+/** Courier pool radius: riders farther than this from the pickup aren't pinged (an unknown position still is). */
+const COURIER_PING_RADIUS_KM = 15;
+
+// A paid courier booking is waiting for a rider. Ping the online riders who could plausibly take it.
+// ⚠️ A rider with no known position is INCLUDED — not knowing where someone is must not silently
+// exclude them from work; the feed applies the same rule.
+export async function notifyNewCourierAvailable(b: { id: string; number: string; pickupLat: number; pickupLng: number }) {
+  const agents = await prisma.user.findMany({
+    where: { role: "DELIVERY", isAvailableForDelivery: true },
+    select: { id: true, lastLat: true, lastLng: true },
+  });
+  const ids = agents
+    .filter((a) => a.lastLat == null || a.lastLng == null ||
+      haversineKm(Number(a.lastLat), Number(a.lastLng), b.pickupLat, b.pickupLng) <= COURIER_PING_RADIUS_KM)
+    .map((a) => a.id);
+  if (ids.length === 0) return;
+  const tokenRows = await prisma.fcmToken.findMany({ where: { userId: { in: ids } }, select: { token: true } });
+  await sendToTokens(tokenRows.map((t) => t.token), {
+    type: "courier_available",
+    bookingId: b.id,
+    title: "New courier pickup",
+    body: "A parcel is waiting for pickup nearby. Tap to accept.",
+  });
+}
+
+// Tells the sender where their booking has got to (assigned / picked up / delivered / failed / no rider).
+export async function notifyCourierCustomer(
+  customerId: string,
+  info: { bookingId: string; number: string; title: string; body: string },
+) {
+  const tokens = await getUserTokens(customerId);
+  await sendToTokens(tokens, {
+    type: "courier_update",
+    bookingId: info.bookingId,
+    title: info.title,
+    body: info.body,
+  });
+}
+
+// A parcel is stuck with a rider after a failed delivery — the owner has to decide what happens next.
+export async function notifyCourierFailed(info: { bookingId: string; number: string; reason: string }) {
+  await sendToTopic("owner_orders", {
+    type: "courier_failed",
+    bookingId: info.bookingId,
+    title: "Courier delivery failed",
+    body: `${info.number}: ${info.reason}. The parcel is still with the rider.`,
   });
 }

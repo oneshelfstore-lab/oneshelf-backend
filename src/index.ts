@@ -31,6 +31,7 @@ import cartRoutes from "./routes/cart.js";
 import { appCouponRouter, adminCouponRouter, ownerCouponRouter } from "./routes/coupons.js";
 import orderRoutes from "./routes/orders.js";
 import courierRoutes from "./routes/courier.js";
+import deliveryCourierRoutes from "./routes/deliveryCourier.js";
 import ownerOrderRoutes from "./routes/ownerOrders.js";
 import adminOrderRoutes from "./routes/adminOrders.js";
 import deliveryRoutes from "./routes/delivery.js";
@@ -415,6 +416,7 @@ app.use("/api/app/cart", cartRoutes);
 app.use("/api/app/coupons", appCouponRouter);
 app.use("/api/app/orders", orderRoutes);
 app.use("/api/app/courier", courierRoutes);
+app.use("/api/app/delivery/courier", deliveryCourierRoutes);
 // Authenticated half of /api/app/food (quote + place). Shares the mount path with the PUBLIC browse
 // router above: Express calls next() when a router matches no route, so /restaurants* is served
 // there and /quote + /orders fall through to here. ⚠️ Never add a catch-all to routes/food.ts or

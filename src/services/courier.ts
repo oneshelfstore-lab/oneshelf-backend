@@ -2,6 +2,9 @@ import prisma from "../lib/prisma.js";
 import { memoCache } from "../lib/httpCache.js";
 import { AppError, ValidationError } from "../lib/errors.js";
 import { generateOtp } from "../lib/otp.js";
+import { haversineKm } from "../lib/distance.js";
+import { getRiderRoute } from "./riderRoute.js";
+import { notifyNewCourierAvailable, notifyCourierCustomer } from "./fcmNotifier.js";
 import { getCurrentFinancialYear } from "./invoiceNumbering.js";
 import {
   checkCourierEligibility,
@@ -147,6 +150,14 @@ export async function recordCourierEvent(client: EventClient | null, e: CourierE
   });
 }
 
+// ─── Dispatch ────────────────────────────────────────────────────────
+
+/** Pings nearby riders that a paid booking is waiting. Fire-and-forget: a failed push must never fail a booking. */
+export function dispatchToRiders(b: { id: string; number: string; pickupLat: unknown; pickupLng: unknown }): void {
+  notifyNewCourierAvailable({ id: b.id, number: b.number, pickupLat: Number(b.pickupLat), pickupLng: Number(b.pickupLng) })
+    .catch((e: unknown) => console.error("[background task failed]", e));
+}
+
 // ─── Booking ─────────────────────────────────────────────────────────
 
 export interface BookingInput {
@@ -266,6 +277,8 @@ export async function createCourierBooking(
     throw e;
   }
 
+  if (paidUpFront) dispatchToRiders(booking);
+
   if (due > 0) {
     try {
       const rp = await createRazorpayOrder(Math.round(due * 100), number);
@@ -297,7 +310,11 @@ export async function confirmCourierPayment(bookingId: string, razorpayPaymentId
     await recordCourierEvent(tx, { bookingId, type: "PAYMENT_CONFIRMED", actorType: "SYSTEM", metadata: { method: "RAZORPAY", paymentId: razorpayPaymentId } });
     return true;
   });
-  if (flipped) return true;
+  if (flipped) {
+    const b = await prisma.courierBooking.findUnique({ where: { id: bookingId }, select: { id: true, number: true, pickupLat: true, pickupLng: true } });
+    if (b) dispatchToRiders(b);
+    return true;
+  }
 
   // Not flippable. The only case that needs action is money captured for a booking we already cancelled.
   const claimed = await prisma.courierBooking.updateMany({
@@ -389,8 +406,17 @@ export async function cancelCourierBooking(
 
   const b = await prisma.courierBooking.findUnique({
     where: { id: bookingId },
-    select: { paymentStatus: true, razorpayPaymentId: true, total: true, walletApplied: true },
+    select: { paymentStatus: true, razorpayPaymentId: true, total: true, walletApplied: true, customerId: true, number: true },
   });
+  // A customer-initiated cancel needs no push (they just did it); a system cancel does — they would
+  // otherwise learn their courier was dropped only by opening the app.
+  if (b && opts.actorType === "SYSTEM") {
+    notifyCourierCustomer(b.customerId, {
+      bookingId, number: b.number,
+      title: "Courier cancelled",
+      body: opts.reason + (b.paymentStatus === "PAID" ? ". You will be refunded in full." : "."),
+    }).catch((e: unknown) => console.error("[background task failed]", e));
+  }
   if (b?.paymentStatus === "PAID") {
     const claimed = await prisma.courierBooking.updateMany({ where: { id: bookingId, paymentStatus: "PAID" }, data: { paymentStatus: "REFUND_INITIATED" } });
     if (claimed.count === 1) {
@@ -438,10 +464,71 @@ export function shapeBooking(b: NonNullable<BookingWithView>) {
     pickupCode: b.status === "ASSIGNED" ? (b.secret?.pickupOtp ?? null) : null,
     deliveryCode: b.status === "PICKED_UP" ? (b.secret?.deliveryOtp ?? null) : null,
     cancelReason: b.cancelReason,
+    ratingStars: b.ratingStars,
     canCancel: b.status === "PENDING_PAYMENT" || b.status === "SEARCHING",
     createdAt: b.createdAt,
     timeline: b.events.filter((e) => CUSTOMER_EVENTS.has(e.type)).map((e) => ({ type: e.type, at: e.createdAt })),
   };
+}
+
+// ─── Live rider (customer tracking) ──────────────────────────────────
+
+export interface RiderLive {
+  name: string;
+  vehicle: string | null;
+  phone: string | null;
+  lat: number | null;
+  lng: number | null;
+  lastSeenAt: Date | null;
+  /** Which half of the trip: riding to the pickup, or carrying the parcel to the drop. */
+  leg: "TO_PICKUP" | "TO_DROP";
+  distanceKm: number | null;
+  etaMinutes: number | null;
+  routePolyline: string | null;
+}
+
+/**
+ * The rider's name/vehicle from assignment, and their position only while it is fresh.
+ *
+ * ⚠️ Same containment as the Shop map (routes/orders.ts, documented there): coordinates and the
+ * rider's phone leave the server only while the booking is ASSIGNED/PICKED_UP, only with a fix under
+ * 15 minutes old, only to the ONE customer who owns the booking (the route is customerId-scoped),
+ * and with NO position history written anywhere. Name and vehicle need no fix.
+ */
+export async function riderLiveFor(b: {
+  id: string; status: string; riderId: string | null;
+  pickupLat: unknown; pickupLng: unknown; dropLat: unknown; dropLng: unknown;
+}): Promise<RiderLive | null> {
+  if (!b.riderId || (b.status !== "ASSIGNED" && b.status !== "PICKED_UP")) return null;
+  const r = await prisma.user.findUnique({
+    where: { id: b.riderId },
+    select: { name: true, phone: true, lastLat: true, lastLng: true, lastSeenAt: true, deliveryProfile: { select: { vehicleType: true, rcNumber: true } } },
+  });
+  if (!r) return null;
+
+  const leg = b.status === "ASSIGNED" ? ("TO_PICKUP" as const) : ("TO_DROP" as const);
+  const vehicle = [r.deliveryProfile?.vehicleType, r.deliveryProfile?.rcNumber].filter(Boolean).join(" · ") || null;
+  const fresh = r.lastSeenAt != null && Date.now() - r.lastSeenAt.getTime() < 15 * 60 * 1000 && r.lastLat != null && r.lastLng != null;
+  if (!fresh) return { name: r.name, vehicle, phone: null, lat: null, lng: null, lastSeenAt: null, leg, distanceKm: null, etaMinutes: null, routePolyline: null };
+
+  const lat = Number(r.lastLat);
+  const lng = Number(r.lastLng);
+  const tLat = Number(leg === "TO_PICKUP" ? b.pickupLat : b.dropLat);
+  const tLng = Number(leg === "TO_PICKUP" ? b.pickupLng : b.dropLng);
+  // Cached per booking and only re-fetched when the rider has moved (services/riderRoute.ts); the
+  // destination is part of that cache key, so the pickup-to-drop handover re-routes on its own.
+  const route = await getRiderRoute("courier:" + b.id, lat, lng, tLat, tLng);
+  return {
+    name: r.name, vehicle, phone: r.phone, lat, lng, lastSeenAt: r.lastSeenAt, leg,
+    distanceKm: Math.round(haversineKm(lat, lng, tLat, tLng) * 10) / 10,
+    etaMinutes: route?.etaMinutes ?? null,
+    routePolyline: route?.polyline ?? null,
+  };
+}
+
+/** [shapeBooking] plus the live rider block — for the single-booking responses (the list stays cheap). */
+export async function shapeBookingFull(b: NonNullable<BookingWithView>) {
+  return { ...shapeBooking(b), rider: await riderLiveFor(b) };
 }
 
 // ─── Sweeper ─────────────────────────────────────────────────────────

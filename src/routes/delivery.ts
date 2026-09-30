@@ -105,7 +105,7 @@ router.use(requireAppRole("DELIVERY", "OWNER") as any);
  * store out of its own dispatch. Costs one indexed lookup per delivery request; same trade the
  * dashboard's tokenVersion check already makes.
  */
-router.use(async (req: FirebaseAuthRequest, res: Response, next) => {
+export const riderKycGate = async (req: FirebaseAuthRequest, res: Response, next: (e?: unknown) => void) => {
   try {
     if (req.appUser?.role === "OWNER") return next();
     const status = await getRiderOnboardingStatus(req.appUser!.id);
@@ -115,7 +115,8 @@ router.use(async (req: FirebaseAuthRequest, res: Response, next) => {
   } catch (e) {
     sendError(res, e);
   }
-});
+};
+router.use(riderKycGate);
 
 /**
  * Everything that must happen once an order reaches DELIVERED, in ONE place so the two completion
@@ -692,7 +693,7 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
  *
  * ⚠️ OWNER is exempt throughout — they share this router and have no DeliveryProfile.
  */
-async function assertCanTakeWork(userId: string): Promise<void> {
+export async function assertCanTakeWork(userId: string): Promise<void> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: {
@@ -1254,9 +1255,15 @@ router.post("/location", async (req: FirebaseAuthRequest, res: Response) => {
     // ⚠️ This is still narrow, and the narrowness is the point: deliveryBoyId: userId means only
     // orders THIS rider has already claimed. A PACKED order sitting in the shared pool belongs to
     // nobody and buys no one the right to store their position. This is not a general rider feed.
-    const active = await prisma.order.count({
-      where: { deliveryBoyId: userId, status: { in: ["PACKED", "OUT_FOR_DELIVERY"] } },
-    });
+    // A courier job (assigned or picked up) is just as much "an active delivery" as a shop order —
+    // without this, tracking a parcel would silently render nothing (the same trap the Sep 20 fix closed).
+    const active =
+      (await prisma.order.count({
+        where: { deliveryBoyId: userId, status: { in: ["PACKED", "OUT_FOR_DELIVERY"] } },
+      })) +
+      (await prisma.courierBooking.count({
+        where: { riderId: userId, status: { in: ["ASSIGNED", "PICKED_UP"] } },
+      }));
     if (active === 0) {
       // Not an error the rider should see — the app stops posting on its own once the work ends;
       // this is the server refusing to store a position it has no purpose for.

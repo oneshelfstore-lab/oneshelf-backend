@@ -156,6 +156,7 @@ export const publicCatalogRouter = Router();
 const browseSchema = z.object({
   q: z.string().max(100).optional(),
   category: z.string().max(50).optional(),
+  sellerId: z.string().max(40).optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(50).default(20),
 });
@@ -165,7 +166,7 @@ publicCatalogRouter.get("/", cacheControl(CATALOG_LIST_TTL), async (req: Request
   try {
     const parsed = browseSchema.safeParse(req.query);
     if (!parsed.success) throw new ValidationError("Invalid query", parsed.error.errors);
-    const { q, category, page, limit } = parsed.data;
+    const { q, category, sellerId, page, limit } = parsed.data;
 
     const where: any = { isActive: true, ...SELLER_TRADING };
 
@@ -175,6 +176,12 @@ publicCatalogRouter.get("/", cacheControl(CATALOG_LIST_TTL), async (req: Request
         { brand: { contains: q, mode: "insensitive" } },
         { searchKeywords: { has: q.toLowerCase() } },
       ];
+    }
+
+    if (sellerId) {
+      // A store page. A null sellerId means the HOUSE store, so the house card must match those rows too.
+      const s = await prisma.seller.findUnique({ where: { id: sellerId }, select: { isHouse: true } });
+      where.AND = [...(where.AND ?? []), { OR: s?.isHouse ? [{ sellerId: null }, { sellerId }] : [{ sellerId }] }];
     }
 
     if (category) {

@@ -2008,6 +2008,8 @@ model Seller {
   slug               String           @unique
   name               String
   logoUrl            String?
+  // Storefront photo for the customer's store card. Null falls back to logoUrl, then to a tinted initial.
+  coverUrl           String?
   // The SELLER-role User who logs in to manage this shop (null until onboarded/linked by phone).
   ownerUserId        String?          @unique
   ownerUser          User?            @relation("SellerOwner", fields: [ownerUserId], references: [id])

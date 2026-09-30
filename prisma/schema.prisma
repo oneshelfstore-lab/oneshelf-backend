@@ -565,6 +565,16 @@ model Category {
 
 model CatalogProduct {
   id                    String      @id @default(cuid())
+  // Moderation state, separate from isActive (which also means "owner hid it"). PENDING = an external
+  // seller's new product awaiting the owner; REJECTED = owner said no (rejectionReason tells the seller
+  // why; a re-save moves it back to PENDING); APPROVED = everything else, incl. house products.
+  approvalStatus        String      @default("APPROVED")
+  rejectionReason       String?
+  // Soft delete. "Remove" used to set isActive=false — the very state that means "pending approval" —
+  // so removed and rejected products came straight back into the approval queue.
+  deletedAt             DateTime?
+
+  @@index([approvalStatus])
   handle                String      @unique
   name                  String
   nameHi                String?
@@ -893,6 +903,7 @@ model ProductVariant {
   stockBatches      StockBatch[]
   purchaseBillLines PurchaseBillLine[]
   freeGiftAsTrigger FreeGiftOffer?     @relation("FreeGiftTrigger")
+  priceChanges      PriceChange[]
   freeGiftAsReward  FreeGiftOffer[]    @relation("FreeGiftReward")
   comboItems        ComboItem[]
   stockAlerts       StockAlert[]
@@ -3018,4 +3029,21 @@ model SearchQuery {
 
   @@index([term])
   @@index([createdAt])
+}
+
+// Append-only log of selling-price / MRP changes, written by services/priceHistory.ts at every price
+// write. Values are stored exactly as ProductVariant stores them (per base unit for loose items).
+model PriceChange {
+  id            String         @id @default(cuid())
+  variantId     String
+  variant       ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+  oldPrice      Decimal        @db.Decimal(10, 2)
+  newPrice      Decimal        @db.Decimal(10, 2)
+  oldMrp        Decimal        @db.Decimal(10, 2)
+  newMrp        Decimal        @db.Decimal(10, 2)
+  source        String         // EDITOR | BULK_RULE | CSV
+  changedByName String?
+  createdAt     DateTime       @default(now())
+
+  @@index([variantId, createdAt])
 }

@@ -10,6 +10,8 @@ import {
 import { formatVariantForApp, fromAppFormat, toAppFormat, assertVariantFloors } from "../utils/looseUnitConverter.js";
 import { memoCache } from "../lib/httpCache.js";
 import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
+import { recordPriceChange } from "../services/priceHistory.js";
+import { notifyProductDecision } from "../services/fcmNotifier.js";
 import { calculateLineItemTax, calculateInvoiceTotals } from "../services/taxEngine.js";
 
 const router = Router();
@@ -50,6 +52,8 @@ function formatProductForApp(product: any) {
     imageUrls: product.imageUrls,
     searchKeywords: product.searchKeywords,
     isActive: product.isActive,
+    approvalStatus: product.approvalStatus,
+    rejectionReason: product.rejectionReason ?? null,
     sellerName: product.seller?.name ?? null,
     variants: product.variants?.map((v: any) => {
       const base = formatVariantForApp(v, isLoose);
@@ -69,7 +73,7 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
     const search = ((req.query.search as string) || "").slice(0, 100) || undefined;
 
-    const where: any = {};
+    const where: any = { deletedAt: null };
     if (search) {
       where.OR = [
         { name: { contains: search, mode: "insensitive" } },
@@ -337,6 +341,7 @@ router.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
             // instead of overwriting them directly, which used to silently blend a different-cost
             // restock into the same row with no history.
             const { id: vid, stock: _stock, costPrice: _costPrice, ...rest } = v as any;
+            const before = await tx.productVariant.findUnique({ where: { id: vid }, select: { sellingPrice: true, mrp: true } });
             await tx.productVariant.update({
               where: { id: vid },
               data: {
@@ -347,6 +352,7 @@ router.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
                 bulkPrice: converted.bulkPrice,
               },
             });
+            if (before) await recordPriceChange(tx, vid, { sellingPrice: Number(before.sellingPrice), mrp: Number(before.mrp) }, { sellingPrice: converted.sellingPrice, mrp: converted.mrp }, "EDITOR", req.appUser?.name);
             await applyStockEdit(tx, vid, converted.stock, converted.costPrice, "Edited via product editor");
           } else {
             const { id: _unused, stock: _stock, costPrice: _costPrice, ...rest } = v as any;
@@ -396,9 +402,32 @@ router.delete("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     const existing = await prisma.catalogProduct.findUnique({ where: { id: productId } });
     if (!existing) throw new NotFoundError("Product", productId);
 
-    await prisma.catalogProduct.update({ where: { id: productId }, data: { isActive: false } });
+    await prisma.catalogProduct.update({ where: { id: productId }, data: { isActive: false, deletedAt: new Date() } });
     memoCache.bust("ownerCatalogHealth");
     res.json({ success: true, message: "Product deactivated" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /:id/reject — turn a submission down, with a reason the seller will see ───
+// The product stays in the seller's list marked Rejected (they can fix it and re-save, which resubmits it)
+// instead of vanishing; it never goes live and it leaves the owner's pending queue.
+router.post("/:id/reject", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const productId = String(req.params.id);
+    const { reason } = z.object({ reason: z.string().trim().min(3, "Say why, so the seller can fix it").max(300) }).parse(req.body);
+    const existing = await prisma.catalogProduct.findUnique({ where: { id: productId }, include: { seller: { select: { ownerUserId: true } } } });
+    if (!existing) throw new NotFoundError("Product", productId);
+    await prisma.catalogProduct.update({
+      where: { id: productId },
+      data: { isActive: false, approvalStatus: "REJECTED", rejectionReason: reason },
+    });
+    memoCache.bust("ownerCatalogHealth");
+    if (existing.seller?.ownerUserId) {
+      notifyProductDecision(existing.seller.ownerUserId, existing.name, false, reason).catch((e: unknown) => console.error("[background task failed]", e));
+    }
+    res.json({ success: true, message: "Product rejected" });
   } catch (e) {
     sendError(res, e);
   }
@@ -410,11 +439,19 @@ router.patch("/:id/toggle", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const productId = String(req.params.id);
     const { isActive } = z.object({ isActive: z.boolean() }).parse(req.body);
-    const existing = await prisma.catalogProduct.findUnique({ where: { id: productId } });
+    const existing = await prisma.catalogProduct.findUnique({ where: { id: productId }, include: { seller: { select: { ownerUserId: true } } } });
     if (!existing) throw new NotFoundError("Product", productId);
 
-    await prisma.catalogProduct.update({ where: { id: productId }, data: { isActive } });
+    // Turning a submitted product ON is the approval (this is what the app's Approve button calls).
+    const approving = isActive && existing.approvalStatus !== "APPROVED";
+    await prisma.catalogProduct.update({
+      where: { id: productId },
+      data: { isActive, ...(approving ? { approvalStatus: "APPROVED", rejectionReason: null } : {}) },
+    });
     memoCache.bust("ownerCatalogHealth");
+    if (approving && existing.seller?.ownerUserId) {
+      notifyProductDecision(existing.seller.ownerUserId, existing.name, true).catch((e: unknown) => console.error("[background task failed]", e));
+    }
     res.json({ success: true, message: `Product ${isActive ? "activated" : "deactivated"}` });
   } catch (e) {
     sendError(res, e);

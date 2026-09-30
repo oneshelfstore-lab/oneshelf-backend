@@ -6,6 +6,7 @@ import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAu
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
 import { formatVariantForApp, fromAppFormat, toAppFormat, assertVariantFloors } from "../utils/looseUnitConverter.js";
 import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
+import { recordPriceChange } from "../services/priceHistory.js";
 import { SELLER_SALE } from "../services/sellerSales.js";
 import { calculateLineItemTax, calculateInvoiceTotals } from "../services/taxEngine.js";
 import {
@@ -88,6 +89,8 @@ function formatProductForApp(product: any) {
     imageUrls: product.imageUrls,
     searchKeywords: product.searchKeywords,
     isActive: product.isActive,
+    approvalStatus: product.approvalStatus,
+    rejectionReason: product.rejectionReason ?? null,
     createdAt: product.createdAt,
     variants: product.variants?.map((v: any) => {
       const base = formatVariantForApp(v, isLoose);
@@ -156,7 +159,7 @@ router.get("/", async (req: SellerRequest, res: Response) => {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
     const search = ((req.query.search as string) || "").slice(0, 100) || undefined;
 
-    const where: any = { sellerId: req.sellerId };
+    const where: any = { sellerId: req.sellerId, deletedAt: null };
     if (search) {
       where.OR = [
         { name: { contains: search, mode: "insensitive" } },
@@ -208,7 +211,7 @@ router.post("/", async (req: SellerRequest, res: Response) => {
           featuredIn99Store: featuredIn99Store ?? false,
           isBuyOneGetOne: isBuyOneGetOne ?? false,
         }
-      : { isActive: false };
+      : { isActive: false, approvalStatus: "PENDING" };
 
     let handle = productData.handle;
     if (await prisma.catalogProduct.findUnique({ where: { handle } })) handle = `${handle}-${Date.now().toString(36)}`;
@@ -293,7 +296,7 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
   try {
     const productId = String(req.params.id);
     const existing = await prisma.catalogProduct.findFirst({
-      where: { id: productId, sellerId: req.sellerId },
+      where: { id: productId, sellerId: req.sellerId, deletedAt: null },
       // Active only, matching the GET above: toRemove is derived from this list, so an
       // already-soft-deleted variant is no longer re-stamped isActive:false on every save.
       include: { variants: { where: { isActive: true } } },
@@ -337,6 +340,8 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
         delete updateData.isSampleEligible;
         delete updateData.featuredIn99Store;
         delete updateData.isBuyOneGetOne;
+        // Fixing and re-saving a rejected product IS the resubmission.
+        if (existing.approvalStatus === "REJECTED") { updateData.approvalStatus = "PENDING"; updateData.rejectionReason = null; }
       }
 
       if (Object.keys(updateData).length > 0) {
@@ -383,7 +388,9 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
             // applyStockEdit instead of overwriting them directly (was silently blending a
             // different-cost restock into the same row with no history).
             const { id: vid, stock: _stock, costPrice: _costPrice, ...rest } = v as any;
+            const before = await tx.productVariant.findUnique({ where: { id: vid }, select: { sellingPrice: true, mrp: true } });
             await tx.productVariant.update({ where: { id: vid }, data: { ...rest, mrp: c.mrp, sellingPrice: c.sellingPrice, saleFloor: c.saleFloor, bulkPrice: c.bulkPrice } });
+            if (before) await recordPriceChange(tx, vid, { sellingPrice: Number(before.sellingPrice), mrp: Number(before.mrp) }, { sellingPrice: c.sellingPrice, mrp: c.mrp }, "EDITOR", req.appUser?.name);
             await applyStockEdit(tx, vid, c.stock, c.costPrice, "Edited via product editor");
           } else {
             const { id: _unused, stock: _stock, costPrice: _costPrice, ...rest } = v as any;
@@ -414,7 +421,7 @@ router.delete("/:id", async (req: SellerRequest, res: Response) => {
     const productId = String(req.params.id);
     const existing = await prisma.catalogProduct.findFirst({ where: { id: productId, sellerId: req.sellerId } });
     if (!existing) throw new NotFoundError("Product", productId);
-    await prisma.catalogProduct.update({ where: { id: productId }, data: { isActive: false } });
+    await prisma.catalogProduct.update({ where: { id: productId }, data: { isActive: false, deletedAt: new Date() } });
     res.json({ success: true, message: "Product removed" });
   } catch (e) {
     sendError(res, e);
@@ -475,7 +482,11 @@ export function applyPriceRule(current: number, rule: BulkPriceRule): number {
     rule.mode === "PERCENT" ? current * (1 + rule.value / 100) :
     rule.mode === "AMOUNT" ? current + rule.value :
     rule.value;
-  return rule.roundToRupee ? Math.round(next) : Math.round(next * 100) / 100;
+  if (!rule.roundToRupee) return Math.round(next * 100) / 100;
+  // Whole rupees, except on small prices where a whole rupee is a big move: ₹4.5 − 5% is ₹4.28, and
+  // rounding that to ₹4 would be an 11% cut on a 5% rule. Under ₹10 the step is 50 paise.
+  const step = next < 10 ? 0.5 : 1;
+  return Math.round(next / step) * step;
 }
 
 /**
@@ -558,7 +569,7 @@ router.post("/bulk-price", async (req: SellerRequest, res: Response) => {
 
     for (const v of variants) {
       const app = toAppFormat(v, isLooseType(v.product.productType));
-      const row: Row = { variantId: v.id, name: `${v.product.name} · ${v.sku}` };
+      const row: Row = { variantId: v.id, name: `${v.product.name} · ${Number(v.packageSize)} ${v.packageUnit.toLowerCase()}` };
       const plan = planVariantReprice(app, v.bulkMinQty, p, req.sellerIsHouse === true);
       if (!plan.ok) skipped.push({ ...row, reason: plan.reason });
       else changes.push({ ...row, oldPrice: app.sellingPrice, newPrice: plan.newPrice, oldMrp: app.mrp, newMrp: plan.newMrp, oldStock: app.stock, newStock: app.stock });
@@ -574,7 +585,7 @@ router.post("/bulk-price", async (req: SellerRequest, res: Response) => {
     if (!p.dryRun && changes.length > 0) {
       const byId = new Map(variants.map((v) => [v.id, v]));
       await prisma.$transaction(
-        changes.map((c) => {
+        changes.flatMap((c) => {
           const v = byId.get(c.variantId)!;
           const conv = fromAppFormat(
             { mrp: c.newMrp, sellingPrice: c.newPrice, stock: 0, packageSize: Number(v.packageSize) },
@@ -582,10 +593,19 @@ router.post("/bulk-price", async (req: SellerRequest, res: Response) => {
           );
           // ONLY these two columns. stock/costPrice are the batch ledger's to write (receiveBatch is
           // the single writer) — fromAppFormat's stock/cost output is deliberately discarded here.
-          return prisma.productVariant.update({
-            where: { id: c.variantId },
-            data: { mrp: conv.mrp, sellingPrice: conv.sellingPrice },
-          });
+          return [
+            prisma.productVariant.update({
+              where: { id: c.variantId },
+              data: { mrp: conv.mrp, sellingPrice: conv.sellingPrice },
+            }),
+            // History in the same transaction, in the variant's own stored (base-unit) numbers.
+            prisma.priceChange.create({
+              data: {
+                variantId: c.variantId, source: "BULK_RULE", changedByName: req.appUser?.name ?? null,
+                oldPrice: v.sellingPrice, newPrice: conv.sellingPrice, oldMrp: v.mrp, newMrp: conv.mrp,
+              },
+            }),
+          ];
         }),
       );
     }
@@ -640,7 +660,7 @@ router.post("/bulk-update", async (req: SellerRequest, res: Response) => {
       // App format throughout, same as the rule-based route — the seller typed these numbers into a
       // sheet exported in app format (per-increment for loose), so they must be read back the same way.
       const app = toAppFormat(v, isLoose);
-      const row: Row = { variantId: v.id, name: `${v.product.name} · ${v.sku}` };
+      const row: Row = { variantId: v.id, name: `${v.product.name} · ${Number(v.packageSize)} ${v.packageUnit.toLowerCase()}` };
 
       const newPrice = r.sellingPrice ?? app.sellingPrice;
       const newMrp = r.mrp ?? app.mrp;
@@ -672,6 +692,7 @@ router.post("/bulk-update", async (req: SellerRequest, res: Response) => {
         await prisma.$transaction(async (tx) => {
           if (c.newPrice !== c.oldPrice || c.newMrp !== c.oldMrp) {
             await tx.productVariant.update({ where: { id: c.variantId }, data: { mrp: conv.mrp, sellingPrice: conv.sellingPrice } });
+            await recordPriceChange(tx, c.variantId, { sellingPrice: Number(v.sellingPrice), mrp: Number(v.mrp) }, { sellingPrice: conv.sellingPrice, mrp: conv.mrp }, "CSV", req.appUser?.name);
           }
           // Stock goes through the batch ledger, never a direct write — an increase restocks at the
           // variant's current weighted-average cost, a decrease is a stocktake correction. Same
@@ -795,6 +816,39 @@ router.post("/:id/stock/receive", async (req: SellerRequest, res: Response) => {
     });
 
     res.json({ success: true, message: "Stock received" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── GET /price-history — recent price/MRP changes on THIS seller's catalog ───────
+// ?variantId= narrows to one size (the product page); without it, the latest across the catalog.
+// Prices are converted to APP format (per-increment for loose) so they read like the inventory list.
+router.get("/price-history", async (req: SellerRequest, res: Response) => {
+  try {
+    const variantId = typeof req.query.variantId === "string" ? req.query.variantId : undefined;
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 30));
+    const rows = await prisma.priceChange.findMany({
+      where: { ...(variantId ? { variantId } : {}), variant: { product: { sellerId: req.sellerId } } },
+      orderBy: { createdAt: "desc" },
+      take: limit,
+      include: { variant: { select: { packageSize: true, packageUnit: true, product: { select: { name: true, productType: true } } } } },
+    });
+    const data = rows.map((r) => {
+      const loose = isLooseType(r.variant.product.productType);
+      const app = (n: unknown) =>
+        toAppFormat({ packageSize: r.variant.packageSize, mrp: n, sellingPrice: n, stock: 0 } as any, loose).sellingPrice;
+      return {
+        id: r.id,
+        variantId: r.variantId,
+        productName: r.variant.product.name,
+        size: `${Number(r.variant.packageSize)} ${r.variant.packageUnit.toLowerCase()}`,
+        oldPrice: app(r.oldPrice), newPrice: app(r.newPrice),
+        oldMrp: app(r.oldMrp), newMrp: app(r.newMrp),
+        source: r.source, changedBy: r.changedByName, at: r.createdAt.toISOString(),
+      };
+    });
+    res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);
   }

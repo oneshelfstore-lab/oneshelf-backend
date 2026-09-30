@@ -559,6 +559,17 @@ export async function notifyPartnerApproved(
   });
 }
 
+export async function notifyProductDecision(userId: string, productName: string, approved: boolean, reason?: string) {
+  const tokens = await getUserTokens(userId);
+  if (tokens.length === 0) return;
+  await sendToTokens(tokens, {
+    type: "product_decision",
+    approved: String(approved),
+    title: approved ? "Product approved" : "Product needs changes",
+    body: approved ? `${productName} is now live in the store.` : `${productName} was not approved: ${reason ?? "see the product for details"}`,
+  });
+}
+
 export async function notifyReferralReward(userId: string, amount: number) {
   const tokens = await getUserTokens(userId);
   if (tokens.length === 0) return;

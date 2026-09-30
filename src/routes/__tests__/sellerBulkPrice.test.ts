@@ -71,3 +71,13 @@ describe("planVariantReprice", () => {
     expect(r).toEqual({ ok: false, reason: "Already at this price." });
   });
 });
+
+describe("applyPriceRule rounding on small prices", () => {
+  it("does not turn a 5% cut on ₹4.5 into an 11% cut", () => {
+    // 4.5 × 0.95 = 4.275 — whole-rupee rounding would give ₹4; the 50-paise step gives ₹4.5.
+    expect(applyPriceRule(4.5, rule({ value: -5, roundToRupee: true }))).toBe(4.5);
+  });
+  it("still rounds to whole rupees from ₹10 up", () => {
+    expect(applyPriceRule(18, rule({ value: 3, roundToRupee: true }))).toBe(19);
+  });
+});

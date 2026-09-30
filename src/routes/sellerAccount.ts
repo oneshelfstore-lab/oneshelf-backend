@@ -85,6 +85,7 @@ async function shapeSellerProfile(s: any, agreementCurrent: boolean) {
     slug: s.slug,
     name: s.name,
     logoUrl: s.logoUrl,
+    coverUrl: s.coverUrl,
     shopAddress: s.shopAddress,
     city: s.city,
     pincode: s.pincode,
@@ -189,6 +190,8 @@ router.get("/", async (req: SellerRequest, res: Response) => {
 const updateSchema = z.object({
   name: z.string().min(1).max(120).optional(),
   logoUrl: z.string().max(500).optional().nullable(),
+  // Storefront photo for the customer's store card (GET /api/app/stores).
+  coverUrl: z.string().max(500).optional().nullable(),
   shopAddress: z.string().max(300).optional().nullable(),
   city: z.string().max(80).optional().nullable(),
   pincode: z.string().max(10).optional().nullable(),

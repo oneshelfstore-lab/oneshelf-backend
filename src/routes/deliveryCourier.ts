@@ -79,10 +79,15 @@ function riderView(b: {
 router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const me = req.appUser!.id;
-    const [rider, mine, pool] = await Promise.all([
+    const IST = 5.5 * 60 * 60 * 1000;
+    const istNow = new Date(Date.now() + IST);
+    const monthStart = new Date(Date.UTC(istNow.getUTCFullYear(), istNow.getUTCMonth(), 1) - IST);
+    const [rider, mine, pool, monthDelivered, rated] = await Promise.all([
       prisma.user.findUnique({ where: { id: me }, select: { lastLat: true, lastLng: true, lastSeenAt: true, isAvailableForDelivery: true } }),
       prisma.courierBooking.findMany({ where: { riderId: me, status: { in: ["ASSIGNED", "PICKED_UP"] } }, orderBy: { acceptedAt: "asc" } }),
       prisma.courierBooking.findMany({ where: { status: "SEARCHING", riderId: null, paymentStatus: "PAID" }, orderBy: { createdAt: "asc" }, take: 30 }),
+      prisma.courierBooking.count({ where: { riderId: me, status: "DELIVERED", deliveredAt: { gte: monthStart } } }),
+      prisma.courierBooking.aggregate({ where: { riderId: me, ratingStars: { not: null } }, _avg: { ratingStars: true }, _count: { ratingStars: true } }),
     ]);
     const hasFix = rider?.lastLat != null && rider?.lastLng != null && rider.lastSeenAt != null && Date.now() - rider.lastSeenAt.getTime() < 30 * 60_000;
     const near = pool.filter((b) => !hasFix || haversineKm(Number(rider!.lastLat), Number(rider!.lastLng), Number(b.pickupLat), Number(b.pickupLng)) <= POOL_RADIUS_KM);
@@ -92,6 +97,12 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
         // An offline rider sees their own job (they must be able to finish it) but not new work.
         available: rider?.isAvailableForDelivery ? near.map((b) => riderView(b, false)) : [],
         mine: mine.map((b) => riderView(b, true)),
+        // Their own courier month. A rating average is withheld until there are 3 — one bad day is not a rating.
+        stats: {
+          monthDelivered,
+          ratingCount: rated._count.ratingStars,
+          avgRating: rated._count.ratingStars >= 3 && rated._avg.ratingStars != null ? Math.round(rated._avg.ratingStars * 10) / 10 : null,
+        },
       },
     });
   } catch (e) {

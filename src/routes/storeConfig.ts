@@ -95,7 +95,9 @@ const updateSchema = z.object({
   // answered the GST question on the courier fee. Slabs/surcharge share the delivery-slab rails.
   courierEnabled: z.boolean().optional(),
   courierMaxKm: z.number().int().min(1).max(50).optional(),
-  courierPickupRadiusKm: z.number().int().min(1).max(200).optional().nullable(),
+  // 0 = clear (back to the delivery radius / unenforced). The Android app cannot send an explicit JSON null
+  // (Moshi omits nulls), so it sends 0 to clear the radius; the transform stores that as NULL.
+  courierPickupRadiusKm: z.number().int().min(0).max(200).optional().nullable().transform((v) => (v === 0 ? null : v)),
   courierSlabs: courierSlabsSchema.optional().nullable(),
   courierWeightSurcharge: weightSurchargeSchema.optional().nullable(),
   courierExpressFee: z.number().int().min(0).max(500).optional(),

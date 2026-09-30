@@ -6,6 +6,7 @@ import { firebaseAuthMiddleware, requireAppRole, type FirebaseAuthRequest } from
 import { signStoragePath } from "../lib/storageUrls.js";
 import { recordCourierEvent, cancelCourierBooking } from "../services/courier.js";
 import { assessBooking, FLAG_TEXT } from "../services/courierFlags.js";
+import { buildCourierReport } from "../services/courierReport.js";
 import { notifyCourierCustomer, notifyCourierRider } from "../services/fcmNotifier.js";
 
 /**
@@ -60,6 +61,44 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
       prisma.courierBooking.count({ where: { status: { in: ["FAILED", "SEARCHING"] } } }),
     ]);
     res.json({ success: true, data: { counts: { active, attention }, bookings: rows.map(summary) } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── GET /report?range=today|week|month|all ──────────────────────────
+// Declared BEFORE /:id so "report" is never read as a booking id.
+const REPORT_ROW_CAP = 5000;
+
+function reportSince(range: string): Date | null {
+  const IST = 5.5 * 60 * 60 * 1000;
+  if (range === "today") {
+    const n = new Date(Date.now() + IST);
+    return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate()) - IST); // IST midnight, as a UTC instant
+  }
+  if (range === "week") return new Date(Date.now() - 7 * 86_400_000);
+  if (range === "month") return new Date(Date.now() - 30 * 86_400_000);
+  return null;
+}
+
+router.get("/report", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const range = ["today", "week", "month", "all"].includes(String(req.query.range)) ? String(req.query.range) : "week";
+    const since = reportSince(range);
+    const rows = await prisma.courierBooking.findMany({
+      where: since ? { createdAt: { gte: since } } : {},
+      select: { status: true, total: true, deliveryFee: true, platformFee: true, createdAt: true, acceptedAt: true, deliveredAt: true, riderId: true, ratingStars: true },
+      orderBy: { createdAt: "desc" },
+      take: REPORT_ROW_CAP,
+    });
+    const riderIds = [...new Set(rows.map((r) => r.riderId).filter((x): x is string => !!x))];
+    const riders = riderIds.length ? await prisma.user.findMany({ where: { id: { in: riderIds } }, select: { id: true, name: true } }) : [];
+    const report = buildCourierReport(
+      rows.map((r) => ({ ...r, total: Number(r.total), deliveryFee: Number(r.deliveryFee), platformFee: Number(r.platformFee) })),
+      new Map(riders.map((u) => [u.id, u.name])),
+    );
+    // truncated = the window held more than the cap, so the figures cover the newest REPORT_ROW_CAP only.
+    res.json({ success: true, data: { range, truncated: rows.length >= REPORT_ROW_CAP, ...report } });
   } catch (e) {
     sendError(res, e);
   }
@@ -121,11 +160,22 @@ router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
     const p = reasonSchema.safeParse(req.body);
     if (!p.success) throw new ValidationError(p.error.errors[0]?.message ?? "Invalid request", p.error.errors);
     const id = String(req.params.id);
+    const before = await prisma.courierBooking.findUnique({ where: { id }, select: { riderId: true, status: true, number: true } });
     const r = await cancelCourierBooking(id, {
       actorType: "OWNER", actorId: req.appUser!.id, reason: p.data.reason,
       allowedFrom: ["PENDING_PAYMENT", "SEARCHING", "ASSIGNED", "PICKED_UP", "FAILED"],
     });
     if (r === "NOT_CANCELLABLE") throw new AppError(409, "NOT_CANCELLABLE", "This booking is already delivered or cancelled.");
+    // A rider already on (or carrying) it would otherwise only find out when the job vanishes on their next refresh.
+    if (before?.riderId && (before.status === "ASSIGNED" || before.status === "PICKED_UP")) {
+      notifyCourierRider(before.riderId, {
+        bookingId: id,
+        title: "Courier booking cancelled",
+        body: before.status === "PICKED_UP"
+          ? `${before.number} was cancelled by the store. Keep the parcel safe — the store will contact you.`
+          : `${before.number} was cancelled by the store. You don't need to collect it.`,
+      }).catch((e: unknown) => console.error("[background task failed]", e));
+    }
     const b = await prisma.courierBooking.findUnique({ where: { id }, select: { customerId: true, number: true, paymentStatus: true } });
     if (b) {
       notifyCourierCustomer(b.customerId, {
@@ -150,6 +200,7 @@ router.post("/:id/assign", async (req: FirebaseAuthRequest, res: Response) => {
     const busy = await prisma.courierBooking.count({ where: { riderId: rider.id, status: { in: ["ASSIGNED", "PICKED_UP"] }, NOT: { id } } });
     if (busy > 0) throw new ValidationError(`${rider.name} already has a courier parcel in hand.`);
 
+    const prior = await prisma.courierBooking.findUnique({ where: { id }, select: { riderId: true, number: true } });
     const ok = await prisma.$transaction(async (tx) => {
       // Only before pickup: once a rider holds the parcel, swapping who holds it on paper would break the chain of custody.
       const upd = await tx.courierBooking.updateMany({
@@ -162,6 +213,10 @@ router.post("/:id/assign", async (req: FirebaseAuthRequest, res: Response) => {
     });
     if (!ok) throw new ValidationError("Only a paid booking that hasn't been picked up can be assigned.");
 
+    if (prior?.riderId && prior.riderId !== rider.id) {
+      notifyCourierRider(prior.riderId, { bookingId: id, title: "Pickup reassigned", body: `${prior.number} was given to another delivery partner. You don't need to collect it.` })
+        .catch((e: unknown) => console.error("[background task failed]", e));
+    }
     const b = await prisma.courierBooking.findUnique({ where: { id }, select: { customerId: true, number: true } });
     if (b) {
       notifyCourierRider(rider.id, { bookingId: id, title: "Courier pickup assigned", body: `${b.number} has been assigned to you. Open the Courier tab.` })

@@ -174,6 +174,15 @@ export async function getDeletionBlockers(userId: string): Promise<DeletionBlock
       message: "You have a bulk order with a paid advance and a balance due. Complete or cancel it first.",
     });
   }
+  const inFlightCouriers = await prisma.courierBooking.count({
+    where: { OR: [{ customerId: userId }, { riderId: userId }], status: { in: ["PENDING_PAYMENT", "SEARCHING", "ASSIGNED", "PICKED_UP"] } },
+  });
+  if (inFlightCouriers > 0) {
+    blockers.push({
+      code: "IN_FLIGHT_COURIER",
+      message: `You have ${inFlightCouriers} courier booking${inFlightCouriers > 1 ? "s" : ""} in progress. Wait for delivery or cancel before deleting.`,
+    });
+  }
   if (inFlightOrders > 0) {
     blockers.push({
       code: "IN_FLIGHT_ORDERS",
@@ -321,6 +330,12 @@ export async function anonymizeUser(userId: string): Promise<string[]> {
     await tx.cartItem.deleteMany({ where: { userId } });
     await tx.fcmToken.deleteMany({ where: { userId } });
     await tx.favorite.deleteMany({ where: { userId } });
+    // Courier bookings are retained (payment record) but the people on them are scrubbed: the
+    // recipient is a THIRD PARTY whose name/number we hold only to serve this account.
+    await tx.courierBooking.updateMany({
+      where: { customerId: userId },
+      data: { recipientName: "Deleted", recipientPhone: "", pickupContactName: "Deleted", pickupContactPhone: "", dropLandmark: null },
+    });
 
     // NOTE: quoteRequests + complaints are RETAINED (a paid bulk-order advance is a financial
     // record; complaints are the owner's support history). PII is scrubbed via the user row below.

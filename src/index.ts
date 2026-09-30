@@ -30,6 +30,7 @@ import { publicBrandRouter, ownerBrandRouter, sellerBrandRouter } from "./routes
 import cartRoutes from "./routes/cart.js";
 import { appCouponRouter, adminCouponRouter, ownerCouponRouter } from "./routes/coupons.js";
 import orderRoutes from "./routes/orders.js";
+import courierRoutes from "./routes/courier.js";
 import ownerOrderRoutes from "./routes/ownerOrders.js";
 import adminOrderRoutes from "./routes/adminOrders.js";
 import deliveryRoutes from "./routes/delivery.js";
@@ -85,6 +86,7 @@ import { auditLoggerMiddleware } from "./middleware/auditLogger.js";
 import { globalErrorHandler } from "./middleware/errorHandler.js";
 import { initFirebase } from "./lib/firebase.js";
 import { startOrderExpirySweeper } from "./services/orderExpiry.js";
+import { startCourierSweeper } from "./services/courier.js";
 import { startAbandonedCartSweeper } from "./services/abandonedCart.js";
 import { startSubscriptionSweeper } from "./services/subscriptionEngine.js";
 import { startDeliveryEscalationSweeper } from "./services/deliveryEscalation.js";
@@ -412,6 +414,7 @@ app.use("/api/app/public/product-intake", productIntakeRoutes);
 app.use("/api/app/cart", cartRoutes);
 app.use("/api/app/coupons", appCouponRouter);
 app.use("/api/app/orders", orderRoutes);
+app.use("/api/app/courier", courierRoutes);
 // Authenticated half of /api/app/food (quote + place). Shares the mount path with the PUBLIC browse
 // router above: Express calls next() when a router matches no route, so /restaurants* is served
 // there and /quote + /orders fall through to here. ⚠️ Never add a catch-all to routes/food.ts or
@@ -559,6 +562,8 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Billing server running on http://0.0.0.0:${PORT}`);
   // Periodically release stock held by unpaid/abandoned online orders.
   startOrderExpirySweeper();
+  // Cancel + refund courier bookings that were never paid or never got a rider.
+  startCourierSweeper();
   // Nudge users who left items in cart (every 15 min, max 1 push per user per 24h).
   startAbandonedCartSweeper();
   // Generate due subscription orders + close monthly statements (backup driver — the external cron

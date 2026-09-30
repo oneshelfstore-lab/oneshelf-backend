@@ -455,6 +455,8 @@ model User {
   cartItems                CartItem[]
   orders                   Order[]                 @relation("CustomerOrders")
   deliveryOrders           Order[]                 @relation("DeliveryOrders")
+  courierBookings          CourierBooking[]        @relation("CourierCustomer")
+  courierJobs              CourierBooking[]        @relation("CourierRider")
   fcmTokens                FcmToken[]
   couponRedemptions        CouponRedemption[]
   favorites                Favorite[]
@@ -2013,6 +2015,24 @@ model StoreConfig {
   payoutRail                           String   @default("MANUAL")
   createdAt                            DateTime @default(now())
   updatedAt                            DateTime @updatedAt
+
+  // ── Courier vertical (COURIER_PLAN.md) ──
+  // Master kill switch — OFF until the CA has answered the GST question on the courier fee and the
+  // prohibited-items terms are reviewed. While off, /courier/quote and POST /courier refuse.
+  courierEnabled                       Boolean  @default(false)
+  // Longest pickup-to-drop distance (straight-line km) we will carry.
+  courierMaxKm                         Int      @default(10)
+  // Pickup must be within this many km of the store (storeLat/storeLng). NULL falls back to
+  // deliveryRadius; both NULL = unenforced.
+  courierPickupRadiusKm                Int?
+  // Distance slabs [{uptoKm, charge}] — same shape and rails as deliverySlabs. NULL = code default.
+  courierSlabs                         Json?
+  // Weight-band surcharge {UPTO_1, KG_1_3, KG_3_5, KG_5_10} in rupees. NULL = code default.
+  courierWeightSurcharge               Json?
+  courierExpressFee                    Int      @default(17)
+  courierPlatformFee                   Int      @default(3)
+  // Minutes a paid booking may sit in SEARCHING before it is auto-cancelled and refunded.
+  courierSearchTimeoutMin              Int      @default(10)
 }
 
 // ─── 15. Marketplace (multi-seller) ──────────────────────────────────
@@ -3067,4 +3087,121 @@ model PriceChange {
   createdAt     DateTime       @default(now())
 
   @@index([variantId, createdAt])
+}
+
+// ─── Courier (point-to-point parcel delivery) ────────────────────────
+// Deliberately NOT built on Order/SubOrder: a parcel has no seller, items, stock, commission or
+// invoice lines, and threading it through Order would need a "skip courier" filter in every Order
+// reader (owner board, invoices, GSTR, loyalty spend, the rider feed). See COURIER_PLAN.md §1.
+
+enum CourierStatus {
+  PENDING_PAYMENT
+  SEARCHING
+  ASSIGNED
+  PICKED_UP
+  DELIVERED
+  CANCELLED
+  FAILED
+}
+
+model CourierBooking {
+  id         String        @id @default(cuid())
+  number     String        @unique // CR/2627/00001
+  customerId String
+  customer   User          @relation("CourierCustomer", fields: [customerId], references: [id])
+  status     CourierStatus @default(PENDING_PAYMENT)
+
+  pickupLat          Decimal @db.Decimal(10, 7)
+  pickupLng          Decimal @db.Decimal(10, 7)
+  pickupAddress      String
+  pickupContactName  String
+  pickupContactPhone String
+
+  dropLat        Decimal @db.Decimal(10, 7)
+  dropLng        Decimal @db.Decimal(10, 7)
+  dropAddress    String
+  dropLandmark   String?
+  recipientName  String
+  recipientPhone String
+
+  // Plain strings validated by zod in routes/courier.ts (enum values live in services/courierPricing.ts)
+  parcelType        String // DOCUMENT | SMALL_PACKAGE | GROCERY_BAG | BOX | OTHER
+  weightBand        String // UPTO_1 | KG_1_3 | KG_3_5 | KG_5_10
+  declaredValueBand String // UPTO_500 | B500_2000 | B2000_5000
+  speed             String // STANDARD | EXPRESS
+  prohibitedAckAt   DateTime
+
+  // Price SNAPSHOT — computed server-side at booking and never recomputed, so a later slab change
+  // cannot alter what an old booking says it cost. total is the GROSS price; walletApplied is the
+  // part of it paid from store credit (so the Razorpay charge is total minus walletApplied).
+  distanceKm    Decimal @db.Decimal(6, 2)
+  deliveryFee   Decimal @db.Decimal(10, 2)
+  platformFee   Decimal @db.Decimal(10, 2)
+  total         Decimal @db.Decimal(10, 2)
+  walletApplied Decimal @default(0) @db.Decimal(10, 2)
+
+  paymentStatus     OrderPaymentStatus @default(PENDING)
+  razorpayOrderId   String?            @unique
+  razorpayPaymentId String?
+  idempotencyKey    String?
+
+  riderId String?
+  rider   User?   @relation("CourierRider", fields: [riderId], references: [id])
+
+  acceptedAt   DateTime?
+  pickedUpAt   DateTime?
+  deliveredAt  DateTime?
+  cancelledAt  DateTime?
+  cancelReason String?
+
+  // Storage OBJECT PATHS (signed on read), never download URLs — see lib/storageUrls.ts.
+  pickupPhotoPath String?
+  dropPhotoPath   String?
+
+  ratingStars   Int?
+  ratingComment String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  secret CourierSecret?
+  events CourierEvent[]
+
+  @@unique([customerId, idempotencyKey])
+  @@index([customerId, createdAt])
+  @@index([status, createdAt])
+  @@index([riderId, status])
+}
+
+// The two handoff codes live apart from the booking so they can never ride in a list select.
+// Same cooldown-not-lock rule as OrderSecret.
+model CourierSecret {
+  id                  String         @id @default(cuid())
+  bookingId           String         @unique
+  booking             CourierBooking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  pickupOtp           String         @db.VarChar(6)
+  deliveryOtp         String         @db.VarChar(6)
+  pickupAttempts      Int            @default(0)
+  pickupLockedUntil   DateTime?
+  deliveryAttempts    Int            @default(0)
+  deliveryLockedUntil DateTime?
+  createdAt           DateTime       @default(now())
+}
+
+// Append-only evidence trail: who, where, when, what. Nothing updates or deletes a row — a
+// correction is a NEW event. CourierBooking.status is only the cached latest.
+model CourierEvent {
+  id        String         @id @default(cuid())
+  bookingId String
+  booking   CourierBooking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  type      String // BOOKED | PAYMENT_CONFIRMED | RIDER_ASSIGNED | PICKED_UP | DELIVERED | CANCELLED | FAILED
+  actorType String // CUSTOMER | DELIVERY | OWNER | SYSTEM
+  actorId   String?
+  lat       Decimal?       @db.Decimal(10, 7)
+  lng       Decimal?       @db.Decimal(10, 7)
+  accuracyM Float?
+  metadata  Json?
+  createdAt DateTime       @default(now())
+
+  @@index([bookingId, createdAt])
 }

@@ -11,6 +11,8 @@ import {
 import { cacheControl, memoCache } from "../lib/httpCache.js";
 import { bustDeliveryPricingConfig } from "../services/deliveryPricing.js";
 import { bustFoodConfig } from "../services/foodMenu.js";
+import { bustCourierConfig } from "../services/courier.js";
+import { courierSlabsSchema, weightSurchargeSchema } from "../services/courierPricing.js";
 import { deliverySlabsInputSchema } from "../data/deliveryPricing.js";
 
 const router = Router();
@@ -89,6 +91,16 @@ const updateSchema = z.object({
   // Sec 9(5) position (MULTIVERTICAL_PLAN.md §4.4). Same discipline as tds194oEnabled.
   foodEnabled: z.boolean().optional(),
   foodCommissionPct: z.number().min(0).max(100).optional(),
+  // Courier vertical (COURIER_PLAN.md). courierEnabled is the master switch — OFF until the CA has
+  // answered the GST question on the courier fee. Slabs/surcharge share the delivery-slab rails.
+  courierEnabled: z.boolean().optional(),
+  courierMaxKm: z.number().int().min(1).max(50).optional(),
+  courierPickupRadiusKm: z.number().int().min(1).max(200).optional().nullable(),
+  courierSlabs: courierSlabsSchema.optional().nullable(),
+  courierWeightSurcharge: weightSurchargeSchema.optional().nullable(),
+  courierExpressFee: z.number().int().min(0).max(500).optional(),
+  courierPlatformFee: z.number().int().min(0).max(100).optional(),
+  courierSearchTimeoutMin: z.number().int().min(2).max(60).optional(),
 });
 
 // GET /api/app/config — public, no auth
@@ -141,6 +153,7 @@ router.put(
       // ⚠️ Load-bearing: resolveFoodConfig memoizes foodEnabled for 30s, so without this an owner
       // switching food OFF would leave restaurants orderable for up to half a minute afterwards.
       bustFoodConfig();
+      bustCourierConfig();
       res.json({ success: true, data: config });
     } catch (e) {
       sendError(res, e);

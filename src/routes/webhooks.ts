@@ -5,6 +5,7 @@ import { markOrderPaid } from "../services/orderPayment.js";
 import { reconcileOrderPayment } from "../services/paymentReconciliation.js";
 import { creditTopupByRazorpayOrder } from "../services/walletTopup.js";
 import { creditQuoteByRazorpayOrder } from "../services/quotePayment.js";
+import { confirmCourierPayment, reconcileCourierPayment } from "../services/courier.js";
 
 const router = Router();
 
@@ -43,6 +44,8 @@ router.post("/razorpay", async (req: Request, res: Response) => {
         // fetches the captured payment from Razorpay's API. Both paths are idempotent.
         if (razorpayPaymentId) await markOrderPaid(order.id, razorpayPaymentId);
         else await reconcileOrderPayment(order.id);
+      } else if (await handleCourierPayment(razorpayOrderId, razorpayPaymentId)) {
+        // Handled: a courier booking's payment (confirmed, or refunded if the booking had expired).
       } else if (razorpayPaymentId) {
         // Not an order → maybe a wallet top-up, else a bulk-quote payment, keyed by the same
         // Razorpay order id. Both are idempotent and short-circuit when the id isn't theirs.
@@ -60,5 +63,14 @@ router.post("/razorpay", async (req: Request, res: Response) => {
     res.json({ success: true });
   }
 });
+
+/** True when `razorpayOrderId` belongs to a courier booking (and has been handled). */
+async function handleCourierPayment(razorpayOrderId: string, razorpayPaymentId?: string): Promise<boolean> {
+  const booking = await prisma.courierBooking.findFirst({ where: { razorpayOrderId }, select: { id: true } });
+  if (!booking) return false;
+  if (razorpayPaymentId) await confirmCourierPayment(booking.id, razorpayPaymentId);
+  else await reconcileCourierPayment(booking.id);
+  return true;
+}
 
 export default router;

@@ -34,6 +34,7 @@ import {
 } from "../services/customerConsent.js";
 import { NOTICE_VERSION, GRIEVANCE_OFFICER } from "../data/customerPrivacyNotice.js";
 import { signUserPhoto } from "../lib/storageUrls.js";
+import { shoppingPrefsSchema, getShoppingPrefs, saveShoppingPrefs } from "../services/shoppingPrefs.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -235,6 +236,31 @@ router.put("/", async (req: FirebaseAuthRequest, res: Response) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════
+// Shopping preferences
+// ═══════════════════════════════════════════════════════════════════════
+
+// GET /api/app/me/preferences → { isSet, services, categories }. isSet=false = never asked.
+router.get("/preferences", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    res.json({ success: true, data: await getShoppingPrefs(req.appUser!.id) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// PUT /api/app/me/preferences — replaces the whole set (the screen always sends both lists).
+// Unknown category slugs are dropped, not rejected: a cached list can outlive a deleted category.
+router.put("/preferences", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = shoppingPrefsSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid preferences", parsed.error.errors);
+    res.json({ success: true, data: await saveShoppingPrefs(req.appUser!.id, parsed.data) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════
 // DPDP — consent, access (data export)
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -293,7 +319,7 @@ router.get("/data-export", async (req: FirebaseAuthRequest, res: Response) => {
         select: {
           id: true, name: true, email: true, phone: true, photoUrl: true, role: true,
           phoneVerified: true, createdAt: true, walletBalance: true, referralCode: true,
-          nomineeName: true, nomineePhone: true,
+          nomineeName: true, nomineePhone: true, shoppingPrefs: true,
         },
       }),
       prisma.address.findMany({ where: { userId } }),

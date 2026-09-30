@@ -437,6 +437,10 @@ model User {
   nomineeName  String?
   nomineePhone String?
 
+  // Shopping preferences ({services: string[], categories: slug[]}). NULL = never asked; see
+  // services/shoppingPrefs.ts. Scrubbed on account purge.
+  shoppingPrefs Json?
+
   // Membership (loyalty) tier-up push dedup — the last tier key we've observed/notified this user at.
   // NULL means "never observed" (first delivery after this feature ships records a silent baseline
   // instead of notifying, so an already-Gold customer doesn't get a false "you leveled up!" push).

@@ -1,4 +1,5 @@
 import { createHmac } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma.js";
 import { ConflictError } from "../lib/errors.js";
 import { admin, isFirebaseInitialized } from "../lib/firebase.js";
@@ -342,6 +343,7 @@ export async function anonymizeUser(userId: string): Promise<string[]> {
         // erasing the account without erasing them would leave someone else's PII behind.
         nomineeName: null,
         nomineePhone: null,
+        shoppingPrefs: Prisma.DbNull,
       },
     });
   });

@@ -1,5 +1,6 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
+import type { Order } from "@prisma/client";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError, AppError } from "../lib/errors.js";
 import {
@@ -15,14 +16,15 @@ import { rollScratchReward, getScratchForCelebration, revealScratchReward } from
 import { rollFreeSample, getFreeSampleReveal } from "../services/freeSample.js";
 import { getNextOrderNumber } from "../services/orderNumbering.js";
 import { createRazorpayOrder, verifyPaymentSignature, isRazorpayConfigured, refundPayment } from "../services/razorpay.js";
-import { notifyNewOrder, notifyOrderStatusChange, notifySubOrderNew, notifyOrderMessage } from "../services/fcmNotifier.js";
+import { notifyNewOrder, notifyOrderStatusChange, notifySubOrderNew, notifyOrderMessage, notifySubOrderCancelled, notifyNewComplaint } from "../services/fcmNotifier.js";
 import { shapeOrderMessage, sellerIdsForOrder, ownerUserIdsForSellers } from "../services/orderMessages.js";
 import { signOrderMedia, signOrderMediaList } from "../lib/storageUrls.js";
 import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 import { generateOrderInvoice, syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { generateInvoicePdf } from "../services/pdfGenerator.js";
 import { refundWalletOnCancel } from "../services/referralRewards.js";
-import { reverseSellerLedgerOnCancel, cancelOrder, claimRefund } from "../services/subOrderFulfillment.js";
+import { reverseSellerLedgerOnCancel, cancelOrder, claimRefund, cancelSubOrderAndRefund } from "../services/subOrderFulfillment.js";
+import { customerCancelInfo, shapeSubOrders, orderVertical, CANCEL_WINDOW_MESSAGE } from "../lib/customerOrderView.js";
 import { markOrderPaid } from "../services/orderPayment.js";
 import { reconcileOrderPayment } from "../services/paymentReconciliation.js";
 import { generateOtp, orderRequiresOtp, OTP_VISIBLE_STATUSES } from "../lib/otp.js";
@@ -631,12 +633,60 @@ router.post("/:id/reconcile", async (req: FirebaseAuthRequest, res: Response) =>
 
 // ─── POST /api/app/orders/:id/cancel — cancel order ────────────────
 
+// Everything that follows a WHOLE-order customer cancel once the status CAS has been won: refund,
+// spend re-tier, audit event, push, invoice sync, wallet refund, seller-ledger reversal. Shared by
+// POST /:id/cancel and the last-shop case of POST /:id/sub-orders/:subOrderId/cancel.
+async function settleCustomerOrderCancel(order: Order) {
+  // Refund any captured online payment. claimRefund is the CAS that decides who calls the gateway —
+  // without it, this path and reconcileOrderPayment's orphan-capture refund could both read
+  // paymentStatus PAID and both refund. The gateway call stays outside any transaction.
+  if (order.paymentStatus === "PAID" && order.razorpayPaymentId) {
+    if (await claimRefund(order.id, order.razorpayPaymentId)) {
+      try {
+        await refundPayment(order.razorpayPaymentId, Math.round(Number(order.totalAmount) * 100));
+        await prisma.order.update({
+          where: { id: order.id },
+          data: { paymentStatus: "REFUNDED" },
+        });
+      } catch (refundErr) {
+        // Logged; the order stays REFUND_INITIATED for manual follow-up (the cancellation stands).
+        console.error("Refund failed for order", order.id, refundErr);
+      }
+    }
+  }
+
+  // Cancelling removes this order from the rolling spend → re-tier the customer promptly.
+  bustUserSpend(order.customerId);
+
+  recordOrderEventAsync({
+    orderId: order.id,
+    fromState: order.status,
+    toState: "CANCELLED",
+    actorType: "CUSTOMER",
+    actorId: order.customerId,
+    reason: "cancelled by customer",
+  });
+
+  notifyOrderStatusChange({ ...order, status: "CANCELLED" }).catch((e: unknown) => console.error("[background task failed]", e));
+  syncInvoicePaymentStatus(order.id).catch((e) => console.error("Invoice sync failed:", e));
+  // Return any store credit that was applied to this order (idempotent; no-op if none).
+  refundWalletOnCancel(order.id).catch((e) => console.error("wallet refund failed:", e));
+  reverseSellerLedgerOnCancel(order.id).catch((e) => console.error("seller ledger reversal failed:", e));
+}
+
 router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const order = await prisma.order.findFirst({
       where: { id: String(req.params.id), customerId: req.appUser!.id },
     });
     if (!order) throw new NotFoundError("Order", String(req.params.id));
+
+    // ⚠️ The 3-minute rule lives HERE, not in the app: the old 30-minute window was client-only, so a
+    // stale build or a direct call could cancel at any time. A retry of a cancel that already went
+    // through must still read as success, so an already-cancelled order skips the window check.
+    if (["PLACED", "CONFIRMED"].includes(order.status) && !customerCancelInfo(order).canCancel) {
+      throw new ValidationError(CANCEL_WINDOW_MESSAGE);
+    }
 
     // Compare-and-swap: flips the status and restores stock in one transaction, and only for the
     // caller that actually wins the row. The status check used to live out here, which let a double
@@ -654,43 +704,96 @@ router.post("/:id/cancel", async (req: FirebaseAuthRequest, res: Response) => {
       return;
     }
 
-    // Refund any captured online payment. claimRefund is the CAS that decides who calls the gateway —
-    // without it, this path and reconcileOrderPayment's orphan-capture refund could both read
-    // paymentStatus PAID and both refund. The gateway call stays outside any transaction.
-    if (order.paymentStatus === "PAID" && order.razorpayPaymentId) {
-      if (await claimRefund(order.id, order.razorpayPaymentId)) {
-        try {
-          await refundPayment(order.razorpayPaymentId, Math.round(Number(order.totalAmount) * 100));
-          await prisma.order.update({
-            where: { id: order.id },
-            data: { paymentStatus: "REFUNDED" },
-          });
-        } catch (refundErr) {
-          // Logged; the order stays REFUND_INITIATED for manual follow-up (the cancellation stands).
-          console.error("Refund failed for order", order.id, refundErr);
-        }
-      }
+    await settleCustomerOrderCancel(order);
+
+    res.json({ success: true, message: "Order cancelled", data: { orderId: order.id, status: "CANCELLED" } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── POST /api/app/orders/:id/sub-orders/:subOrderId/cancel — cancel ONE shop's part ───────────
+// Same 3-minute window as the whole-order cancel, and only while that shop has NOT accepted (PLACED):
+// once it accepts it may already be packing. Reuses cancelSubOrderAndRefund — the same unwinding a
+// seller's own reject does (stock back, seller accrual reversed, that slice's share refunded, its
+// invoice voided). The delivery fee stays: the trip still happens for the shops that remain.
+// Cancelling the LAST live shop is a whole-order cancel and goes through the shared path instead.
+router.post("/:id/sub-orders/:subOrderId/cancel", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const order = await prisma.order.findFirst({
+      where: { id: String(req.params.id), customerId: req.appUser!.id },
+    });
+    if (!order) throw new NotFoundError("Order", String(req.params.id));
+    const sub = await prisma.subOrder.findFirst({
+      where: { id: String(req.params.subOrderId), orderId: order.id },
+      include: { seller: { select: { name: true, ownerUserId: true } } },
+    });
+    if (!sub) throw new NotFoundError("SubOrder", String(req.params.subOrderId));
+
+    // A retry of a cancel that already went through reads as success (see /:id/cancel).
+    if (sub.status === "CANCELLED") {
+      res.json({ success: true, data: { subOrderId: sub.id, orderCancelled: order.status === "CANCELLED", refunded: 0 } });
+      return;
+    }
+    if (!customerCancelInfo(order).canCancel) throw new ValidationError(CANCEL_WINDOW_MESSAGE);
+    if (sub.status !== "PLACED") {
+      throw new ValidationError(`${sub.seller.name} has already started on your items, so they can't be cancelled. Use Chat to reach the store.`);
     }
 
-    // Cancelling removes this order from the rolling spend → re-tier the customer promptly.
-    bustUserSpend(order.customerId);
+    const othersLive = await prisma.subOrder.count({
+      where: { orderId: order.id, id: { not: sub.id }, status: { not: "CANCELLED" } },
+    });
 
+    if (othersLive === 0) {
+      const outcome = await cancelOrder(order.id);
+      if (outcome === "NOT_CANCELLABLE") throw new ValidationError("This order just changed — refresh and try again.");
+      if (outcome === "CANCELLED") await settleCustomerOrderCancel(order);
+      res.json({ success: true, data: { subOrderId: sub.id, orderCancelled: true, refunded: Number(order.totalAmount) } });
+      return;
+    }
+
+    const r = await cancelSubOrderAndRefund(order.id, sub.id);
+    bustUserSpend(order.customerId);
     recordOrderEventAsync({
       orderId: order.id,
-      fromState: order.status,
+      subOrderId: sub.id,
+      fromState: sub.status,
       toState: "CANCELLED",
       actorType: "CUSTOMER",
       actorId: order.customerId,
-      reason: "cancelled by customer",
+      reason: `customer cancelled ${sub.seller.name}'s items`,
     });
+    if (sub.seller.ownerUserId) {
+      notifySubOrderCancelled(sub.seller.ownerUserId, { orderNumber: order.orderNumber })
+        .catch((e: unknown) => console.error("[background task failed]", e));
+    }
 
-    notifyOrderStatusChange({ ...order, status: "CANCELLED" }).catch((e: unknown) => console.error("[background task failed]", e));
-    syncInvoicePaymentStatus(order.id).catch((e) => console.error("Invoice sync failed:", e));
-    // Return any store credit that was applied to this order (idempotent; no-op if none).
-    refundWalletOnCancel(order.id).catch((e) => console.error("wallet refund failed:", e));
-    reverseSellerLedgerOnCancel(order.id).catch((e) => console.error("seller ledger reversal failed:", e));
+    // The two things cancelSubOrderAndRefund cannot settle by itself must not vanish silently: the
+    // store-credit share (WalletTransaction is unique per order+type, so it is reported, not
+    // auto-credited) and a seller who had already been paid. The owner's Complaints inbox is where
+    // that already lands for a seller reject, so use the same place.
+    if (r.storeCreditPortion > 0 || r.clawbackBlocked) {
+      const complaint = await prisma.complaint.create({
+        data: {
+          userId: order.customerId,
+          orderId: order.id,
+          subject: `Customer cancelled ${sub.seller.name}'s items on order #${order.orderNumber}`,
+          message:
+            `Refunded ₹${r.refunded.toFixed(2)} for this shop's items.` +
+            (r.storeCreditPortion > 0
+              ? ` ⚠️ ₹${r.storeCreditPortion.toFixed(2)} of it was paid with store credit — credit that back by hand.`
+              : "") +
+            (r.clawbackBlocked ? " This seller had already been paid; the next payout recovers it." : ""),
+        },
+      });
+      notifyNewComplaint({ id: complaint.id, subject: complaint.subject, customerName: order.shippingName || req.appUser!.name })
+        .catch((e: unknown) => console.error("[background task failed]", e));
+    }
 
-    res.json({ success: true, message: "Order cancelled", data: { orderId: order.id, status: "CANCELLED" } });
+    res.json({
+      success: true,
+      data: { subOrderId: sub.id, orderCancelled: false, refunded: r.refunded, refundToSource: r.refundToSource, storeCreditPortion: r.storeCreditPortion },
+    });
   } catch (e) {
     sendError(res, e);
   }
@@ -845,6 +948,16 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
           // variant.productId lets the app link a thumbnail straight to its product page —
           // OrderItem itself has no productId column, only variantId (same fix as GET /:id).
           items: { select: { productName: true, quantity: true, unitPrice: true, mrp: true, lineTotal: true, imageUrl: true, isLoose: true, stepSize: true, stepUnit: true, packageUnit: true, hsnCode: true, gstRate: true, variantId: true, isFreeGift: true, variant: { select: { productId: true } }, subOrder: { select: { seller: { select: { name: true, isHouse: true } } } } } },
+          // One row per shop, so a multi-shop order can be a single card with a per-shop breakdown.
+          // Every field the app reads has to be selected HERE — a field left out reads as a blank.
+          subOrders: {
+            select: {
+              id: true, status: true, subtotal: true, packedAt: true, collectedAt: true,
+              _count: { select: { items: true } },
+              seller: { select: { name: true, logoUrl: true, isHouse: true, vertical: true } },
+            },
+            orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+          },
         },
       }),
       prisma.order.count({ where: listWhere }),
@@ -865,9 +978,19 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     const otpByOrder = new Map(secrets.map((s) => [s.orderId, s.otp]));
     // Media fields hold Storage object PATHS — swap each for a 6h signed URL before it leaves.
     const data = await signOrderMediaList(
-      orders.map((o) => ({
+      orders.map((o) => {
+        const cancel = customerCancelInfo(o);
+        return {
         ...o,
         deliveryOtp: otpByOrder.get(o.id) ?? null,
+        vertical: orderVertical(o.subOrders),
+        canCancel: cancel.canCancel,
+        cancelableUntil: cancel.cancelableUntil,
+        // Named `shops`, NOT `subOrders`: the delivery feed already sends a `subOrders` in a different
+        // shape and the app parses that name into its rider-collection type. Raw rows are blanked so
+        // they never leak past the shaped list.
+        subOrders: undefined,
+        shops: shapeSubOrders(o.subOrders, cancel.canCancel),
         // Flatten the seller onto each item, matching GET /:id. A food order needs it so the list
         // card can name the restaurant; grocery gets its "Sold by" attribution here for free.
         items: o.items.map((it) => ({
@@ -876,7 +999,8 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
           sellerName: it.subOrder?.seller?.name ?? null,
           sellerIsHouse: it.subOrder?.seller?.isHouse ?? null,
         })),
-      })),
+        };
+      }),
     );
 
     res.json({
@@ -1055,6 +1179,14 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
           },
         },
         address: true,
+        subOrders: {
+          select: {
+            id: true, status: true, subtotal: true, packedAt: true, collectedAt: true,
+            _count: { select: { items: true } },
+            seller: { select: { name: true, logoUrl: true, isHouse: true, vertical: true } },
+          },
+          orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        },
       },
     });
     if (!order) throw new NotFoundError("Order", String(req.params.id));
@@ -1155,11 +1287,16 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     const riderId = order.deliveryBoyId;
     const onPickupLeg = riderId != null && order.status === "PACKED";
     const onDeliveryLeg = riderId != null && order.status === "OUT_FOR_DELIVERY";
+    // The rider's NAME is shown from the moment they are assigned, even before a fresh location fix
+    // exists (riderStatus below needs one) — a customer should see who is coming. The phone stays
+    // inside riderStatus and its gate.
+    let riderName: string | null = null;
     if (riderId && (onPickupLeg || onDeliveryLeg)) {
       const rider = await prisma.user.findUnique({
         where: { id: riderId },
         select: { name: true, phone: true, lastLat: true, lastLng: true, lastSeenAt: true },
       });
+      riderName = rider?.name ?? null;
       const fresh = rider?.lastSeenAt != null && Date.now() - rider.lastSeenAt.getTime() < 15 * 60 * 1000;
       if (rider && fresh && rider.lastLat != null && rider.lastLng != null) {
         // Read the destination pin directly rather than through order.address: `order`'s inferred
@@ -1253,11 +1390,17 @@ router.get("/:id", async (req: FirebaseAuthRequest, res: Response) => {
       }
     }
 
+    const cancel = customerCancelInfo(order);
     res.json({
       success: true,
       data: await signOrderMedia({
         ...order, items, freeSampleName: sampleName, freeSampleImageUrl: sampleImage, deliveryOtp, invoices,
-        riderStatus,
+        riderStatus, riderName,
+        vertical: orderVertical(order.subOrders),
+        canCancel: cancel.canCancel,
+        cancelableUntil: cancel.cancelableUntil,
+        subOrders: undefined, // see the list route: `shops` is the customer-facing name
+        shops: shapeSubOrders(order.subOrders, cancel.canCancel),
       }),
     });
   } catch (e) {

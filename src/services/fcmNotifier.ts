@@ -114,6 +114,19 @@ export async function notifySubOrderNew(
   });
 }
 
+// The customer cancelled THIS shop's part inside the 3-minute window — the seller's new-order card
+// disappears, so tell them why rather than let it vanish.
+export async function notifySubOrderCancelled(sellerOwnerUserId: string, info: { orderNumber: string }) {
+  const tokens = await getUserTokens(sellerOwnerUserId);
+  if (tokens.length === 0) return;
+  await sendToTokens(tokens, {
+    type: "sub_order_cancelled",
+    orderNumber: info.orderNumber,
+    title: `Order #${info.orderNumber} cancelled`,
+    body: "The customer cancelled your items on this order. Nothing to pack.",
+  });
+}
+
 // A seller just marked THEIR slice PACKED. Distinct from notifyOrderStatusChange (which only fires
 // once EVERY seller on a multi-seller order is done) — this gives the owner live per-seller progress,
 // and pings the already-assigned delivery agent directly so they don't have to poll for it.

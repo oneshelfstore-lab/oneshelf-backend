@@ -454,6 +454,7 @@ model User {
   fcmTokens                FcmToken[]
   couponRedemptions        CouponRedemption[]
   favorites                Favorite[]
+  favoriteStores           FavoriteStore[]
   stockAlerts              StockAlert[]
   orderRatings             OrderRating[]
   complaints               Complaint[]
@@ -648,6 +649,19 @@ model Favorite {
   createdAt DateTime       @default(now())
 
   @@unique([userId, productId])
+  @@index([userId])
+}
+
+// A customer's saved shops (the heart on the store page).
+model FavoriteStore {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sellerId  String
+  seller    Seller   @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, sellerId])
   @@index([userId])
 }
 
@@ -2133,6 +2147,7 @@ model Seller {
   subOrders          SubOrder[]
   payouts            SellerPayout[]
   complaints         Complaint[]
+  favoritedBy        FavoriteStore[]
   menuCategories     MenuCategory[]
   menuItems          MenuItem[]
   commissionRequests CommissionRequest[]

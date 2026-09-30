@@ -20,6 +20,7 @@ import companyRoutes from "./routes/company.js";
 import storeConfigRoutes from "./routes/storeConfig.js";
 import fcmTokenRoutes from "./routes/fcmTokens.js";
 import { publicStoresRouter } from "./routes/stores.js";
+import favoriteStoresRoutes from "./routes/favoriteStores.js";
 import { publicCategoryRouter, adminCategoryRouter, publicSuperCategoryRouter } from "./routes/categories.js";
 import ownerSuperCategoryRoutes from "./routes/ownerSuperCategories.js";
 import { publicCatalogRouter, adminCatalogRouter } from "./routes/catalog.js";
@@ -381,6 +382,7 @@ app.use("/api/app/me/fcm-token", fcmTokenRoutes);
 // Public app endpoints (no auth)
 app.use("/api/app/categories", publicCategoryRouter);
 app.use("/api/app/stores", publicStoresRouter);
+app.use("/api/app/me/favorite-stores", favoriteStoresRoutes);
 app.use("/api/app/super-categories", publicSuperCategoryRouter);
 app.use("/api/app/products", publicCatalogRouter);
 app.use("/api/app/banners", publicBannerRouter);

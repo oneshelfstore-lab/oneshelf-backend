@@ -53,13 +53,13 @@ router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
 
     const who = { select: { name: true, phone: true } };
     const [orders, quotes, complaints] = await Promise.all([
-      prisma.order.findMany({ where: { id: { in: [...lastOrder.keys()] } }, select: { id: true, orderNumber: true, status: true, customer: who } }),
+      prisma.order.findMany({ where: { id: { in: [...lastOrder.keys()] } }, select: { id: true, orderNumber: true, status: true, totalAmount: true, customer: who } }),
       prisma.quoteRequest.findMany({ where: { id: { in: [...lastQuote.keys()] } }, select: { id: true, type: true, status: true, user: who } }),
       prisma.complaint.findMany({ where: { id: { in: [...lastComplaint.keys()] } }, select: { id: true, subject: true, status: true, user: who } }),
     ]);
 
     const threads = [
-      ...orders.map((o) => ({ kind: "ORDER", id: o.id, title: `Order #${o.orderNumber.split("/").pop()}`, status: o.status, person: o.customer, last: lastOrder.get(o.id)! })),
+      ...orders.map((o) => ({ kind: "ORDER", id: o.id, title: `Order #${o.orderNumber.split("/").pop()}`, status: o.status, total: Number(o.totalAmount), person: o.customer, last: lastOrder.get(o.id)! })),
       ...quotes.map((q) => ({ kind: "QUOTE", id: q.id, title: `Bulk order QR-${q.id.slice(-6).toUpperCase()} · ${q.type}`, status: q.status, person: q.user, last: lastQuote.get(q.id)! })),
       ...complaints.map((c) => ({ kind: "COMPLAINT", id: c.id, title: `Complaint · ${c.subject}`, status: c.status, person: c.user, last: lastComplaint.get(c.id)! })),
     ]
@@ -68,6 +68,7 @@ router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
         id: t.id,
         title: t.title,
         status: t.status,
+        total: "total" in t ? t.total : null,
         customerName: t.person?.name ?? "",
         customerPhone: t.person?.phone ?? "",
         lastMessage: preview(t.last),

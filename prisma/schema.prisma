@@ -479,6 +479,7 @@ model User {
   orderRatings             OrderRating[]
   complaints               Complaint[]
   quoteRequests            QuoteRequest[]
+  savedLists               SavedList[]
   sellerAccount            Seller?                 @relation("SellerOwner")
   deliveryProfile          DeliveryProfile?
   cashSettlements          CashSettlement[]
@@ -3299,4 +3300,28 @@ model CourierEvent {
   createdAt DateTime       @default(now())
 
   @@index([bookingId, createdAt])
+}
+
+// Bulk Express: a customer's reusable grocery list. Stores the RAW lines ("Milk 2L"), not product
+// ids — they are re-matched against the live catalog each time it's used, so renamed/out-of-stock
+// products never leave a stale list.
+model SavedList {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String
+  lines      String[]  @default([])
+  createdAt  DateTime  @default(now())
+  lastUsedAt DateTime?
+
+  @@index([userId])
+}
+
+// Per-user, per-day count of list-photo scans (Gemini cost cap). Survives restarts / multiple instances.
+model ListOcrUsage {
+  userId String
+  day    String // "YYYY-MM-DD" UTC
+  count  Int    @default(0)
+
+  @@id([userId, day])
 }

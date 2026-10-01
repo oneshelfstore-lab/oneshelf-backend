@@ -273,6 +273,9 @@ app.use("/api/categories/import-csv", express.json({ limit: LARGE_BODY_LIMIT }))
 // Public intake form: up to 200 products × 20 variants (and separately rate-limited in its router).
 app.use("/api/app/public/product-intake", express.json({ limit: LARGE_BODY_LIMIT }));
 
+// Grocery-list photo → text (Bulk Express). The client downscales to ~1280px JPEG (<1 MB raw, ~1.4 MB base64).
+app.use("/api/app/me/list-ocr", express.json({ limit: "3mb" }));
+
 // Everything else. A real request on this API — place an order, save a product, update config — is
 // a few KB; 512 KB is already generous headroom.
 app.use(express.json({ limit: "512kb" }));

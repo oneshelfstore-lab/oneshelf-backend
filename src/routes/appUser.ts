@@ -7,6 +7,7 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { admin, isFirebaseInitialized } from "../lib/firebase.js";
+import { readGroceryList, takeOcrQuota, OcrNotConfiguredError } from "../lib/listOcr.js";
 import { formatProductForApp } from "./catalog.js";
 import { computeUserSavings } from "../services/savings.js";
 import { computeUserLoyalty } from "../services/loyalty.js";
@@ -1119,6 +1120,80 @@ router.post("/complaints/:id/messages", async (req: FirebaseAuthRequest, res: Re
   } catch (e) {
     sendError(res, e);
   }
+});
+
+const listOcrSchema = z.object({
+  imageBase64: z.string().min(100).max(2_800_000),
+  mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]).default("image/jpeg"),
+});
+
+// POST /api/app/me/list-ocr → photo of a grocery list → { lines: ["Milk 2L", ...] } (matching happens on-device)
+router.post("/list-ocr", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = listOcrSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid image", parsed.error.errors);
+    if (!(await takeOcrQuota(req.appUser!.id))) {
+      return void res.status(429).json({ success: false, error: "Daily list-scan limit reached. You can still send the list as a bulk request." });
+    }
+    try {
+      const lines = await readGroceryList(parsed.data.imageBase64, parsed.data.mimeType);
+      res.json({ success: true, data: { lines } });
+    } catch (e) {
+      if (e instanceof OcrNotConfiguredError) {
+        return void res.status(503).json({ success: false, error: "List scanning isn't available right now." });
+      }
+      console.warn("list-ocr failed:", e);
+      res.status(502).json({ success: false, error: "Couldn't read that list. Try a clearer photo." });
+    }
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+const savedListSchema = z.object({
+  name: z.string().trim().min(1).max(60),
+  lines: z.array(z.string().trim().min(1).max(120)).min(1).max(100),
+});
+const shapeSavedList = (l: { id: string; name: string; lines: string[]; createdAt: Date; lastUsedAt: Date | null }) => ({
+  id: l.id, name: l.name, lines: l.lines, createdAt: l.createdAt.getTime(), lastUsedAt: l.lastUsedAt?.getTime() ?? null,
+});
+
+// GET /api/app/me/saved-lists → the customer's saved grocery lists (most recently used first)
+router.get("/saved-lists", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const rows = await prisma.savedList.findMany({ where: { userId: req.appUser!.id }, take: 50 });
+    rows.sort((a, b) => (b.lastUsedAt ?? b.createdAt).getTime() - (a.lastUsedAt ?? a.createdAt).getTime());
+    res.json({ success: true, data: rows.map(shapeSavedList) });
+  } catch (e) { sendError(res, e); }
+});
+
+// POST /api/app/me/saved-lists → save a list (max 50 per customer)
+router.post("/saved-lists", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const parsed = savedListSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid list", parsed.error.errors);
+    if ((await prisma.savedList.count({ where: { userId: req.appUser!.id } })) >= 50) {
+      throw new ValidationError("You can keep up to 50 saved lists. Delete one first.", []);
+    }
+    const row = await prisma.savedList.create({ data: { userId: req.appUser!.id, ...parsed.data } });
+    res.status(201).json({ success: true, data: shapeSavedList(row) });
+  } catch (e) { sendError(res, e); }
+});
+
+// POST /api/app/me/saved-lists/:id/use → stamp lastUsedAt (drives "Last used …" + sort order)
+router.post("/saved-lists/:id/use", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    await prisma.savedList.updateMany({ where: { id: String(req.params.id), userId: req.appUser!.id }, data: { lastUsedAt: new Date() } });
+    res.json({ success: true, data: null });
+  } catch (e) { sendError(res, e); }
+});
+
+// DELETE /api/app/me/saved-lists/:id
+router.delete("/saved-lists/:id", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    await prisma.savedList.deleteMany({ where: { id: String(req.params.id), userId: req.appUser!.id } });
+    res.json({ success: true, data: null });
+  } catch (e) { sendError(res, e); }
 });
 
 const quoteRequestSchema = z.object({

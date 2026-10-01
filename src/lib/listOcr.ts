@@ -4,7 +4,8 @@
 
 import prisma from "./prisma.js";
 
-const MODEL =process.env.GEMINI_MODEL || "gemini-2.5-flash";
+// "-latest" alias: pinned names (gemini-2.5-flash) get retired for new keys and then 404.
+const MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
 
 const PROMPT =
   "This is a photo of a grocery shopping list (handwritten or typed, English/Hindi/Hinglish). " +
@@ -18,7 +19,7 @@ export async function readGroceryList(imageBase64: string, mimeType: string): Pr
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new OcrNotConfiguredError("GEMINI_API_KEY not set");
 
-  const resp = await fetch(
+  const call = () => fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
     {
       method: "POST",
@@ -34,6 +35,12 @@ export async function readGroceryList(imageBase64: string, mimeType: string): Pr
       signal: AbortSignal.timeout(30_000),
     },
   );
+  let resp = await call();
+  // Google sheds load with 503/429 in spikes; one short retry clears most of them.
+  if (resp.status === 503 || resp.status === 429) {
+    await new Promise((r) => setTimeout(r, 1500));
+    resp = await call();
+  }
   if (!resp.ok) throw new Error(`Gemini ${resp.status}`);
   const json: any = await resp.json();
   const text: string = json?.candidates?.[0]?.content?.parts?.[0]?.text ?? "[]";

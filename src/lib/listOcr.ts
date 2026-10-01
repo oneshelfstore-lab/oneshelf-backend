@@ -56,6 +56,11 @@ export async function readGroceryList(imageBase64: string, mimeType: string): Pr
   }
   if (!resp?.ok) throw new Error(`Gemini ${resp?.status ?? "unreachable"}`);
   const json: any = await resp.json();
+  // Real token counts per scan, to turn the price table into actual ₹ (thoughts are billed as output).
+  const u = json?.usageMetadata;
+  if (u) {
+    console.info(`list-ocr usage model=${json.modelVersion ?? "?"} in=${u.promptTokenCount} out=${u.candidatesTokenCount} thoughts=${u.thoughtsTokenCount ?? 0}`);
+  }
   const text: string = json?.candidates?.[0]?.content?.parts?.[0]?.text ?? "[]";
   const lines = JSON.parse(text);
   if (!Array.isArray(lines)) return [];

@@ -443,3 +443,15 @@ describe("price-change alert (ordered within the ceiling)", () => {
     expect(h.notify.notifyRoutinePriceUp).not.toHaveBeenCalled();
   });
 });
+
+describe("delivery instructions", () => {
+  it("the routine's note is copied onto the generated order", async () => {
+    await generateRoutineOrder(routine({ deliveryNote: "Leave it at the door" }), DAY, null);
+    expect(orderData().notes).toBe("Leave it at the door");
+  });
+
+  it("no note → the order has none (not an empty string)", async () => {
+    await generateRoutineOrder(routine(), DAY, null);
+    expect(orderData().notes).toBeNull();
+  });
+});

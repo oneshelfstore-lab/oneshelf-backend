@@ -1454,6 +1454,8 @@ model Subscription {
   // the normal estimate (sum of item price snapshots) by more than this. ABSOLUTE = ₹, PERCENT = % of estimate.
   priceCeilingType  PriceCeilingType @default(ABSOLUTE)
   priceCeilingValue Decimal          @default(30) @db.Decimal(10, 2)
+  // "Leave it at the door" — copied onto every order this routine generates (Order.notes).
+  deliveryNote      String?
   // Run total at the last "prices went up" push, so a lasting rise alerts once and again only if it moves
   // further — not every morning. Null = no alert outstanding.
   lastAlertedTotal  Decimal?         @db.Decimal(10, 2)

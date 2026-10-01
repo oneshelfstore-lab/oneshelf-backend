@@ -157,6 +157,8 @@ const browseSchema = z.object({
   q: z.string().max(100).optional(),
   category: z.string().max(50).optional(),
   sellerId: z.string().max(40).optional(),
+  // "true" → only owner-flagged routine items (the routine builder's "Add another item" picker).
+  routine: z.enum(["true", "false"]).optional(),
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(50).default(20),
 });
@@ -166,9 +168,10 @@ publicCatalogRouter.get("/", cacheControl(CATALOG_LIST_TTL), async (req: Request
   try {
     const parsed = browseSchema.safeParse(req.query);
     if (!parsed.success) throw new ValidationError("Invalid query", parsed.error.errors);
-    const { q, category, sellerId, page, limit } = parsed.data;
+    const { q, category, sellerId, routine, page, limit } = parsed.data;
 
     const where: any = { isActive: true, ...SELLER_TRADING };
+    if (routine === "true") where.isSubscribable = true;
 
     if (q) {
       where.OR = [

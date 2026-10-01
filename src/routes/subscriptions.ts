@@ -83,6 +83,8 @@ const createSchema = z.preprocess(
     // AUTOPAY = UPI mandate (inert until a live Razorpay merchant + a set-up mandate exist).
     billing: z.enum(["COD", "WALLET", "AUTOPAY"]).default("WALLET"),
     deliverySlotId: z.enum(DELIVERY_SLOT_IDS).default("MORNING"),
+    // "Leave it at the door" — copied onto every generated order.
+    deliveryNote: z.string().trim().max(200).optional(),
     ...ceilingShape,
     ...cadenceShape,
   }),
@@ -96,6 +98,7 @@ const updateSchema = z.object({
   addressId: z.string().min(1).optional(),
   billing: z.enum(["COD", "WALLET", "AUTOPAY"]).optional(),
   deliverySlotId: z.enum(DELIVERY_SLOT_IDS).optional(),
+  deliveryNote: z.string().trim().max(200).optional().nullable(), // "" or null clears it
   ...ceilingShape,
   frequency: z.enum(["DAILY", "WEEKLY", "MONTHLY", "CUSTOM"]).optional(),
   intervalDays: z.number().int().min(1).max(90).optional().nullable(),
@@ -376,6 +379,7 @@ export async function createRoutineForUser(userId: string, d: CreateRoutineInput
       productName: name, // legacy display title — what old app builds show
       imageUrl: itemRows[0]!.imageUrl,
       deliverySlotId: d.deliverySlotId,
+      deliveryNote: d.deliveryNote || null,
       priceCeilingType: d.priceCeilingType ?? "ABSOLUTE",
       priceCeilingValue: d.priceCeilingValue ?? 30,
       frequency: d.frequency,
@@ -567,6 +571,7 @@ router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
           name: d.name ?? undefined,
           productName: d.name ?? undefined, // legacy display title mirrors the name for old app builds
           deliverySlotId: d.deliverySlotId ?? undefined,
+          deliveryNote: d.deliveryNote === undefined ? undefined : d.deliveryNote || null,
           priceCeilingType: d.priceCeilingType ?? undefined,
           priceCeilingValue: d.priceCeilingValue ?? undefined,
           addressId: d.addressId ?? undefined,

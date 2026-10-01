@@ -280,6 +280,8 @@ export interface RoutineRow {
   priceCeilingValue: unknown;
   /** Run total at the last "prices went up" push (null = none outstanding). */
   lastAlertedTotal?: unknown;
+  /** Delivery instructions, copied onto each generated order. */
+  deliveryNote?: string | null;
   items?: { id: string; variantId: string; productName: string; imageUrl: string | null; quantity: unknown; unitPriceSnapshot: unknown; substitution?: string }[];
   // LEGACY single-product columns — only read when `items` is empty (see resolveRoutineItems).
   variantId?: string | null;
@@ -547,6 +549,7 @@ export async function generateRoutineOrder(
           totalAmount: plan.totalAmount,
           savedAmount: plan.savedAmount,
           walletApplied: walletFunded ? total : 0,
+          notes: sub.deliveryNote ?? null, // the routine's delivery instructions travel with every order
           deliveryOtpRequired: false,
           deliveryBoyId: defaultAgentId,
           subscriptionId: sub.id,

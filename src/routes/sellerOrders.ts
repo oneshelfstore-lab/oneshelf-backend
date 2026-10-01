@@ -113,6 +113,10 @@ async function shape(so: any) {
     // Customer's special request (text) + recorded voice note — the co-manager packing these
     // items needs them too (clarifies item names STT mangles), not just the delivery agent.
     notes: so.order?.notes ?? null,
+    // The ready-by time the CUSTOMER was quoted at placement (food orders only; null for shop orders).
+    // Deliberately not recomputed at accept time — the promise was made when they ordered, so a late
+    // accept shows as overdue instead of quietly sliding the deadline.
+    prepDueAt: so.order?.estimatedReadyAt ?? null,
     voiceNoteUrl: await signStoragePath(so.order?.voiceNoteUrl),
     // Signed on read — the column stores a bare Storage object path, which is not loadable.
     packPhotoUrl: await signStoragePath(so.packPhotoUrl),
@@ -142,7 +146,7 @@ const PAYMENT_SETTLED: Prisma.SubOrderWhereInput = {
 };
 
 const ORDER_INCLUDE = {
-  order: { select: { orderNumber: true, status: true, fulfillmentType: true, shippingName: true, shippingPhone: true, shippingAddress: true, shippingPincode: true, address: { select: { lat: true, lng: true } }, notes: true, voiceNoteUrl: true, subscriptionId: true } },
+  order: { select: { orderNumber: true, status: true, fulfillmentType: true, shippingName: true, shippingPhone: true, shippingAddress: true, shippingPincode: true, address: { select: { lat: true, lng: true } }, notes: true, voiceNoteUrl: true, subscriptionId: true, estimatedReadyAt: true } },
   items: { select: { id: true, productName: true, variantSku: true, imageUrl: true, quantity: true, unitPrice: true, lineTotal: true, isLoose: true, stepSize: true, stepUnit: true } },
 } as const;
 

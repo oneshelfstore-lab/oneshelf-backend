@@ -55,6 +55,66 @@ export function isRestaurantOpen(
 }
 
 /**
+ * Has the seller shut the kitchen by hand (and not yet reopened, by hand or by timer)?
+ *
+ * ⚠️ `reopenAt` only counts when it is AFTER `closedSince`. Every close path must reset it, but if one
+ * ever forgets (the owner's own switch in ownerSellers.ts is one), a stale past `reopenAt` from an
+ * old closure would otherwise make a brand-new closure read as "already reopened" and the restaurant
+ * would silently keep taking orders. Requiring reopenAt > closedSince makes that impossible.
+ */
+export function isKitchenClosed(
+  closedSince: Date | null | undefined,
+  reopenAt: Date | null | undefined,
+  now: Date = new Date(),
+): boolean {
+  if (!closedSince) return false;
+  const timerApplies = reopenAt != null && reopenAt.getTime() > closedSince.getTime();
+  return !(timerApplies && reopenAt!.getTime() <= now.getTime());
+}
+
+/** Taking orders = inside the usual hours AND not shut by hand. The one answer browse and checkout both use. */
+export function isKitchenOpen(
+  s: {
+    openTime: string | null | undefined;
+    closeTime: string | null | undefined;
+    closedSince: Date | null | undefined;
+    reopenAt: Date | null | undefined;
+  },
+  now: Date = new Date(),
+): boolean {
+  return isRestaurantOpen(s.openTime, s.closeTime, now) && !isKitchenClosed(s.closedSince, s.reopenAt, now);
+}
+
+/**
+ * Reconcile foodType (new clients) and isVeg (older builds) into one pair that always agree:
+ * isVeg === (foodType is VEG). Egg is therefore non-veg to an old build, matching the green/red dot rule.
+ * Neither supplied = untouched, so a partial update never resets a dish to VEG.
+ */
+export function normaliseFoodType<T extends { foodType?: "VEG" | "EGG" | "NON_VEG"; isVeg?: boolean }>(d: T): T {
+  const foodType = d.foodType ?? (d.isVeg === undefined ? undefined : d.isVeg ? "VEG" : "NON_VEG");
+  if (foodType === undefined) return d;
+  return { ...d, foodType, isVeg: foodType === "VEG" };
+}
+
+/** A dish on a timed 86. Past (or null) = back on. */
+export function isTempUnavailable(until: Date | null | undefined, now: Date = new Date()): boolean {
+  return until != null && until.getTime() > now.getTime();
+}
+
+/**
+ * The next time the IST wall clock reads [hhmm] — strictly in the future, so "until closing" asked
+ * at exactly closing time means tomorrow's, not "now". Blank/garbled = IST midnight. Server-side on
+ * purpose: the client sends a choice, never a timestamp (same rule as busy mode), and the phone's own
+ * timezone isn't ours to trust.
+ */
+export function nextIstOccurrence(hhmm: string | null | undefined, now: Date = new Date()): Date {
+  const target = parseHhMm(hhmm) ?? 0;
+  let delta = (target - istMinutesOfDay(now) + 1440) % 1440;
+  if (delta === 0) delta = 1440;
+  return new Date(Math.floor(now.getTime() / 60_000) * 60_000 + delta * 60_000);
+}
+
+/**
  * A per-item serving window ("breakfast until 11:00"). Deliberately the SAME function as the
  * restaurant’s own hours — the semantics are identical, including a close BEFORE the open meaning a
  * past-midnight window, and both-null meaning "no window, always". Aliased rather than copied so

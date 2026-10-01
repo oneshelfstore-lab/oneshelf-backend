@@ -65,3 +65,72 @@ describe("isRestaurantOpen", () => {
     expect(isRestaurantOpen("00:00", "00:00", at(20, 0))).toBe(true);
   });
 });
+
+// ─── F1: closed by hand, timed reopen, timed 86 ─────────────────────────────────────────────────
+import { isKitchenClosed, isKitchenOpen, isTempUnavailable, nextIstOccurrence } from "../foodMenu.js";
+
+describe("isKitchenClosed", () => {
+  const closedAt = at(10);
+  it("is open when never closed", () => {
+    expect(isKitchenClosed(null, null, at(12))).toBe(false);
+  });
+  it("stays closed with no reopen time (manual reopen only)", () => {
+    expect(isKitchenClosed(closedAt, null, at(20))).toBe(true);
+  });
+  it("reopens by itself once the timer passes, and not a minute before", () => {
+    const reopen = at(11);
+    expect(isKitchenClosed(closedAt, reopen, at(10, 59))).toBe(true);
+    expect(isKitchenClosed(closedAt, reopen, at(11))).toBe(false);
+  });
+  it("ignores a STALE reopenAt left over from an earlier closure", () => {
+    // Closed again at 15:00; the old timer said 11:00. Reading it as "already reopened" would let a
+    // freshly closed kitchen keep taking orders.
+    expect(isKitchenClosed(at(15), at(11), at(16))).toBe(true);
+  });
+});
+
+describe("isKitchenOpen", () => {
+  it("needs BOTH the usual hours and no manual close", () => {
+    const base = { openTime: "10:00", closeTime: "23:00", closedSince: null, reopenAt: null };
+    expect(isKitchenOpen(base, at(8))).toBe(true); // 13:30 IST
+    expect(isKitchenOpen({ ...base, closedSince: at(7) }, at(8))).toBe(false);
+    expect(isKitchenOpen(base, at(20))).toBe(false); // 01:30 IST, outside hours
+  });
+});
+
+describe("isTempUnavailable", () => {
+  it("is true only while the timer is in the future", () => {
+    expect(isTempUnavailable(null, at(10))).toBe(false);
+    expect(isTempUnavailable(at(11), at(10))).toBe(true);
+    expect(isTempUnavailable(at(11), at(11))).toBe(false);
+  });
+});
+
+describe("nextIstOccurrence", () => {
+  it("finds the next time that wall clock reads, today or tomorrow", () => {
+    // 08:00 UTC = 13:30 IST. 23:00 IST today is 17:30 UTC.
+    expect(nextIstOccurrence("23:00", at(8)).toISOString()).toBe("2026-09-02T17:30:00.000Z");
+    // Already past 11:00 IST -> tomorrow's 11:00 IST = 05:30 UTC next day.
+    expect(nextIstOccurrence("11:00", at(8)).toISOString()).toBe("2026-09-03T05:30:00.000Z");
+  });
+  it("is strictly in the future, even asked exactly on the minute", () => {
+    expect(nextIstOccurrence("13:30", at(8)).toISOString()).toBe("2026-09-03T08:00:00.000Z");
+  });
+  it("falls back to IST midnight when blank", () => {
+    expect(nextIstOccurrence(null, at(8)).toISOString()).toBe("2026-09-02T18:30:00.000Z");
+  });
+});
+
+import { normaliseFoodType } from "../foodMenu.js";
+describe("normaliseFoodType", () => {
+  it("derives isVeg from foodType, so an old build never sees egg as veg", () => {
+    expect(normaliseFoodType({ foodType: "EGG" })).toEqual({ foodType: "EGG", isVeg: false });
+    expect(normaliseFoodType({ foodType: "VEG" })).toEqual({ foodType: "VEG", isVeg: true });
+  });
+  it("maps an old client's isVeg to a foodType", () => {
+    expect(normaliseFoodType({ isVeg: false })).toEqual({ isVeg: false, foodType: "NON_VEG" });
+  });
+  it("leaves a partial update that mentions neither alone", () => {
+    expect(normaliseFoodType({})).toEqual({});
+  });
+});

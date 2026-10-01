@@ -5,7 +5,7 @@ import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { memoCache } from "../lib/httpCache.js";
 import { SELLER_SALE } from "../services/sellerSales.js";
-import { isSellerBusy } from "../services/foodMenu.js";
+import { isSellerBusy, isKitchenClosed, nextIstOccurrence } from "../services/foodMenu.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
 import {
@@ -120,7 +120,10 @@ async function shapeSellerProfile(s: any, agreementCurrent: boolean) {
     busyUntil: isSellerBusy(s.busyUntil) ? s.busyUntil.toISOString() : null,
     busyExtraMinutes: isSellerBusy(s.busyUntil) ? s.busyExtraMinutes : 0,
     // Shop closed by the seller (POST /store-status). Null = open.
-    closedSince: s.closedSince ? s.closedSince.toISOString() : null,
+    // EFFECTIVE close: a timed close (food) that has run out reads as open again, with no cron.
+    closedSince: isKitchenClosed(s.closedSince, s.reopenAt) ? s.closedSince!.toISOString() : null,
+    reopenAt: isKitchenClosed(s.closedSince, s.reopenAt) && s.reopenAt ? s.reopenAt.toISOString() : null,
+    closedReason: isKitchenClosed(s.closedSince, s.reopenAt) ? s.closedReason : null,
     // ─── Onboarding KYC (Phase 1) ──
     fssaiNumber: s.fssaiNumber,
     fssaiExpiry: s.fssaiExpiry,
@@ -627,22 +630,60 @@ router.post("/busy", async (req: SellerRequest, res: Response) => {
 });
 
 // ─── POST /store-status — the seller's Open/Closed switch ────────────────────────────────────────
-// Closing does NOT hide anything or refuse orders: customers keep buying, and the orders wait for the
-// seller to open again (the dashboard tells them so). No expiry either — only a tap reopens the shop,
-// because a timer reopening a shop whose owner has gone home is worse than one left closed.
+// SHOP: closing does NOT hide anything or refuse orders — customers keep buying, the orders wait for the
+// seller, and only a tap reopens the shop (a timer reopening a shop whose owner has gone home is worse
+// than one left closed).
+// FOOD (owner decision D2, FOOD_SELLER_PLAN.md): the opposite. Food cannot wait in a queue, so a closed
+// kitchen is shown as Closed and checkout refuses it (foodMenu.isKitchenOpen), and the close may carry a
+// duration so it reopens by itself. The client sends a CHOICE (minutes / until next opening), never a
+// timestamp — the server owns the clock, as with busy mode.
+const storeStatusSchema = z.object({
+  open: z.boolean(),
+  minutes: z.number().int().min(5).max(4320).optional(),
+  untilNextOpening: z.boolean().optional(),
+  reason: z.enum(["TOO_BUSY", "KITCHEN_CLOSED", "STAFF_SHORTAGE", "OTHER"]).optional(),
+});
 router.post("/store-status", async (req: SellerRequest, res: Response) => {
   try {
-    const parsed = z.object({ open: z.boolean() }).safeParse(req.body);
+    const parsed = storeStatusSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Say whether the store is open");
-    const current = await prisma.seller.findUnique({ where: { id: req.sellerId! }, select: { closedSince: true } });
-    // Closing an already-closed shop keeps the ORIGINAL time — "closed since 6 PM" stays true.
-    const closedSince = parsed.data.open ? null : (current?.closedSince ?? new Date());
+    const { open, minutes, untilNextOpening, reason } = parsed.data;
+    const now = new Date();
+    const current = await prisma.seller.findUnique({
+      where: { id: req.sellerId! },
+      select: { closedSince: true, reopenAt: true, closedReason: true, openTime: true },
+    });
+    // Closing an already-closed shop keeps the ORIGINAL time ("closed since 6 PM" stays true) — but
+    // only while that closure is still in force. A timed close that already ran out is a fresh closure.
+    const stillClosed = isKitchenClosed(current?.closedSince, current?.reopenAt, now);
+    const closedSince = open ? null : (stillClosed ? current!.closedSince : now);
+    // Only a restaurant gets a timer; a shop closed with a duration just closes (the app never sends one).
+    const isFood = req.sellerVertical === "FOOD";
+    const reopenAt = open || !isFood ? null
+      : minutes ? new Date(now.getTime() + minutes * 60_000)
+      : untilNextOpening ? nextIstOccurrence(current?.openTime, now)
+      : null;
     const seller = await prisma.seller.update({
       where: { id: req.sellerId! },
-      data: { closedSince },
-      select: { closedSince: true },
+      data: { closedSince, reopenAt, closedReason: open ? null : (reason ?? null) },
+      select: { closedSince: true, reopenAt: true, closedReason: true },
     });
-    res.json({ success: true, data: { closedSince: seller.closedSince ? seller.closedSince.toISOString() : null } });
+    // Paper trail: who closed the restaurant, when, why. Best-effort — never fails the switch.
+    prisma.auditLog.create({
+      data: {
+        userId: req.appUser!.id, action: "UPDATE", entityType: "Seller", entityId: req.sellerId!,
+        oldValues: { closed: stillClosed } as any,
+        newValues: { closed: !open, reopenAt: reopenAt?.toISOString() ?? null, reason: reason ?? null } as any,
+      },
+    }).catch((e: unknown) => console.warn("store-status audit write failed (non-fatal):", e));
+    res.json({
+      success: true,
+      data: {
+        closedSince: seller.closedSince ? seller.closedSince.toISOString() : null,
+        reopenAt: seller.reopenAt ? seller.reopenAt.toISOString() : null,
+        closedReason: seller.closedReason,
+      },
+    });
   } catch (e) {
     sendError(res, e);
   }

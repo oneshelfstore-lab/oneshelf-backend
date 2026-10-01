@@ -2163,6 +2163,11 @@ model Seller {
   // auto-expiry and NOT a storefront filter: a closed shop's products stay on sale, orders still come
   // in, and they're fulfilled the next day it opens. Only the seller (or owner) reopens it by hand.
   closedSince      DateTime?
+  // Food only. When set (and AFTER closedSince) the restaurant reopens by itself at this time —
+  // evaluated at read time, no cron (same idea as busyUntil). Grocery never sets it, so a shop still
+  // only reopens by hand. See services/foodMenu.ts isKitchenClosed for the staleness rule.
+  reopenAt         DateTime?
+  closedReason     String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2189,6 +2194,12 @@ model Seller {
 // customer catalog query would then need `productType != MENU_ITEM`, and this codebase has already
 // paid for that kind of filter-spreading once (SELLER_TRADING across ~12 query sites) — miss one and
 // a biryani appears in grocery search. Separate tables make that impossible by construction.
+
+enum FoodType {
+  VEG
+  EGG
+  NON_VEG
+}
 
 model MenuCategory {
   id       String @id @default(cuid())
@@ -2219,6 +2230,12 @@ model MenuItem {
   imageUrl    String?
   price       Decimal @db.Decimal(10, 2)
   isVeg       Boolean @default(true)
+  // VEG / EGG / NON_VEG. isVeg stays and is DERIVED from this on every write (isVeg = foodType VEG) so
+  // older app builds that only read isVeg keep working — egg reads as non-veg to them, as the
+  // green/red dot convention has it.
+  foodType     FoodType @default(VEG)
+  // Owner-set "Popular" tag. A toggle, not a computed rank, so it can never claim what orders don't show.
+  isBestseller Boolean  @default(false)
 
   // ⚠️ TWO different off-switches, and conflating them is the bug to avoid. `isAvailable` is the
   // "86 it" toggle — sold out for today, back tomorrow, one tap, the single most-used action in a
@@ -2226,6 +2243,9 @@ model MenuItem {
   // must require BOTH; the seller's own menu editor shows inactive rows so they can be revived.
   isAvailable Boolean @default(true)
   isActive    Boolean @default(true)
+  // Temporary 86: unavailable until this time (30 min / 1 h / until closing), then back by itself —
+  // read-time, no cron. A FOURTH off-switch alongside the three above; isAvailable stays true while it runs.
+  unavailableUntil DateTime?
 
   prepMinutes   Int     @default(20)
   // Per-item serving window, "HH:MM" IST wall clock — same shape and same parser as the restaurant's

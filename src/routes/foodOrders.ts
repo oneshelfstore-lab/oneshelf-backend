@@ -4,7 +4,7 @@ import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, type FirebaseAuthRequest } from "../middleware/firebaseAuth.js";
 import {
-  resolveFoodConfig, isRestaurantOpen, RESTAURANT_TRADING,
+  resolveFoodConfig, isKitchenOpen, isTempUnavailable, RESTAURANT_TRADING,
   isWithinWindow, effectivePrepMinutes,
 } from "../services/foodMenu.js";
 import { computeFoodOrderTotals, type FoodLineInput } from "../services/foodPricing.js";
@@ -92,7 +92,7 @@ async function priceOrder(
     select: {
       id: true, name: true, commissionPct: true, minOrderValue: true, lat: true, lng: true,
       openTime: true, closeTime: true, avgPrepMinutes: true,
-      busyUntil: true, busyExtraMinutes: true,
+      busyUntil: true, busyExtraMinutes: true, closedSince: true, reopenAt: true,
       ownerUserId: true, isHouse: true, pan: true, entityType: true,
     },
   });
@@ -105,7 +105,7 @@ async function priceOrder(
     where: { id: { in: [...wanted.keys()] }, sellerId: restaurant.id, isActive: true },
     select: {
       id: true, name: true, imageUrl: true, price: true, gstRate: true,
-      sacCode: true, prepMinutes: true, isAvailable: true,
+      sacCode: true, prepMinutes: true, isAvailable: true, unavailableUntil: true,
       availableFrom: true, availableTo: true,
     },
   });
@@ -113,7 +113,9 @@ async function priceOrder(
   const missing = [...wanted.keys()].filter((id) => !rows.some((r) => r.id === id));
   if (missing.length > 0) throw new ValidationError("Some items are no longer on the menu");
   // 86'd items are named, because "something is unavailable" leaves the customer guessing which.
-  const unavailable = rows.filter((r) => !r.isAvailable).map((r) => r.name);
+  // A timed 86 counts as sold out too — enforced here, not just hidden on the menu, for the same
+  // stale-menu reason as the serving window below.
+  const unavailable = rows.filter((r) => !r.isAvailable || isTempUnavailable(r.unavailableUntil)).map((r) => r.name);
   if (unavailable.length > 0) {
     throw new ValidationError(`Sold out right now: ${unavailable.join(", ")}`);
   }
@@ -179,7 +181,7 @@ async function priceOrder(
       minOrderValue: Number(restaurant.minOrderValue),
       lat: restaurant.lat != null ? Number(restaurant.lat) : null,
       lng: restaurant.lng != null ? Number(restaurant.lng) : null,
-      isOpen: isRestaurantOpen(restaurant.openTime, restaurant.closeTime),
+      isOpen: isKitchenOpen(restaurant),
       ownerUserId: restaurant.ownerUserId,
       isHouse: restaurant.isHouse,
       pan: restaurant.pan,

@@ -5,7 +5,7 @@ import { cacheControl } from "../lib/httpCache.js";
 import { haversineKm } from "../lib/distance.js";
 import {
   resolveFoodConfig, isRestaurantOpen, RESTAURANT_TRADING,
-  isSellerBusy, effectivePrepMinutes, isWithinWindow,
+  isSellerBusy, effectivePrepMinutes, isWithinWindow, isKitchenOpen, isTempUnavailable,
 } from "../services/foodMenu.js";
 
 /**
@@ -48,7 +48,7 @@ router.get("/restaurants", cacheControl(BROWSE_TTL_SECONDS), async (req: Request
       select: {
         id: true, name: true, slug: true, logoUrl: true, cuisines: true,
         openTime: true, closeTime: true, avgPrepMinutes: true, minOrderValue: true,
-        busyUntil: true, busyExtraMinutes: true,
+        busyUntil: true, busyExtraMinutes: true, closedSince: true, reopenAt: true,
         lat: true, lng: true, shopAddress: true, city: true,
       },
     });
@@ -70,7 +70,8 @@ router.get("/restaurants", cacheControl(BROWSE_TTL_SECONDS), async (req: Request
         slug: r.slug,
         logoUrl: r.logoUrl,
         cuisines: (r.cuisines ?? "").split(",").map((c) => c.trim()).filter(Boolean),
-        isOpen: isRestaurantOpen(r.openTime, r.closeTime, now),
+        // Hours AND not shut by hand — a seller who tapped Close must stop appearing as open.
+        isOpen: isKitchenOpen(r, now),
         openTime: r.openTime,
         closeTime: r.closeTime,
         // ⚠️ The INFLATED figure while busy, not the raw column. This is what makes a slammed
@@ -119,7 +120,7 @@ router.get("/restaurants/:id", cacheControl(BROWSE_TTL_SECONDS), async (req: Req
       select: {
         id: true, name: true, slug: true, logoUrl: true, cuisines: true, phone: true,
         openTime: true, closeTime: true, avgPrepMinutes: true, minOrderValue: true,
-        busyUntil: true, busyExtraMinutes: true,
+        busyUntil: true, busyExtraMinutes: true, closedSince: true, reopenAt: true,
         lat: true, lng: true, shopAddress: true, city: true,
         fssaiNumber: true,
         // Rule 6 (Consumer Protection E-Commerce Rules) disclosure, same as the grocery listing.
@@ -134,8 +135,8 @@ router.get("/restaurants/:id", cacheControl(BROWSE_TTL_SECONDS), async (req: Req
               orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
               select: {
                 id: true, name: true, description: true, imageUrl: true, price: true,
-                isVeg: true, isAvailable: true, prepMinutes: true,
-                availableFrom: true, availableTo: true,
+                isVeg: true, foodType: true, isBestseller: true, isAvailable: true, prepMinutes: true,
+                availableFrom: true, availableTo: true, unavailableUntil: true,
               },
             },
           },
@@ -157,7 +158,7 @@ router.get("/restaurants/:id", cacheControl(BROWSE_TTL_SECONDS), async (req: Req
         logoUrl: seller.logoUrl,
         cuisines: (seller.cuisines ?? "").split(",").map((c) => c.trim()).filter(Boolean),
         phone: seller.phone,
-        isOpen: isRestaurantOpen(seller.openTime, seller.closeTime, new Date()),
+        isOpen: isKitchenOpen(seller, new Date()),
         openTime: seller.openTime,
         closeTime: seller.closeTime,
         avgPrepMinutes: effectivePrepMinutes(seller.avgPrepMinutes, seller.busyUntil, seller.busyExtraMinutes),
@@ -183,12 +184,15 @@ router.get("/restaurants/:id", cacheControl(BROWSE_TTL_SECONDS), async (req: Req
               imageUrl: i.imageUrl,
               price: Number(i.price),
               isVeg: i.isVeg,
+              foodType: i.foodType,
+              isBestseller: i.isBestseller,
               // ⚠️ COMBINED on purpose: on the CUSTOMER endpoint isAvailable has always meant
               // "can I order this right now", so the serving window folds into it and the client
               // needs no clock logic of its own (the parser is IST-aware; the phone is not).
               // The seller’s own editor reads the raw 86 flag from sellerMenu.ts — different
               // endpoint, different question.
-              isAvailable: i.isAvailable && isWithinWindow(i.availableFrom, i.availableTo, now2),
+              // A timed 86 (back in 30 min) folds in here too — to the customer it is just "not orderable now".
+              isAvailable: i.isAvailable && isWithinWindow(i.availableFrom, i.availableTo, now2) && !isTempUnavailable(i.unavailableUntil, now2),
               // Carried so the client can say "Available 7:00–11:00" instead of "Sold out" — an
               // item outside its window has NOT run out, and saying so would be a lie the customer
               // acts on by giving up.

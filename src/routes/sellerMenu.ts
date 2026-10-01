@@ -4,6 +4,7 @@ import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
+import { isTempUnavailable, nextIstOccurrence, normaliseFoodType } from "../services/foodMenu.js";
 
 /**
  * Restaurant menu management. Mounted at /api/app/seller/menu (MULTIVERTICAL_PLAN.md §4.5).
@@ -42,7 +43,7 @@ const categorySchema = z.object({
 /** "HH:MM" 24h, or absent/blank meaning "no window". Shared by both window fields. */
 const hhMm = z.preprocess(
   (v) => (typeof v === "string" && v.trim() === "" ? null : v),
-  z.string().regex(/^([01]d|2[0-3]):[0-5]d$/, "Use HH:MM").optional().nullable(),
+  z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Use HH:MM").optional().nullable(),
 );
 
 const itemSchema = z.object({
@@ -51,7 +52,10 @@ const itemSchema = z.object({
   description: z.string().trim().max(500).optional().nullable(),
   imageUrl: z.string().trim().max(500).optional().nullable(),
   price: z.number().positive().max(100000),
+  // New clients send foodType; an older build sends only isVeg. normaliseFoodType() reconciles the two.
+  foodType: z.enum(["VEG", "EGG", "NON_VEG"]).optional(),
   isVeg: z.boolean().optional(),
+  isBestseller: z.boolean().optional(),
   isAvailable: z.boolean().optional(),
   isActive: z.boolean().optional(),
   prepMinutes: z.number().int().min(1).max(240).optional(),
@@ -65,6 +69,13 @@ const itemSchema = z.object({
   availableTo: hhMm,
 });
 
+/** Paper trail for money-affecting menu changes (price, availability). Best-effort — never fails the edit. */
+function audit(req: SellerRequest, entityId: string, oldValues: object, newValues: object) {
+  prisma.auditLog
+    .create({ data: { userId: req.appUser!.id, action: "UPDATE", entityType: "MenuItem", entityId, oldValues: oldValues as any, newValues: newValues as any } })
+    .catch((e: unknown) => console.warn("menu audit write failed (non-fatal):", e));
+}
+
 function shapeItem(i: any) {
   return {
     id: i.id,
@@ -74,7 +85,11 @@ function shapeItem(i: any) {
     imageUrl: i.imageUrl,
     price: Number(i.price),
     isVeg: i.isVeg,
+    foodType: i.foodType,
+    isBestseller: i.isBestseller,
     isAvailable: i.isAvailable,
+    // Only while the timer is still running — a past value is sent as null so the app just asks "non-null?".
+    unavailableUntil: isTempUnavailable(i.unavailableUntil) ? i.unavailableUntil.toISOString() : null,
     isActive: i.isActive,
     prepMinutes: i.prepMinutes,
     availableFrom: i.availableFrom,
@@ -122,6 +137,22 @@ router.post("/categories", async (req: SellerRequest, res: Response) => {
       data: { ...parsed.data, sellerId: req.sellerId! },
     });
     res.json({ success: true, data: { id: created.id } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+/** Sets the customer-facing section order: ids in the order wanted. Foreign ids simply match no row. */
+router.put("/categories/reorder", async (req: SellerRequest, res: Response) => {
+  try {
+    const parsed = z.object({ ids: z.array(z.string().min(1)).min(1).max(100) }).safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid order");
+    await prisma.$transaction(
+      parsed.data.ids.map((id, i) =>
+        prisma.menuCategory.updateMany({ where: { id, sellerId: req.sellerId! }, data: { sortOrder: i } }),
+      ),
+    );
+    res.json({ success: true, data: { count: parsed.data.ids.length } });
   } catch (e) {
     sendError(res, e);
   }
@@ -179,7 +210,7 @@ router.post("/items", async (req: SellerRequest, res: Response) => {
     if (!cat) throw new ValidationError("Unknown menu category");
 
     const created = await prisma.menuItem.create({
-      data: { ...parsed.data, sellerId: req.sellerId! },
+      data: { ...normaliseFoodType(parsed.data), sellerId: req.sellerId! },
     });
     res.json({ success: true, data: shapeItem(created) });
   } catch (e) {
@@ -199,11 +230,17 @@ router.put("/items/:id", async (req: SellerRequest, res: Response) => {
       });
       if (!cat) throw new ValidationError("Unknown menu category");
     }
+    const before = parsed.data.price !== undefined
+      ? await prisma.menuItem.findFirst({ where: { id, sellerId: req.sellerId! }, select: { price: true } })
+      : null;
     const r = await prisma.menuItem.updateMany({
       where: { id, sellerId: req.sellerId! },
-      data: parsed.data,
+      data: normaliseFoodType(parsed.data),
     });
     if (r.count === 0) throw new NotFoundError("Menu item", id);
+    if (before && Number(before.price) !== parsed.data.price) {
+      audit(req, id, { price: Number(before.price) }, { price: parsed.data.price });
+    }
     res.json({ success: true, data: { id } });
   } catch (e) {
     sendError(res, e);
@@ -217,17 +254,40 @@ router.put("/items/:id", async (req: SellerRequest, res: Response) => {
  * ⚠️ Deliberately distinct from isActive (removed from the menu entirely). Conflating them means a
  * dish that ran out at lunch quietly vanishes from the menu forever.
  */
+const availabilitySchema = z.object({
+  isAvailable: z.boolean(),
+  // A TIMED 86 — only meaningful with isAvailable:false. 30 min, 1 h … or untilClosing. Neither = off
+  // until the seller switches it back on. The client sends a choice, never a timestamp (server clock).
+  minutes: z.number().int().min(5).max(1440).optional(),
+  untilClosing: z.boolean().optional(),
+});
 router.patch("/items/:id/availability", async (req: SellerRequest, res: Response) => {
   try {
     const id = String(req.params.id ?? "");
-    const parsed = z.object({ isAvailable: z.boolean() }).safeParse(req.body);
+    const parsed = availabilitySchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("isAvailable is required");
+    const { isAvailable, minutes, untilClosing } = parsed.data;
+
+    let unavailableUntil: Date | null = null;
+    if (!isAvailable && minutes) {
+      unavailableUntil = new Date(Date.now() + minutes * 60_000);
+    } else if (!isAvailable && untilClosing) {
+      const s = await prisma.seller.findUnique({ where: { id: req.sellerId! }, select: { closeTime: true } });
+      unavailableUntil = nextIstOccurrence(s?.closeTime);
+    }
+    // A timed 86 leaves isAvailable TRUE — the dish comes back by itself when the timer runs out. A plain
+    // "off" sets it false (back only when switched on). Switching ON clears both.
+    const timed = unavailableUntil != null;
     const r = await prisma.menuItem.updateMany({
       where: { id, sellerId: req.sellerId! },
-      data: { isAvailable: parsed.data.isAvailable },
+      data: { isAvailable: timed ? true : isAvailable, unavailableUntil },
     });
     if (r.count === 0) throw new NotFoundError("Menu item", id);
-    res.json({ success: true, data: { id, isAvailable: parsed.data.isAvailable } });
+    audit(req, id, {}, { isAvailable, unavailableUntil: unavailableUntil?.toISOString() ?? null });
+    res.json({
+      success: true,
+      data: { id, isAvailable, unavailableUntil: unavailableUntil ? unavailableUntil.toISOString() : null },
+    });
   } catch (e) {
     sendError(res, e);
   }

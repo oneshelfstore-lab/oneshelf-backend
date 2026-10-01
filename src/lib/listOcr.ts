@@ -4,8 +4,15 @@
 
 import prisma from "./prisma.js";
 
-// "-latest" alias: pinned names (gemini-2.5-flash) get retired for new keys and then 404.
-const MODEL = process.env.GEMINI_MODEL || "gemini-flash-latest";
+// Tried in order; a model that is overloaded (503/429) or retired for this key (404) is skipped.
+// ponytail: pinned names retire (gemini-2.5-flash already 404s) — re-check with ListModels now and then.
+const MODELS = [
+  ...(process.env.GEMINI_MODEL ? [process.env.GEMINI_MODEL] : []),
+  "gemini-3.5-flash",
+  "gemini-3.6-flash",
+  "gemini-3.1-flash-lite",
+  "gemini-flash-lite-latest",
+];
 
 const PROMPT =
   "This is a photo of a grocery shopping list (handwritten or typed, English/Hindi/Hinglish). " +
@@ -19,8 +26,8 @@ export async function readGroceryList(imageBase64: string, mimeType: string): Pr
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new OcrNotConfiguredError("GEMINI_API_KEY not set");
 
-  const call = () => fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
+  const call = (model: string) => fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     {
       method: "POST",
       headers: { "content-type": "application/json", "x-goog-api-key": key },
@@ -32,16 +39,22 @@ export async function readGroceryList(imageBase64: string, mimeType: string): Pr
           temperature: 0,
         },
       }),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(20_000),
     },
   );
-  let resp = await call();
-  // Google sheds load with 503/429 in spikes; one short retry clears most of them.
-  if (resp.status === 503 || resp.status === 429) {
-    await new Promise((r) => setTimeout(r, 1500));
-    resp = await call();
+  let resp!: Response;
+  for (const model of MODELS) {
+    try {
+      resp = await call(model);
+    } catch (e) {
+      console.warn(`list-ocr ${model} network/timeout:`, e);
+      continue;
+    }
+    if (resp.ok) break;
+    console.warn(`list-ocr ${model} -> ${resp.status}`);
+    if (![503, 429, 404].includes(resp.status)) break; // a real error (400/403): other models won't help
   }
-  if (!resp.ok) throw new Error(`Gemini ${resp.status}`);
+  if (!resp?.ok) throw new Error(`Gemini ${resp?.status ?? "unreachable"}`);
   const json: any = await resp.json();
   const text: string = json?.candidates?.[0]?.content?.parts?.[0]?.text ?? "[]";
   const lines = JSON.parse(text);

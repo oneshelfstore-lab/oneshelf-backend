@@ -16,6 +16,8 @@ export interface FoodLineInput {
   quantity: number;
   gstRate: number;
   sacCode: string | null;
+  /** What the customer chose (size, add-ons, customizations) — carried to the order line, never priced from. */
+  notes?: string[];
 }
 
 export interface FoodLineTotals extends FoodLineInput {

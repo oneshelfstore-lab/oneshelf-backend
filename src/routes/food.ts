@@ -7,6 +7,7 @@ import {
   resolveFoodConfig, isRestaurantOpen, RESTAURANT_TRADING,
   isSellerBusy, effectivePrepMinutes, isWithinWindow, isKitchenOpen, isTempUnavailable,
 } from "../services/foodMenu.js";
+import { parseDishOptions } from "../services/foodOptions.js";
 
 /**
  * Customer-facing food browse. Mounted PUBLICLY at /api/app/food, alongside the grocery catalog —
@@ -137,6 +138,7 @@ router.get("/restaurants/:id", cacheControl(BROWSE_TTL_SECONDS), async (req: Req
                 id: true, name: true, description: true, imageUrl: true, price: true,
                 isVeg: true, foodType: true, isBestseller: true, isAvailable: true, prepMinutes: true,
                 availableFrom: true, availableTo: true, unavailableUntil: true,
+                variants: true, addOns: true, optionGroups: true,
               },
             },
           },
@@ -186,6 +188,9 @@ router.get("/restaurants/:id", cacheControl(BROWSE_TTL_SECONDS), async (req: Req
               isVeg: i.isVeg,
               foodType: i.foodType,
               isBestseller: i.isBestseller,
+              // Sizes / add-ons / customizations. The customer app prices a choice for DISPLAY only; the
+              // server re-prices from these same stored values at quote and placement.
+              ...parseDishOptions(i),
               // ⚠️ COMBINED on purpose: on the CUSTOMER endpoint isAvailable has always meant
               // "can I order this right now", so the serving window folds into it and the client
               // needs no clock logic of its own (the parser is IST-aware; the phone is not).

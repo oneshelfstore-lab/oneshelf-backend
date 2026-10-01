@@ -7,6 +7,7 @@ import {
   resolveFoodConfig, isKitchenOpen, isTempUnavailable, RESTAURANT_TRADING,
   isWithinWindow, effectivePrepMinutes,
 } from "../services/foodMenu.js";
+import { resolveSelection, parseDishOptions } from "../services/foodOptions.js";
 import { computeFoodOrderTotals, type FoodLineInput } from "../services/foodPricing.js";
 import { resolveCoupon, redeemCouponInTx } from "../services/coupons.js";
 import { computeDeliveryForOrigin } from "../services/deliveryPricing.js";
@@ -42,6 +43,10 @@ const itemsSchema = z
     z.object({
       menuItemId: z.string().min(1),
       quantity: z.number().int().min(1).max(50),
+      // Dish choices (F3). IDS only — every price is read from the dish, never from here.
+      variantId: z.string().trim().max(40).optional().nullable(),
+      addOnIds: z.array(z.string().trim().max(40)).max(12).optional(),
+      optionIds: z.array(z.string().trim().max(40)).max(30).optional(),
     }),
   )
   .min(1)
@@ -98,19 +103,22 @@ async function priceOrder(
   });
   if (!restaurant) throw new NotFoundError("Restaurant", input.restaurantId);
 
-  const wanted = new Map(input.items.map((i) => [i.menuItemId, i.quantity]));
+  // The same dish can appear on several lines (a Half and a Full, or two spice levels), so lines are
+  // resolved one by one below; this is only the distinct set to fetch and check.
+  const wantedIds = [...new Set(input.items.map((i) => i.menuItemId))];
   const rows = await prisma.menuItem.findMany({
     // Scoped to THIS restaurant: an item id from another restaurant's menu simply doesn't resolve,
     // so a hand-crafted request can't mix two kitchens into one order.
-    where: { id: { in: [...wanted.keys()] }, sellerId: restaurant.id, isActive: true },
+    where: { id: { in: wantedIds }, sellerId: restaurant.id, isActive: true },
     select: {
       id: true, name: true, imageUrl: true, price: true, gstRate: true,
       sacCode: true, prepMinutes: true, isAvailable: true, unavailableUntil: true,
       availableFrom: true, availableTo: true,
+      variants: true, addOns: true, optionGroups: true,
     },
   });
 
-  const missing = [...wanted.keys()].filter((id) => !rows.some((r) => r.id === id));
+  const missing = wantedIds.filter((id) => !rows.some((r) => r.id === id));
   if (missing.length > 0) throw new ValidationError("Some items are no longer on the menu");
   // 86'd items are named, because "something is unavailable" leaves the customer guessing which.
   // A timed 86 counts as sold out too — enforced here, not just hidden on the menu, for the same
@@ -133,15 +141,25 @@ async function priceOrder(
     );
   }
 
-  const lines: FoodLineInput[] = rows.map((r) => ({
-    menuItemId: r.id,
-    name: r.name,
-    imageUrl: r.imageUrl,
-    unitPrice: Number(r.price),
-    quantity: wanted.get(r.id)!,
-    gstRate: Number(r.gstRate),
-    sacCode: r.sacCode,
-  }));
+  const lines: FoodLineInput[] = input.items.map((it) => {
+    const r = rows.find((x) => x.id === it.menuItemId)!;
+    // Throws a readable error for a missing size, a required choice left empty, or an id the dish does not have.
+    const res = resolveSelection(
+      { name: r.name, price: Number(r.price), ...parseDishOptions(r) },
+      { variantId: it.variantId, addOnIds: it.addOnIds, optionIds: it.optionIds },
+    );
+    return {
+      menuItemId: r.id,
+      // The invoice line names the size and every priced extra; free customizations ride in notes.
+      name: res.invoiceName,
+      imageUrl: r.imageUrl,
+      unitPrice: res.unitPrice,
+      quantity: it.quantity,
+      gstRate: Number(r.gstRate),
+      sacCode: r.sacCode,
+      notes: res.notes,
+    };
+  });
 
   const address = input.addressId
     ? await prisma.address.findFirst({
@@ -381,6 +399,7 @@ router.post("/orders", async (req: FirebaseAuthRequest, res: Response) => {
               cgst: l.cgst,
               sgst: l.sgst,
               lineTotal: l.lineTotal,
+              selections: l.notes && l.notes.length > 0 ? { notes: l.notes } : undefined,
               sellerId: p.restaurant.id,
             })),
           },

@@ -131,6 +131,8 @@ async function shape(so: any) {
       isLoose: it.isLoose,
       stepSize: it.stepSize != null ? Number(it.stepSize) : null,
       stepUnit: it.stepUnit,
+      // Food: what the customer chose on this dish (size / add-ons / customizations), as ready-to-show lines.
+      selectionNotes: Array.isArray((it.selections as any)?.notes) ? (it.selections as any).notes : [],
     })),
   };
 }
@@ -147,7 +149,7 @@ const PAYMENT_SETTLED: Prisma.SubOrderWhereInput = {
 
 const ORDER_INCLUDE = {
   order: { select: { orderNumber: true, status: true, fulfillmentType: true, shippingName: true, shippingPhone: true, shippingAddress: true, shippingPincode: true, address: { select: { lat: true, lng: true } }, notes: true, voiceNoteUrl: true, subscriptionId: true, estimatedReadyAt: true } },
-  items: { select: { id: true, productName: true, variantSku: true, imageUrl: true, quantity: true, unitPrice: true, lineTotal: true, isLoose: true, stepSize: true, stepUnit: true } },
+  items: { select: { id: true, productName: true, variantSku: true, imageUrl: true, quantity: true, unitPrice: true, lineTotal: true, isLoose: true, stepSize: true, stepUnit: true, selections: true } },
 } as const;
 
 // ─── GET / — this seller's sub-orders (newest first) ──────────────

@@ -1800,6 +1800,9 @@ model OrderItem {
   // the delivery feed and order history need no food-specific branch.
   menuItemId String?
   menuItem   MenuItem? @relation(fields: [menuItemId], references: [id], onDelete: SetNull)
+  // Food only: what the customer chose on this dish, snapshotted at placement so it survives the seller
+  // later editing or deleting the options. Shape: { variant?, notes: string[] } — see services/foodOptions.ts.
+  selections Json?
 
   createdAt DateTime @default(now())
 
@@ -2246,6 +2249,11 @@ model MenuItem {
   // Temporary 86: unavailable until this time (30 min / 1 h / until closing), then back by itself —
   // read-time, no cron. A FOURTH off-switch alongside the three above; isAvailable stays true while it runs.
   unavailableUntil DateTime?
+  // Sizes / add-ons / customizations (F3). JSON, not tables — read and written with the dish, never queried
+  // across dishes. Shapes and pricing rules live in services/foodOptions.ts. Null = none.
+  variants     Json?
+  addOns       Json?
+  optionGroups Json?
 
   prepMinutes   Int     @default(20)
   // Per-item serving window, "HH:MM" IST wall clock — same shape and same parser as the restaurant's

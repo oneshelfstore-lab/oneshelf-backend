@@ -332,6 +332,20 @@ enum SubscriptionFrequency {
   CUSTOM
 }
 
+// How a routine's price ceiling is measured. V1 UI only offers ABSOLUTE (₹ above the normal estimate);
+// PERCENT is modelled + enforced by the engine so it can be exposed later with no schema change.
+// What a routine does when one of its items can't be delivered today. SKIP = leave it out (default);
+// SIMILAR = swap in a comparable in-stock product from the same store (see services/routineIntel.ts).
+enum SubstitutionRule {
+  SKIP
+  SIMILAR
+}
+
+enum PriceCeilingType {
+  ABSOLUTE
+  PERCENT
+}
+
 enum SubscriptionStatus {
   ACTIVE
   PAUSED
@@ -920,6 +934,7 @@ model ProductVariant {
   substituteItems   OrderItem[]        @relation("SubstituteVariant")
   invoiceLines      InvoiceLineItem[]
   subscriptions     Subscription[]
+  subscriptionItems SubscriptionItem[]
   stockBatches      StockBatch[]
   purchaseBillLines PurchaseBillLine[]
   freeGiftAsTrigger FreeGiftOffer?     @relation("FreeGiftTrigger")
@@ -1424,13 +1439,29 @@ model Subscription {
   id         String         @id @default(cuid())
   customerId String
   customer   User           @relation(fields: [customerId], references: [id], onDelete: Cascade)
-  variantId  String
-  variant    ProductVariant @relation(fields: [variantId], references: [id])
+  // LEGACY single-product columns (variantId/quantity/isLoose/stepSize/stepUnit/unitPriceSnapshot). A
+  // Subscription is now a ROUTINE parent whose lines live in `items`; the migration copied each old row
+  // into one SubscriptionItem and new rows leave these null. The engine still falls back to them when a
+  // row has no items (rolling-deploy overlap / pre-migration rows) — see resolveRoutineItems().
+  variantId  String?
+  variant    ProductVariant? @relation(fields: [variantId], references: [id])
 
-  // Snapshot for display continuity if the product later changes.
+  // Customer-facing routine name ("Morning essentials"). Null on legacy single-product rows.
+  name           String?
+  // Delivery window — a fixed slot id from src/data/deliverySlots.ts (display + delivery-run sort).
+  deliverySlotId String  @default("MORNING")
+  // Price ceiling: an automatic run is HELD (customer asked to review) when the refreshed total exceeds
+  // the normal estimate (sum of item price snapshots) by more than this. ABSOLUTE = ₹, PERCENT = % of estimate.
+  priceCeilingType  PriceCeilingType @default(ABSOLUTE)
+  priceCeilingValue Decimal          @default(30) @db.Decimal(10, 2)
+  // Run total at the last "prices went up" push, so a lasting rise alerts once and again only if it moves
+  // further — not every morning. Null = no alert outstanding.
+  lastAlertedTotal  Decimal?         @db.Decimal(10, 2)
+
+  // Display title (legacy: the product name; routines mirror `name` here for old app builds).
   productName String
   imageUrl    String?
-  quantity    Decimal  @db.Decimal(14, 6)
+  quantity    Decimal? @db.Decimal(14, 6)
   isLoose     Boolean  @default(false)
   stepSize    Decimal? @db.Decimal(10, 3)
   stepUnit    String?
@@ -1463,9 +1494,38 @@ model Subscription {
 
   orders     Order[]                 @relation("SubscriptionOrders")
   exceptions SubscriptionException[]
+  items      SubscriptionItem[]
 
   @@index([customerId])
   @@index([status, nextDeliveryDate]) // the engine's hot query
+}
+
+// ─── SubscriptionItem (one line of a routine) ────────────────────────
+// A routine = one Subscription + N of these. One run → ONE Order with one OrderItem per line.
+model SubscriptionItem {
+  id             String         @id @default(cuid())
+  subscriptionId String
+  subscription   Subscription   @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  variantId      String
+  variant        ProductVariant @relation(fields: [variantId], references: [id])
+
+  // Display snapshot (the product may be renamed/removed later).
+  productName String
+  imageUrl    String?
+  quantity    Decimal  @db.Decimal(14, 6)
+  isLoose     Boolean  @default(false)
+  stepSize    Decimal? @db.Decimal(10, 3)
+  stepUnit    String?
+  // "Normal" unit price in APP format (what priceSubscriptionDelivery charges) — the baseline the price
+  // ceiling compares against. Null = no baseline yet (legacy loose rows): the engine fills it on first run.
+  unitPriceSnapshot Decimal? @db.Decimal(10, 2)
+  // Per-item rule for "can't deliver today" (the engine only substitutes when this is SIMILAR).
+  substitution      SubstitutionRule @default(SKIP)
+
+  createdAt DateTime @default(now())
+
+  @@unique([subscriptionId, variantId])
+  @@index([variantId])
 }
 
 // ─── SubscriptionException (calendar skip store) ─────────────────────
@@ -1476,7 +1536,8 @@ model SubscriptionException {
   subscriptionId String
   subscription   Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
   date           DateTime // IST-midnight-in-UTC
-  type           String       @default("SKIP") // SKIP now; EXTRA / QTY_CHANGE reserved for later
+  // SKIP | HELD (run held over the price ceiling) | APPROVED (customer OK'd a held run); EXTRA / QTY_CHANGE reserved
+  type           String       @default("SKIP")
   createdAt      DateTime     @default(now())
 
   @@unique([subscriptionId, date])

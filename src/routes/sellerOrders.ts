@@ -97,6 +97,9 @@ async function shape(so: any) {
     // Subscription-generated orders are auto-packed at creation (no accept/pack step) — the app uses
     // this to badge + group them separately so they don't read as unexplained "orders with no action".
     isSubscription: so.order?.subscriptionId != null,
+    // The routine this came from + its delivery window, so a seller can prep for the right time.
+    deliverySlotId: so.order?.subscription?.deliverySlotId ?? null,
+    routineName: so.order?.subscription?.name ?? null,
     createdAt: so.createdAt,
     customerName: so.order?.shippingName ?? null,
     customerPhone: so.order?.shippingPhone ?? null,
@@ -148,7 +151,7 @@ const PAYMENT_SETTLED: Prisma.SubOrderWhereInput = {
 };
 
 const ORDER_INCLUDE = {
-  order: { select: { orderNumber: true, status: true, fulfillmentType: true, shippingName: true, shippingPhone: true, shippingAddress: true, shippingPincode: true, address: { select: { lat: true, lng: true } }, notes: true, voiceNoteUrl: true, subscriptionId: true, estimatedReadyAt: true } },
+  order: { select: { orderNumber: true, status: true, fulfillmentType: true, shippingName: true, shippingPhone: true, shippingAddress: true, shippingPincode: true, address: { select: { lat: true, lng: true } }, notes: true, voiceNoteUrl: true, subscriptionId: true, subscription: { select: { deliverySlotId: true, name: true } }, estimatedReadyAt: true } },
   items: { select: { id: true, productName: true, variantSku: true, imageUrl: true, quantity: true, unitPrice: true, lineTotal: true, isLoose: true, stepSize: true, stepUnit: true, selections: true } },
 } as const;
 

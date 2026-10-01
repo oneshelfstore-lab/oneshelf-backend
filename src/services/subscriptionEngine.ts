@@ -1,8 +1,14 @@
 import prisma from "../lib/prisma.js";
-import { toAppFormat } from "../utils/looseUnitConverter.js";
+import type { Prisma } from "@prisma/client";
+import { pickSubstitute, shouldAlertPriceChange } from "./routineIntel.js";
 import { getNextOrderNumber } from "./orderNumbering.js";
+import { planRoutineRun, round2, type RoutineItemRow } from "./routinePlan.js";
 import {
   notifyNewOrder,
+  notifyRoutineHeld,
+  notifyRoutineItemsSkipped,
+  notifyRoutineSubstituted,
+  notifyRoutinePriceUp,
   notifySubscriptionSkipped,
   notifySubscriptionLowBalance,
   notifySubscriptionStatement,
@@ -21,13 +27,13 @@ import { TCS_RATE_PCT } from "../data/taxRates.js";
 // Subscriptions engine (milk / newspaper / recurring deliveries).
 //
 // Three responsibilities:
-//   1. Pricing a single subscription delivery — FREE delivery, no coupon/loyalty/wallet/bulk
-//      (see priceSubscriptionDelivery). This deliberately does NOT call calculateCartTotals, which
-//      would force a per-order delivery charge (cartPricing.ts:182-188) and apply discounts we don't
-//      want per delivery. Bug-isolation over DRY.
-//   2. Turning due subscriptions into real Orders (paymentMethod=MONTHLY, status=PACKED) that flow
-//      through the existing delivery pipeline. Mirrors the order-placement transaction (routes/orders.ts)
-//      stripped to a deferred single-seller order.
+//   1. Pricing a routine delivery — FREE delivery, no coupon/loyalty/wallet/bulk (routinePlan.ts
+//      priceSubscriptionDelivery). This deliberately does NOT call calculateCartTotals, which would
+//      force a per-order delivery charge (cartPricing.ts:182-188) and apply discounts we don't want per
+//      delivery. Bug-isolation over DRY.
+//   2. Turning due routines (a Subscription + its SubscriptionItems) into ONE real Order per run
+//      (status=PACKED, one OrderItem per available line) that flows through the existing delivery
+//      pipeline. Mirrors the order-placement transaction (routes/orders.ts), stripped to a deferred order.
 //   3. Closing one consolidated monthly statement per customer per tender, settled by wallet/COD.
 //
 // All dates use IST-midnight semantics (reuses the IST pattern from routes/delivery.ts).
@@ -36,13 +42,8 @@ import { TCS_RATE_PCT } from "../data/taxRates.js";
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 const MS_DAY = 24 * 60 * 60 * 1000;
 
-function round2(n: number): number {
-  return Math.round((n + Number.EPSILON) * 100) / 100;
-}
-
-function isLooseType(t: string): boolean {
-  return t === "LOOSE" || t === "PRODUCE";
-}
+// Pricing + planning live in routinePlan.ts (pure, no DB). Re-exported so existing importers keep working.
+export { priceSubscriptionDelivery, type SubscriptionPricing } from "./routinePlan.js";
 
 // Sentinel: an out-of-stock day. Thrown inside the generation transaction to roll it back, then
 // caught and turned into a "skip + notify" — never a real error (one bad SKU must not stall the sweep).
@@ -153,6 +154,15 @@ export interface SubscriptionPlanRow {
   isLoose: boolean;
   totalQty: number;
   customerCount: number;
+  /** Base-unit demand for the day (loose: qty × step size) — comparable to `stock`. */
+  neededBase: number;
+  /** Variant stock right now, base units. */
+  stock: number;
+  /** max(0, neededBase − stock): how much to restock before the run. */
+  shortBy: number;
+  /** Quantity per delivery window — "how much is for 7–9 AM".
+   *  Keyed by slot id; app units, same as totalQty. */
+  bySlot: Record<string, number>;
 }
 
 /**
@@ -160,6 +170,9 @@ export interface SubscriptionPlanRow {
  * how many of each to stock/pack. Optionally scoped to one seller's own products (via
  * variant.product.sellerId) so a seller sees only their own subscribers, not the whole store's. Shared
  * by the owner's and seller's `/upcoming` routes (was duplicated inline in ownerSubscriptions.ts).
+ *
+ * Routines contribute one row-increment PER ITEM. Rows with no SubscriptionItem (pre-migration /
+ * rolling-deploy overlap) fall back to their legacy single-product columns, same as the engine.
  *
  * `sellerIsHouse` matters because `CatalogProduct.sellerId` is nullable and — per the schema's own
  * comment — "a null seller is treated as the house seller everywhere": products created via the owner's
@@ -184,165 +197,276 @@ export async function computeUpcomingPlan(
       startDate: { lte: target },
       OR: [{ pausedUntil: null }, { pausedUntil: { lte: now } }],
       AND: [{ OR: [{ endDate: null }, { endDate: { gte: target } }] }],
-      ...(productFilter ? { variant: { product: productFilter } } : {}),
+    },
+    include: {
+      items: { include: { variant: { select: { stock: true, product: { select: { sellerId: true } } } } } },
+      variant: { select: { stock: true, product: { select: { sellerId: true } } } },
     },
   });
 
+  const inScope = (itemSellerId: string | null | undefined): boolean => {
+    if (!productFilter) return true;
+    if (sellerIsHouse) return itemSellerId == null || itemSellerId === sellerId;
+    return itemSellerId === sellerId;
+  };
+
   const byVariant = new Map<string, SubscriptionPlanRow>();
   for (const sub of subs) {
-    const cadence: CadenceLike = {
-      frequency: sub.frequency as CadenceLike["frequency"],
-      intervalDays: sub.intervalDays,
-      daysOfWeek: sub.daysOfWeek,
-      dayOfMonth: sub.dayOfMonth,
-      startDate: sub.startDate,
-      endDate: sub.endDate,
-    };
-    if (!isValidDeliveryDay(cadence, target)) continue;
-    const row = byVariant.get(sub.variantId) ?? {
-      variantId: sub.variantId,
-      productName: sub.productName,
-      unit: sub.stepUnit ?? "",
-      isLoose: sub.isLoose,
-      totalQty: 0,
-      customerCount: 0,
-    };
-    row.totalQty = +(row.totalQty + Number(sub.quantity)).toFixed(3);
-    row.customerCount += 1;
-    byVariant.set(sub.variantId, row);
+    if (!isValidDeliveryDay(sub as unknown as CadenceLike, target)) continue;
+    const lines =
+      sub.items.length > 0
+        ? sub.items.map((i) => ({
+            variantId: i.variantId,
+            productName: i.productName,
+            unit: i.stepUnit ?? "",
+            isLoose: i.isLoose,
+            qty: Number(i.quantity),
+            step: i.stepSize == null ? 1 : Number(i.stepSize),
+            stock: Number(i.variant?.stock ?? 0),
+            sellerId: i.variant?.product?.sellerId,
+          }))
+        : sub.variantId && sub.quantity != null
+          ? [{
+              variantId: sub.variantId,
+              productName: sub.productName,
+              unit: sub.stepUnit ?? "",
+              isLoose: sub.isLoose,
+              qty: Number(sub.quantity),
+              step: sub.stepSize == null ? 1 : Number(sub.stepSize),
+              stock: Number(sub.variant?.stock ?? 0),
+              sellerId: sub.variant?.product?.sellerId,
+            }]
+          : [];
+    for (const l of lines) {
+      if (!inScope(l.sellerId)) continue;
+      const row = byVariant.get(l.variantId) ?? {
+        variantId: l.variantId,
+        productName: l.productName,
+        unit: l.unit,
+        isLoose: l.isLoose,
+        totalQty: 0,
+        customerCount: 0,
+        neededBase: 0,
+        stock: l.stock,
+        shortBy: 0,
+        bySlot: {},
+      };
+      row.totalQty = +(row.totalQty + l.qty).toFixed(3);
+      row.customerCount += 1;
+      // Loose quantities are counts of steps; stock is in base units, so compare like with like.
+      row.neededBase = +(row.neededBase + (l.isLoose ? l.qty * l.step : l.qty)).toFixed(3);
+      row.bySlot[sub.deliverySlotId] = +((row.bySlot[sub.deliverySlotId] ?? 0) + l.qty).toFixed(3);
+      byVariant.set(l.variantId, row);
+    }
   }
-  return [...byVariant.values()].sort((a, b) => b.totalQty - a.totalQty);
+  for (const row of byVariant.values()) row.shortBy = +Math.max(0, row.neededBase - row.stock).toFixed(3);
+  // Biggest shortfall first (that is what the owner has to act on), then biggest demand.
+  return [...byVariant.values()].sort((a, b) => b.shortBy - a.shortBy || b.totalQty - a.totalQty);
 }
 
-// ─── Pricing (the 🩹 delivery-charge fix) ─────────────────────────────────────
+// ─── Routine rows ─────────────────────────────────────────────────────────────
 
-interface PricedVariant {
-  packageSize: unknown;
-  packageUnit: string;
-  sellingPrice: unknown;
-  mrp: unknown;
-  bulkMinQty: number;
-  bulkPrice: unknown;
-  gstRateOverride: unknown;
-  product: { productType: string; gstRate: unknown };
+/** The slice of a Subscription row the generator reads. `items` may be absent on legacy rows. */
+export interface RoutineRow {
+  id: string;
+  customerId: string;
+  name: string | null;
+  productName: string;
+  imageUrl: string | null;
+  addressId: string | null;
+  billing: string; // "WALLET" | "COD" | "AUTOPAY"
+  mandateId: string | null;
+  priceCeilingType: "ABSOLUTE" | "PERCENT";
+  priceCeilingValue: unknown;
+  /** Run total at the last "prices went up" push (null = none outstanding). */
+  lastAlertedTotal?: unknown;
+  items?: { id: string; variantId: string; productName: string; imageUrl: string | null; quantity: unknown; unitPriceSnapshot: unknown; substitution?: string }[];
+  // LEGACY single-product columns — only read when `items` is empty (see resolveRoutineItems).
+  variantId?: string | null;
+  quantity?: unknown;
+  isLoose?: boolean;
+  unitPriceSnapshot?: unknown;
 }
 
-export interface SubscriptionPricing {
-  unitPrice: number;
-  mrp: number;
-  lineTotal: number;
-  gstRate: number;
-  taxableValue: number;
-  cgst: number;
-  sgst: number;
-  totalTax: number;
-  subtotal: number;
-  deliveryCharge: 0;
-  totalAmount: number;
-  savedAmount: number;
+export function routineTitle(sub: Pick<RoutineRow, "name" | "productName">): string {
+  return sub.name ?? sub.productName;
 }
 
 /**
- * Prices ONE subscription line at face value: GST-inclusive line total, NO delivery, NO coupon,
- * NO loyalty, NO wallet, NO bulk (D9). Mirrors the per-line GST math in cartPricing.ts:99-107.
+ * The lines a routine delivers: its SubscriptionItems, or — for a row that has none (a subscription
+ * created by an old app build during a rolling deploy, or never backfilled) — its legacy single-product
+ * columns as one line. This fallback is what keeps old single-product subscriptions delivering.
  */
-export function priceSubscriptionDelivery(variant: PricedVariant, quantity: number): SubscriptionPricing {
-  const isLoose = isLooseType(variant.product.productType);
-  const converted = toAppFormat(variant as never, isLoose);
-  const unitPrice = converted.sellingPrice; // never bulkPrice
-  const mrp = converted.mrp;
-  const lineTotal = round2(unitPrice * quantity);
-
-  const gstRate =
-    variant.gstRateOverride != null
-      ? Number(variant.gstRateOverride)
-      : variant.product.gstRate != null
-        ? Number(variant.product.gstRate)
-        : 0;
-
-  const taxableValue = gstRate > 0 ? round2(lineTotal / (1 + gstRate / 100)) : lineTotal;
-  const totalTax = round2(lineTotal - taxableValue);
-  const cgst = round2(totalTax / 2);
-  const sgst = round2(totalTax - cgst);
-  const savedAmount = round2(Math.max(0, mrp - unitPrice) * quantity);
-
-  return {
-    unitPrice,
-    mrp,
-    lineTotal,
-    gstRate,
-    taxableValue,
-    cgst,
-    sgst,
-    totalTax,
-    subtotal: lineTotal,
-    deliveryCharge: 0,
-    totalAmount: lineTotal,
-    savedAmount,
-  };
+export function resolveRoutineItems(sub: RoutineRow): RoutineItemRow[] {
+  if (sub.items && sub.items.length > 0) {
+    return sub.items.map((i) => ({
+      id: i.id,
+      variantId: i.variantId,
+      productName: i.productName,
+      imageUrl: i.imageUrl,
+      quantity: Number(i.quantity),
+      unitPriceSnapshot: i.unitPriceSnapshot == null ? null : Number(i.unitPriceSnapshot),
+      substitution: i.substitution === "SIMILAR" ? "SIMILAR" : "SKIP",
+    }));
+  }
+  if (sub.variantId && sub.quantity != null) {
+    return [{
+      id: `legacy:${sub.id}`,
+      variantId: sub.variantId,
+      productName: sub.productName,
+      imageUrl: sub.imageUrl,
+      quantity: Number(sub.quantity),
+      // The legacy snapshot of a loose product was per-base-unit, not app format → no usable baseline.
+      unitPriceSnapshot: sub.isLoose || sub.unitPriceSnapshot == null ? null : Number(sub.unitPriceSnapshot),
+    }];
+  }
+  return [];
 }
 
-// ─── Generation (one Order per due subscription per day) ──────────────────────
+// ─── Generation (ONE Order per due routine per day) ───────────────────────────
 
-type GenerateResult =
+export type GenerateResult =
   | "generated"
   | "skipped_oos"
   | "skipped_lowbalance"
   | "skipped_date"
+  | "held"
   | "duplicate";
 
-async function generateOrderFor(
-  sub: {
-    id: string;
-    customerId: string;
-    variantId: string;
-    quantity: unknown;
-    productName: string;
-    imageUrl: string | null;
-    addressId: string | null;
-    billing: string; // "WALLET" | "COD" | "AUTOPAY"
-    mandateId: string | null;
-  },
+const VARIANT_PRODUCT_SELECT = {
+  id: true,
+  name: true,
+  productType: true,
+  hsnCode: true,
+  gstRate: true,
+  isPackaged: true,
+  categoryId: true,
+  imageUrls: true,
+  sellerId: true,
+  commissionPctOverride: true,
+} as const;
+
+type VariantRow = Awaited<ReturnType<typeof loadVariantRows>>[number];
+
+function loadVariantRows(where: Prisma.ProductVariantWhereInput, take?: number) {
+  return prisma.productVariant.findMany({
+    where,
+    include: { product: { select: VARIANT_PRODUCT_SELECT } },
+    ...(take ? { take } : {}),
+  });
+}
+
+/**
+ * For items whose rule is SIMILAR and which can't ship today (inactive, or not enough stock), swap in the
+ * closest-priced in-stock product of the SAME category and store (see routineIntel.pickSubstitute). The
+ * swapped line keeps the original item's id and price baseline, so the price ceiling still compares the
+ * stand-in against what the customer normally pays. No suitable stand-in → the item is left as is and the
+ * plan skips it. Mutates `variants` to include the stand-ins.
+ */
+async function applySubstitutions(
+  items: RoutineItemRow[],
+  variants: Map<string, VariantRow>,
+): Promise<{ items: RoutineItemRow[]; substituted: { itemId: string; from: string; to: string }[] }> {
+  const substituted: { itemId: string; from: string; to: string }[] = [];
+  const taken = new Set(items.map((i) => i.variantId));
+  const out: RoutineItemRow[] = [];
+  for (const item of items) {
+    const original = variants.get(item.variantId);
+    if (item.substitution !== "SIMILAR" || !original) {
+      out.push(item);
+      continue;
+    }
+    const loose = original.product.productType === "LOOSE" || original.product.productType === "PRODUCE";
+    const needed = loose ? item.quantity * Number(original.packageSize) : item.quantity;
+    if (original.isActive && Number(original.stock) + 1e-9 >= needed) {
+      out.push(item);
+      continue;
+    }
+    const candidates = await loadVariantRows(
+      {
+        isActive: true,
+        id: { notIn: [...taken] },
+        stock: { gt: 0 },
+        product: {
+          categoryId: original.product.categoryId,
+          sellerId: original.product.sellerId,
+          isActive: true,
+          deletedAt: null,
+          approvalStatus: "APPROVED",
+        },
+      },
+      30,
+    );
+    const pick = pickSubstitute(original, item.quantity, candidates);
+    if (!pick) {
+      out.push(item);
+      continue;
+    }
+    variants.set(pick.id, pick);
+    taken.add(pick.id);
+    out.push({ ...item, variantId: pick.id, productName: pick.product.name, imageUrl: pick.product.imageUrls?.[0] ?? item.imageUrl });
+    substituted.push({ itemId: item.id, from: item.productName, to: pick.product.name });
+  }
+  return { items: out, substituted };
+}
+
+/**
+ * Generate today's order for a routine: refresh inventory + prices, plan the basket, and either
+ *   • place ONE Order carrying one OrderItem per available line (price within the ceiling), or
+ *   • HOLD the run and ask the customer to review (price above the ceiling), or
+ *   • skip (everything unavailable / wallet short / customer skipped the date).
+ * Unavailable lines are dropped and reported; the rest of the basket still goes. Idempotent per
+ * (routine, day) via Order's @@unique([subscriptionId, subscriptionDate]).
+ *
+ * `opts.ignoreCeiling` is the customer's "approve" on a held run (also set when the day's exception row is
+ * APPROVED). An approved run re-baselines the item snapshots, so a lasting price rise isn't held forever.
+ */
+export async function generateRoutineOrder(
+  sub: RoutineRow,
   dayIST: Date,
   defaultAgentId: string | null,
+  opts: { ignoreCeiling?: boolean } = {},
 ): Promise<GenerateResult> {
-  // Calendar skip: the customer marked this date off (before the cutoff). No delivery, no charge.
+  const title = routineTitle(sub);
+
+  // Calendar skip / held-run state for this date.
   const exception = await prisma.subscriptionException.findUnique({
     where: { subscriptionId_date: { subscriptionId: sub.id, date: dayIST } },
   });
   if (exception && exception.type === "SKIP") return "skipped_date";
+  const approved = opts.ignoreCeiling === true || exception?.type === "APPROVED";
+  if (exception?.type === "HELD" && !approved) return "held"; // already held + notified; waiting on the customer
 
-  const variant = await prisma.productVariant.findUnique({
-    where: { id: sub.variantId },
-    include: {
-      product: {
-        select: {
-          id: true,
-          name: true,
-          productType: true,
-          hsnCode: true,
-          gstRate: true,
-          isPackaged: true,
-          categoryId: true,
-          imageUrls: true,
-          sellerId: true,
-          commissionPctOverride: true,
-        },
-      },
-    },
+  const baseItems = resolveRoutineItems(sub);
+  const variantRows = baseItems.length
+    ? await loadVariantRows({ id: { in: baseItems.map((i) => i.variantId) } })
+    : [];
+  const variants = new Map(variantRows.map((v) => [v.id, v]));
+  // Items set to "use a similar one" that can't ship today are swapped for an in-stock stand-in.
+  const { items, substituted } = await applySubstitutions(baseItems, variants);
+  const substitutedIds = new Set(substituted.map((s) => s.itemId));
+
+  const plan = planRoutineRun(items, variants, {
+    type: sub.priceCeilingType,
+    value: Number(sub.priceCeilingValue),
   });
 
-  // Product gone/inactive — skip + notify (treat like OOS; never throw).
-  if (!variant || !variant.isActive) {
-    await notifySubscriptionSkipped(sub.customerId, sub.productName).catch((e: unknown) => console.error("[background task failed]", e));
+  // Nothing deliverable (every line out of stock / inactive) → skip the day, tell the customer.
+  if (plan.lines.length === 0) {
+    await notifySubscriptionSkipped(sub.customerId, title).catch((e: unknown) => console.error("[background task failed]", e));
     return "skipped_oos";
   }
 
-  const qty = Number(sub.quantity);
-  const isLoose = isLooseType(variant.product.productType);
-  // needed = base-unit demand. Mirrors routes/orders.ts:142 exactly.
-  const needed = isLoose ? qty * Number(variant.packageSize) : qty;
-  const pricing = priceSubscriptionDelivery(variant as never, qty);
+  // Price drift above the ceiling → hold this run; the customer reviews (approve → order placed at today's price).
+  if (!approved && !plan.withinCeiling) {
+    await prisma.subscriptionException.upsert({
+      where: { subscriptionId_date: { subscriptionId: sub.id, date: dayIST } },
+      create: { subscriptionId: sub.id, date: dayIST, type: "HELD" },
+      update: {},
+    });
+    await notifyRoutineHeld(sub.customerId, title, sub.id, plan.totalAmount, plan.estimate).catch((e: unknown) => console.error("[background task failed]", e));
+    return "held";
+  }
 
   const [address, customer, houseSeller, orderNumber] = await Promise.all([
     sub.addressId ? prisma.address.findUnique({ where: { id: sub.addressId } }) : Promise.resolve(null),
@@ -351,10 +475,8 @@ async function generateOrderFor(
     getNextOrderNumber(),
   ]);
 
-  const sellerId = variant.product.sellerId ?? houseSeller?.id ?? null;
-
   // ── Resolve the payment tender BEFORE the txn (prepaid-first — never postpaid). ──
-  const total = pricing.totalAmount;
+  const total = plan.totalAmount;
   let paymentMethod: "WALLET" | "COD" | "UPI";
   let paymentStatus: "PAID" | "PENDING";
   if (sub.billing === "COD") {
@@ -365,7 +487,7 @@ async function generateOrderFor(
     // UPI mandate charge (inert until a live Razorpay merchant + mandate exist → skip + notify).
     const charged = sub.mandateId ? await chargeSubscriptionMandate(sub.mandateId, total) : null;
     if (!charged) {
-      await notifySubscriptionLowBalance(sub.customerId, sub.productName).catch((e: unknown) => console.error("[background task failed]", e));
+      await notifySubscriptionLowBalance(sub.customerId, title).catch((e: unknown) => console.error("[background task failed]", e));
       return "skipped_lowbalance";
     }
     paymentMethod = "UPI";
@@ -377,20 +499,25 @@ async function generateOrderFor(
   }
   const walletFunded = paymentMethod === "WALLET";
 
+  // Each line's seller (null seller == house). One routine is one store, but group anyway so a seller
+  // change after creation still splits correctly instead of mis-attributing a payout.
+  const sellerOf = (l: (typeof plan.lines)[number]) => l.variant.product.sellerId ?? houseSeller?.id ?? null;
+
   let createdOrder: { id: string; orderNumber: string; totalAmount: unknown; customerId: string } | null = null;
 
   try {
     createdOrder = await prisma.$transaction(async (tx) => {
-      // FIFO-consume the needed base-units (mirrors routes/orders.ts's own consumeFifo call).
-      // consumeFifo throws AppError("INSUFFICIENT_STOCK") when it runs out of batches before
-      // satisfying `needed` — translate that into the existing OosSkip sentinel so the outer
-      // catch's "skip + notify, never a hard error" behavior is unchanged.
-      let consumeResult: ConsumeResult;
-      try {
-        consumeResult = await consumeFifo(tx, variant.id, needed);
-      } catch (e) {
-        if (e instanceof AppError && e.code === "INSUFFICIENT_STOCK") throw new OosSkip();
-        throw e;
+      // FIFO-consume every line's base-units (mirrors routes/orders.ts's consumeFifo call). A shortfall
+      // here is a race lost AFTER the plan's stock check — roll the whole run back (OosSkip) rather than
+      // ship a basket that no longer matches what was priced/charged.
+      const consumed = new Map<string, ConsumeResult>();
+      for (const l of plan.lines) {
+        try {
+          consumed.set(l.variant.id, await consumeFifo(tx, l.variant.id, l.needed));
+        } catch (e) {
+          if (e instanceof AppError && e.code === "INSUFFICIENT_STOCK") throw new OosSkip();
+          throw e;
+        }
       }
 
       const created = await tx.order.create({
@@ -406,59 +533,61 @@ async function generateOrderFor(
           shippingPhone: customer?.phone,
           shippingAddress: address?.addressLine,
           shippingPincode: address?.pincode,
-          subtotal: pricing.subtotal,
+          subtotal: plan.subtotal,
           discount: 0,
-          deliveryCharge: 0, // 🩹 subscription deliveries are free (D4)
-          // Step 15: zero, and that is the honest answer rather than a NULL. A subscription drop is
+          deliveryCharge: 0, // 🩹 routine deliveries are free (D4)
+          // Step 15: zero, and that is the honest answer rather than a NULL. A routine drop is
           // never charged for separately, so delivery is bundled into the price of the goods — a
           // composite supply with no separate delivery supply to value. "Split, came to nothing",
           // not "never split".
           deliveryTaxable: 0,
           deliveryGst: 0,
-          taxableValue: pricing.taxableValue,
-          totalTax: pricing.totalTax,
-          totalAmount: pricing.totalAmount,
-          savedAmount: pricing.savedAmount,
+          taxableValue: plan.taxableValue,
+          totalTax: plan.totalTax,
+          totalAmount: plan.totalAmount,
+          savedAmount: plan.savedAmount,
           walletApplied: walletFunded ? total : 0,
           deliveryOtpRequired: false,
           deliveryBoyId: defaultAgentId,
           subscriptionId: sub.id,
           subscriptionDate: dayIST, // idempotency key with @@unique([subscriptionId, subscriptionDate])
           items: {
-            create: [
-              {
-                variantId: variant.id,
-                productName: variant.product.name,
-                variantSku: variant.sku,
-                imageUrl: variant.product.imageUrls?.[0] ?? sub.imageUrl ?? null,
-                hsnCode: variant.product.hsnCode,
-                unitPrice: pricing.unitPrice,
-                mrp: pricing.mrp,
-                quantity: sub.quantity as never,
-                gstRate: pricing.gstRate,
-                taxableValue: pricing.taxableValue,
-                cgst: pricing.cgst,
-                sgst: pricing.sgst,
-                lineTotal: pricing.lineTotal,
-                isLoose,
-                stepSize: isLoose ? Number(variant.packageSize) : null,
-                stepUnit: isLoose ? variant.packageUnit : null,
-                packageUnit: variant.packageUnit,
-                sellerId,
-                costPriceSnapshot: consumeResult.totalQty > 0 ? consumeResult.weightedUnitCost : null,
-              },
-            ],
+            create: plan.lines.map((l) => ({
+              variantId: l.variant.id,
+              productName: l.variant.product.name,
+              variantSku: l.variant.sku,
+              imageUrl: l.variant.product.imageUrls?.[0] ?? l.item.imageUrl ?? null,
+              hsnCode: l.variant.product.hsnCode,
+              unitPrice: l.pricing.unitPrice,
+              mrp: l.pricing.mrp,
+              quantity: l.item.quantity as never,
+              gstRate: l.pricing.gstRate,
+              taxableValue: l.pricing.taxableValue,
+              cgst: l.pricing.cgst,
+              sgst: l.pricing.sgst,
+              lineTotal: l.pricing.lineTotal,
+              isLoose: l.isLoose,
+              stepSize: l.isLoose ? Number(l.variant.packageSize) : null,
+              stepUnit: l.isLoose ? l.variant.packageUnit : null,
+              packageUnit: l.variant.packageUnit,
+              sellerId: sellerOf(l),
+              costPriceSnapshot: consumed.get(l.variant.id)!.totalQty > 0 ? consumed.get(l.variant.id)!.weightedUnitCost : null,
+            })),
           },
         },
-        select: { id: true, orderNumber: true, totalAmount: true, customerId: true, items: { select: { id: true } } },
+        select: { id: true, orderNumber: true, totalAmount: true, customerId: true, items: { select: { id: true, variantId: true } } },
       });
 
-      // Single item, single variant per subscription delivery — no ambiguity to resolve.
-      if (created.items[0]) await recordConsumption(tx, { orderItemId: created.items[0].id }, consumeResult.consumed);
+      // Link each batch draw to the OrderItem it fed. One line per variant per routine (unique), so the
+      // variantId → item lookup is unambiguous.
+      const itemIdByVariant = new Map(created.items.map((i) => [i.variantId, i.id]));
+      for (const l of plan.lines) {
+        await recordConsumption(tx, { orderItemId: itemIdByVariant.get(l.variant.id)! }, consumed.get(l.variant.id)!.consumed);
+      }
 
-      // Prepaid-wallet: guarded debit + ledger row, atomic with the order. Insufficient balance →
-      // WalletSkip rolls back the stock decrement + order (we never deliver unpaid). @@unique([orderId,
-      // type]) makes the debit idempotent (the order is created once per subscription-day).
+      // Prepaid-wallet: ONE guarded debit for the whole basket + ledger row, atomic with the order.
+      // Insufficient balance → WalletSkip rolls back the stock draws + order (we never deliver unpaid).
+      // @@unique([orderId, type]) keeps the debit idempotent (one order per routine-day).
       if (walletFunded) {
         const wdec = await tx.user.updateMany({
           where: { id: sub.customerId, walletBalance: { gte: total } },
@@ -476,71 +605,70 @@ async function generateOrderFor(
             type: "ORDER_DEBIT",
             balanceAfter: fresh!.walletBalance,
             orderId: created.id,
-            note: `Subscription: ${variant.product.name}`,
+            note: `Routine: ${title}`,
           },
         });
       }
 
-      // One SubOrder for the (single) seller — mirrors routes/orders.ts:294-354 simplified.
-      // House seller → commission 0, TCS 0, no payout accrual. Keeps the delivery feed + statement
-      // invoice consistent with every other order.
-      if (sellerId) {
+      // One SubOrder per seller group — mirrors routes/orders.ts:294-354 simplified. House seller →
+      // commission 0, TCS 0, no payout accrual. Keeps the delivery feed + invoices consistent.
+      const bySeller = new Map<string, typeof plan.lines>();
+      for (const l of plan.lines) {
+        const sid = sellerOf(l);
+        if (!sid) continue;
+        bySeller.set(sid, [...(bySeller.get(sid) ?? []), l]);
+      }
+      for (const [sellerId, group] of bySeller) {
         const seller = await tx.seller.findUnique({
           where: { id: sellerId },
           select: { id: true, commissionPct: true, isHouse: true, pan: true, entityType: true },
         });
-        if (seller) {
-          const houseIsSeparate = await houseSellerIsSeparateEntity(tx);
-          const subtotal = pricing.lineTotal;
-          // Sec 194-O TDS — same discipline as routes/orders.ts. Off (0) unless StoreConfig.tds194oEnabled.
-          const { tdsAmount } = await computeSubOrderTds194o(tx, seller, pricing.taxableValue);
-          // One variant, so one line — routed through sumSellerLines anyway so the per-product
-          // override and the rounding come from the same place as every other order (step 08).
-          const lineTotals = sumSellerLines(
-            [{
-              lineTotal: subtotal,
-              taxableValue: pricing.taxableValue,
-              commissionPctOverride: variant.product.commissionPctOverride == null
-                ? null
-                : Number(variant.product.commissionPctOverride),
-            }],
-            Number(seller.commissionPct),
-          );
-          const split = computeSellerSplit({
-            subtotal,
-            taxableValue: pricing.taxableValue,
-            commissionPct: lineTotals.commissionPct,
-            commissionAmount: lineTotals.commissionAmount,
-            commissionGstAmount: lineTotals.commissionGstAmount,
-            tcsRatePct: TCS_RATE_PCT,
-            tdsAmount,
-            isHouse: isSameLegalEntity(seller, houseIsSeparate), // step 09 - see services/entitySplit.ts
-          });
-          const { netPayable } = split;
-
-          const subOrder = await tx.subOrder.create({
-            data: {
-              orderId: created.id,
-              sellerId,
-              status: "PACKED",
-              ...split,
-            },
-          });
-          await tx.orderItem.updateMany({
-            where: { orderId: created.id },
+        if (!seller) continue;
+        const houseIsSeparate = await houseSellerIsSeparateEntity(tx);
+        const taxable = round2(group.reduce((s, l) => s + l.pricing.taxableValue, 0));
+        // Sec 194-O TDS — same discipline as routes/orders.ts. Off (0) unless StoreConfig.tds194oEnabled.
+        const { tdsAmount } = await computeSubOrderTds194o(tx, seller, taxable);
+        // Routed through sumSellerLines so the per-product override and the rounding come from the same
+        // place as every other order (step 08).
+        const lineTotals = sumSellerLines(
+          group.map((l) => ({
+            lineTotal: l.pricing.lineTotal,
+            taxableValue: l.pricing.taxableValue,
+            commissionPctOverride: l.variant.product.commissionPctOverride == null
+              ? null
+              : Number(l.variant.product.commissionPctOverride),
+          })),
+          Number(seller.commissionPct),
+        );
+        const split = computeSellerSplit({
+          subtotal: lineTotals.subtotal,
+          taxableValue: lineTotals.taxableValue,
+          commissionPct: lineTotals.commissionPct,
+          commissionAmount: lineTotals.commissionAmount,
+          commissionGstAmount: lineTotals.commissionGstAmount,
+          tcsRatePct: TCS_RATE_PCT,
+          tdsAmount,
+          isHouse: isSameLegalEntity(seller, houseIsSeparate), // step 09 - see services/entitySplit.ts
+        });
+        const subOrder = await tx.subOrder.create({
+          data: { orderId: created.id, sellerId, status: "PACKED", ...split },
+        });
+        for (let i = 0; i < group.length; i++) {
+          await tx.orderItem.update({
+            where: { id: itemIdByVariant.get(group[i]!.variant.id)! },
             data: {
               subOrderId: subOrder.id,
-              commissionPct: lineTotals.lineCommissions[0]!.commissionPct,
-              commissionAmount: lineTotals.lineCommissions[0]!.commissionAmount,
+              commissionPct: lineTotals.lineCommissions[i]!.commissionPct,
+              commissionAmount: lineTotals.lineCommissions[i]!.commissionAmount,
             },
           });
-          if (!isSameLegalEntity(seller, houseIsSeparate)) {
-            await tx.seller.update({
-              where: { id: sellerId },
-              data: { outstandingBalance: { increment: netPayable } },
-              select: { id: true },
-            });
-          }
+        }
+        if (!isSameLegalEntity(seller, houseIsSeparate)) {
+          await tx.seller.update({
+            where: { id: sellerId },
+            data: { outstandingBalance: { increment: split.netPayable } },
+            select: { id: true },
+          });
         }
       }
 
@@ -548,14 +676,14 @@ async function generateOrderFor(
     });
   } catch (e) {
     if (e instanceof OosSkip) {
-      await notifySubscriptionSkipped(sub.customerId, sub.productName).catch((e: unknown) => console.error("[background task failed]", e));
+      await notifySubscriptionSkipped(sub.customerId, title).catch((e: unknown) => console.error("[background task failed]", e));
       return "skipped_oos";
     }
     if (e instanceof WalletSkip) {
-      await notifySubscriptionLowBalance(sub.customerId, sub.productName).catch((e: unknown) => console.error("[background task failed]", e));
+      await notifySubscriptionLowBalance(sub.customerId, title).catch((e: unknown) => console.error("[background task failed]", e));
       return "skipped_lowbalance";
     }
-    // Already generated for this (subscription, day) — the @@unique guard. No-op.
+    // Already generated for this (routine, day) — the @@unique guard. No-op.
     if (isUniqueViolation(e)) return "duplicate";
     throw e;
   }
@@ -564,12 +692,102 @@ async function generateOrderFor(
     // Each delivery is its own paid order → its own GST invoice (replaces the consolidated statement).
     generateOrderInvoice(createdOrder.id).catch((e: unknown) => console.error("[background task failed]", e));
     notifyNewOrder(createdOrder).catch((e: unknown) => console.error("[background task failed]", e));
+    if (plan.skipped.length > 0) {
+      notifyRoutineItemsSkipped(sub.customerId, title, plan.skipped.map((s) => s.item.productName)).catch((e: unknown) => console.error("[background task failed]", e));
+    }
+    if (substituted.length > 0) {
+      notifyRoutineSubstituted(sub.customerId, title, substituted).catch((e: unknown) => console.error("[background task failed]", e));
+    }
+    // "Prices went up" heads-up: only for a run that WAS ordered within the ceiling, only when the rise is
+    // meaningful, and only once per level (lastAlertedTotal). An approved run re-baselines, so it just resets.
+    const last = sub.lastAlertedTotal == null ? null : Number(sub.lastAlertedTotal);
+    const verdict = approved ? (last == null ? "none" : "reset") : shouldAlertPriceChange(plan.drift, plan.totalAmount, last);
+    if (verdict === "alert") {
+      notifyRoutinePriceUp(sub.customerId, title, plan.drift, plan.totalAmount).catch((e: unknown) => console.error("[background task failed]", e));
+    }
+    if (verdict !== "none") {
+      await prisma.subscription
+        .update({ where: { id: sub.id }, data: { lastAlertedTotal: verdict === "alert" ? plan.totalAmount : null } })
+        .catch((e: unknown) => console.error("[background task failed]", e));
+    }
+    // Baseline upkeep: fill missing snapshots; an approved run re-baselines ALL lines to today's price.
+    // (Never for a stand-in line: its price is not the original item's "normal".)
+    for (const l of plan.lines) {
+      if (substitutedIds.has(l.item.id)) continue;
+      if (l.item.id.startsWith("legacy:")) continue;
+      if (!approved && l.item.unitPriceSnapshot != null) continue;
+      await prisma.subscriptionItem
+        .update({ where: { id: l.item.id }, data: { unitPriceSnapshot: l.pricing.unitPrice } })
+        .catch((e: unknown) => console.error("[background task failed]", e));
+    }
   }
   return "generated";
 }
 
 /**
- * Generate orders for every subscription due today. Robust catch-up: generates ONLY when today is a
+ * Read-only: what a run of this routine would deliver and cost RIGHT NOW, against its price ceiling.
+ * Feeds the review sheet (and the "held" approve flow). Writes nothing.
+ */
+export async function quoteRoutine(subscriptionId: string, customerId: string) {
+  const sub = await prisma.subscription.findFirst({ where: { id: subscriptionId, customerId }, include: { items: true } });
+  if (!sub) return null;
+  const row = sub as unknown as RoutineRow;
+  const baseItems = resolveRoutineItems(row);
+  const variantRows = baseItems.length
+    ? await loadVariantRows({ id: { in: baseItems.map((i) => i.variantId) } })
+    : [];
+  const variantMap = new Map(variantRows.map((v) => [v.id, v]));
+  const { items, substituted } = await applySubstitutions(baseItems, variantMap);
+  const plan = planRoutineRun(items, variantMap, {
+    type: row.priceCeilingType,
+    value: Number(row.priceCeilingValue),
+  });
+  const held = await prisma.subscriptionException.findUnique({
+    where: { subscriptionId_date: { subscriptionId, date: istTodayStart() } },
+    select: { type: true },
+  });
+  return {
+    name: routineTitle(row),
+    total: plan.totalAmount,
+    estimate: plan.estimate,
+    drift: plan.drift,
+    allowedIncrease: plan.allowedIncrease,
+    withinCeiling: plan.withinCeiling,
+    heldToday: held?.type === "HELD",
+    lines: plan.lines.map((l) => ({
+      variantId: l.variant.id,
+      productName: l.variant.product.name,
+      quantity: l.item.quantity,
+      unitPrice: l.pricing.unitPrice,
+      lineTotal: l.pricing.lineTotal,
+    })),
+    skipped: plan.skipped.map((s) => ({ variantId: s.item.variantId, productName: s.item.productName, reason: s.reason })),
+    substituted,
+  };
+}
+
+/**
+ * The customer approved a HELD run. Allowed for TODAY only (the engine never backfills). Marks the day's
+ * exception APPROVED and generates the order at today's prices, ignoring the ceiling.
+ */
+export async function approveHeldRun(subscriptionId: string, customerId: string): Promise<GenerateResult | "not_held"> {
+  const today = istTodayStart();
+  const exception = await prisma.subscriptionException.findUnique({
+    where: { subscriptionId_date: { subscriptionId, date: today } },
+  });
+  if (!exception || exception.type !== "HELD") return "not_held";
+  const sub = await prisma.subscription.findFirst({
+    where: { id: subscriptionId, customerId, status: { not: "CANCELLED" } },
+    include: { items: true },
+  });
+  if (!sub) return "not_held";
+  const config = await prisma.storeConfig.findFirst();
+  await prisma.subscriptionException.update({ where: { id: exception.id }, data: { type: "APPROVED" } });
+  return generateRoutineOrder(sub as unknown as RoutineRow, today, config?.defaultSubscriptionAgentId ?? null, { ignoreCeiling: true });
+}
+
+/**
+ * Generate orders for every routine due today. Robust catch-up: generates ONLY when today is a
  * genuine cadence day (never backfills missed days), and always resyncs the cursor forward.
  */
 export async function generateDueSubscriptionOrders(): Promise<{ generated: number; skipped: number }> {
@@ -587,6 +805,7 @@ export async function generateDueSubscriptionOrders(): Promise<{ generated: numb
       OR: [{ pausedUntil: null }, { pausedUntil: { lte: now } }],
       AND: [{ OR: [{ endDate: null }, { endDate: { gte: today } }] }],
     },
+    include: { items: true },
   });
 
   let generated = 0;
@@ -595,9 +814,9 @@ export async function generateDueSubscriptionOrders(): Promise<{ generated: numb
   for (const sub of due) {
     try {
       if (isValidDeliveryDay(sub, today)) {
-        const result = await generateOrderFor(sub, today, config?.defaultSubscriptionAgentId ?? null);
+        const result = await generateRoutineOrder(sub as unknown as RoutineRow, today, config?.defaultSubscriptionAgentId ?? null);
         if (result === "generated") generated++;
-        else if (result === "skipped_oos" || result === "skipped_lowbalance") skipped++;
+        else if (result === "skipped_oos" || result === "skipped_lowbalance" || result === "held") skipped++;
         await prisma.subscription.update({
           where: { id: sub.id },
           data: { lastGeneratedDate: today, nextDeliveryDate: computeNextDeliveryDate(sub, today) },
@@ -617,10 +836,11 @@ export async function generateDueSubscriptionOrders(): Promise<{ generated: numb
   }
 
   if (generated > 0 || skipped > 0) {
-    console.log(JSON.stringify({ level: "info", msg: "subscription orders generated", generated, skipped }));
+    console.log(JSON.stringify({ level: "info", msg: "routine orders generated", generated, skipped }));
   }
   return { generated, skipped };
 }
+
 
 function dayLabel(d: Date): string {
   return new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Kolkata" }).format(d);

@@ -1,6 +1,7 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
 import prisma from "../lib/prisma.js";
+import { compareRunStops } from "../data/deliverySlots.js";
 import { sendError, ValidationError, NotFoundError, AppError } from "../lib/errors.js";
 import {
   firebaseAuthMiddleware,
@@ -570,17 +571,28 @@ router.get("/subscription-run", async (req: FirebaseAuthRequest, res: Response) 
         // today's run: generated today (subscriptionDate) — the engine stamps IST-midnight.
         subscriptionDate: { gte: startUtc },
       },
-      orderBy: [{ shippingPincode: "asc" }, { createdAt: "asc" }],
+      // Sorted below by delivery window, then area (the DB can't see the slot — it lives on the routine).
       select: {
         id: true, orderNumber: true, status: true,
         paymentMethod: true, paymentStatus: true, totalAmount: true, amountPaid: true,
         shippingName: true, shippingPhone: true, shippingAddress: true, shippingPincode: true,
         subscriptionId: true, createdAt: true,
+        subscription: { select: { name: true, deliverySlotId: true } },
         items: {
           select: { productName: true, quantity: true, lineTotal: true, isLoose: true, stepSize: true, stepUnit: true },
         },
       },
     });
+
+    // Earliest delivery window first, then by area — and expose the window so the app can group stops.
+    const stops = orders
+      .map(({ subscription, ...o }) => ({ ...o, deliverySlotId: subscription?.deliverySlotId ?? null, routineName: subscription?.name ?? null }))
+      .sort((x, y) =>
+        compareRunStops(
+          { slotId: x.deliverySlotId, pincode: x.shippingPincode, createdAt: x.createdAt },
+          { slotId: y.deliverySlotId, pincode: y.shippingPincode, createdAt: y.createdAt },
+        ),
+      );
 
     // Cash to collect = COD orders only (prepaid wallet/UPI already PAID at generation).
     const cashToCollect = orders
@@ -595,7 +607,7 @@ router.get("/subscription-run", async (req: FirebaseAuthRequest, res: Response) 
         stops: orders.length,
         pendingStops: pending,
         cashToCollect,
-        orders,
+        orders: stops,
       },
       serverTimestamp: new Date().toISOString(),
     });

@@ -4,6 +4,7 @@ import prisma from "../lib/prisma.js";
 import { sendError, NotFoundError, ValidationError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole, type FirebaseAuthRequest } from "../middleware/firebaseAuth.js";
 import { istMidnight, computeUpcomingPlan } from "../services/subscriptionEngine.js";
+import { serialize } from "./subscriptions.js";
 import { markStatementInvoicePaid } from "../services/orderInvoice.js";
 import { notifySubscriptionStatement } from "../services/fcmNotifier.js";
 
@@ -19,14 +20,12 @@ router.get("/", async (_req: FirebaseAuthRequest, res: Response) => {
     const subs = await prisma.subscription.findMany({
       where: { status: "ACTIVE" },
       orderBy: { createdAt: "desc" },
-      include: { customer: { select: { name: true, phone: true } } },
+      include: { customer: { select: { name: true, phone: true } }, items: { orderBy: { createdAt: "asc" } } },
     });
     res.json({
       success: true,
       data: subs.map((s) => ({
-        ...s,
-        quantity: Number(s.quantity),
-        stepSize: s.stepSize == null ? null : Number(s.stepSize),
+        ...serialize(s),
         customerName: s.customer?.name ?? null,
         customerPhone: s.customer?.phone ?? null,
       })),

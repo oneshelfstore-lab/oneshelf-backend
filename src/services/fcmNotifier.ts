@@ -625,6 +625,53 @@ export async function notifySubscriptionSkipped(userId: string, productName: str
   });
 }
 
+// A routine ran but some lines were unavailable — the rest of the basket still went out.
+export async function notifyRoutineItemsSkipped(userId: string, routineName: string, itemNames: string[]) {
+  const tokens = await getUserTokens(userId);
+  if (tokens.length === 0) return;
+  const list = itemNames.length > 2 ? `${itemNames.slice(0, 2).join(", ")} and ${itemNames.length - 2} more` : itemNames.join(" and ");
+  await sendToTokens(tokens, {
+    type: "routine_items_skipped",
+    title: `${routineName}: some items skipped`,
+    body: `${list} ${itemNames.length === 1 ? "is" : "are"} unavailable today. The rest of your routine is on its way.`,
+  });
+}
+
+// An unavailable item was swapped for a similar one (the item's rule was "use a similar one").
+export async function notifyRoutineSubstituted(userId: string, routineName: string, swaps: { from: string; to: string }[]) {
+  const tokens = await getUserTokens(userId);
+  if (tokens.length === 0 || swaps.length === 0) return;
+  const body = swaps.length === 1
+    ? `${swaps[0]!.from} wasn't available, so we sent ${swaps[0]!.to} instead.`
+    : `${swaps.length} items weren't available, so we sent similar ones instead.`;
+  await sendToTokens(tokens, { type: "routine_substituted", title: `${routineName}: items swapped`, body });
+}
+
+// A routine WAS ordered, but prices are meaningfully above the usual (still within the customer's ceiling).
+// Sent once per price level, not every morning (see routineIntel.shouldAlertPriceChange).
+export async function notifyRoutinePriceUp(userId: string, routineName: string, drift: number, total: number) {
+  const tokens = await getUserTokens(userId);
+  if (tokens.length === 0) return;
+  await sendToTokens(tokens, {
+    type: "routine_price_up",
+    title: `${routineName}: prices are up`,
+    body: `Today's order came to Rs.${Math.round(total)}, about Rs.${Math.round(drift)} more than usual.`,
+  });
+}
+
+// A routine's refreshed total is above the customer's price ceiling, so today's run was HELD — nothing
+// was ordered or charged. Tapping it opens the routine review (approve → order placed at today's price).
+export async function notifyRoutineHeld(userId: string, routineName: string, subscriptionId: string, total: number, estimate: number) {
+  const tokens = await getUserTokens(userId);
+  if (tokens.length === 0) return;
+  await sendToTokens(tokens, {
+    type: "routine_held",
+    subscriptionId,
+    title: `Review today's ${routineName}`,
+    body: `Prices are higher than usual: Rs.${Math.round(total)} instead of about Rs.${Math.round(estimate)}. Review it to place today's order.`,
+  });
+}
+
 // Prepaid-wallet subscription couldn't be funded today — the balance was too low (or autopay couldn't
 // collect). We skip the delivery rather than deliver unpaid; it resumes the next cycle once topped up.
 export async function notifySubscriptionLowBalance(userId: string, productName: string) {

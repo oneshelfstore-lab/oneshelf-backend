@@ -4,6 +4,7 @@ import { sendError, ValidationError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
 import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js";
 import { istMidnight, computeUpcomingPlan } from "../services/subscriptionEngine.js";
+import { serialize } from "./subscriptions.js";
 
 // Seller-scoped subscription visibility. Mounted at /api/app/seller/subscriptions. A seller sees only
 // the ACTIVE subscriptions against their OWN products (via variant.product.sellerId) — never the whole
@@ -30,16 +31,21 @@ function productFilterFor(req: SellerRequest) {
 router.get("/", async (req: SellerRequest, res: Response) => {
   try {
     const subs = await prisma.subscription.findMany({
-      where: { status: "ACTIVE", variant: { product: productFilterFor(req) } },
+      // A routine belongs to this seller when ANY of its items is theirs (legacy rows: their own variant).
+      where: {
+        status: "ACTIVE",
+        OR: [
+          { items: { some: { variant: { product: productFilterFor(req) } } } },
+          { items: { none: {} }, variant: { product: productFilterFor(req) } },
+        ],
+      },
       orderBy: { createdAt: "desc" },
-      include: { customer: { select: { name: true, phone: true } } },
+      include: { customer: { select: { name: true, phone: true } }, items: { orderBy: { createdAt: "asc" } } },
     });
     res.json({
       success: true,
       data: subs.map((s) => ({
-        ...s,
-        quantity: Number(s.quantity),
-        stepSize: s.stepSize == null ? null : Number(s.stepSize),
+        ...serialize(s),
         customerName: s.customer?.name ?? null,
         customerPhone: s.customer?.phone ?? null,
       })),

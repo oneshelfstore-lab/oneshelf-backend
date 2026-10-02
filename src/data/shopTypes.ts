@@ -27,7 +27,8 @@
 export type CatalogueModel = "STANDARD" | "MENU";
 
 // "choice" = pick one of `options` (rendered as chips; the stored value is the option string).
-export type FieldType = "text" | "number" | "date" | "doc" | "phone" | "email" | "choice";
+// "location" = a map pin; stored as Seller.lat/lng, rendered as a picker rather than a text box.
+export type FieldType = "text" | "number" | "date" | "doc" | "phone" | "email" | "choice" | "location";
 
 export interface RequirementField {
   /** Storage key. With `sellerColumn` set this names a Seller scalar; otherwise it is a key inside
@@ -41,6 +42,12 @@ export interface RequirementField {
   helper?: string;
   /** Required when `type` is "choice"; the allowed answers, in display order. */
   options?: string[];
+  /**
+   * Read-only in the wizard once it has a value. For identity-like fields that were filled in
+   * before the seller got here (the login phone) — re-typing them is how they drift apart. A field
+   * that is still blank stays editable, or an owner-added seller with no phone could never set one.
+   */
+  locked?: boolean;
   /**
    * Present → this field lives on the Seller row. Absent → it lives in Seller.categoryData.
    *
@@ -111,17 +118,37 @@ export const CORE_STEPS: RequirementStep[] = [
     stage: "business",
     fields: [
       { key: "name", label: "Shop name", type: "text", required: true, sellerColumn: "name" },
-      { key: "phone", label: "Shop phone", type: "phone", required: false, sellerColumn: "phone" },
+      {
+        key: "phone",
+        label: "Phone number",
+        type: "phone",
+        required: false,
+        helper: "This is your login number, so it can't be changed here.",
+        sellerColumn: "phone",
+        locked: true,
+      },
       {
         key: "shopAddress",
         label: "Shop address",
         type: "text",
         required: true,
-        helper: "Where a delivery partner will come to collect orders.",
+        helper: "Building, street and area — where a delivery partner will come to collect orders.",
         sellerColumn: "shopAddress",
       },
+      // Lives in categoryData (no sellerColumn): a free-text hint for riders, not a legal field.
+      { key: "landmark", label: "Nearby landmark", type: "text", required: false, helper: "e.g. opposite the bus stand" },
       { key: "city", label: "City", type: "text", required: false, sellerColumn: "city" },
       { key: "pincode", label: "Pincode", type: "text", required: false, sellerColumn: "pincode" },
+      // Optional on purpose: the owner can drop the exact pin later (ownerSellers PATCH), and an
+      // applicant indoors with no GPS must not be stuck on this step.
+      {
+        key: "shopLocation",
+        label: "Exact location on map",
+        type: "location",
+        required: false,
+        helper: "So riders and customers find the right door.",
+        sellerColumn: "lat",
+      },
     ],
   },
   {
@@ -162,21 +189,23 @@ export const CORE_STEPS: RequirementStep[] = [
   },
   {
     key: "grievance",
-    title: "Grievance officer",
-    subtitle: "The person customers reach about your shop",
+    // Worded for a shopkeeper, not a statute. The field KEYS stay grievanceOfficer* — Rule 6
+    // (Consumer Protection (E-Commerce) Rules 2020) still requires this contact on every listing, and
+    // the PDP reads those columns. Only the labels changed. For a one-person shop it is simply the
+    // owner; the app offers a "same as me" switch for that.
+    title: "Who handles complaints?",
+    subtitle: "Customers contact this person if something goes wrong with an order",
     fields: [
       {
         key: "grievanceOfficerName",
-        label: "Officer name",
+        label: "Contact name",
         type: "text",
         required: true,
-        // Rule 6, Consumer Protection (E-Commerce) Rules 2020 — this contact is published on your
-        // listings. For a one-person shop it is simply the owner.
         helper: "Usually you. This name is shown to customers on your listings.",
         sellerColumn: "grievanceOfficerName",
       },
-      { key: "grievanceOfficerPhone", label: "Officer phone", type: "phone", required: true, sellerColumn: "grievanceOfficerPhone" },
-      { key: "grievanceOfficerEmail", label: "Officer email", type: "email", required: false, sellerColumn: "grievanceOfficerEmail" },
+      { key: "grievanceOfficerPhone", label: "Contact phone", type: "phone", required: true, sellerColumn: "grievanceOfficerPhone" },
+      { key: "grievanceOfficerEmail", label: "Contact email", type: "email", required: false, sellerColumn: "grievanceOfficerEmail" },
     ],
   },
 ];
@@ -385,6 +414,66 @@ export const SHOP_TYPES: ShopTypeProfile[] = [
 ];
 
 const BY_KEY = new Map(SHOP_TYPES.map((s) => [s.key, s]));
+
+// ─── Departments — what the seller actually PICKS ────────────────────────────────────────────────
+// The wizard and the lead form show departments ("Grocery", "Fresh"), multi-select, with no
+// sub-category. Each department stands in for ONE representative shop type, which is what decides the
+// paperwork. The first pick becomes `shopType`, the rest `alsoSellCategories`.
+//
+// ⚠️ Representatives are chosen to be the type whose paperwork the WHOLE department shares — never a
+// regulated one. Health is the case that bites: pharmacies and opticals sit together, so its rep is
+// the unlicensed MEDICAL_SUPPLIES and the licensed lines are explicit yes/no extras below. Make
+// "Health" imply PHARMACY instead and every optician is asked for a drug licence they cannot have.
+export const DEPARTMENT_REP: Record<string, string> = {
+  Grocery: "GENERAL_STORE",
+  Fresh: "FRUIT_VEG",
+  "Bakery & sweets": "BAKERY",
+  Food: "RESTAURANT",
+  Beauty: "PERSONAL_CARE",
+  Fashion: "CLOTHING",
+  "Books & stationery": "STATIONERY",
+  "Toys & gifts": "TOYS",
+  Electronics: "ELECTRONICS",
+  Health: "MEDICAL_SUPPLIES",
+  "Baby & kids": "BABY_STORE",
+  Home: "HOME_KITCHEN",
+  Hardware: "HARDWARE",
+  Sports: "SPORTS",
+  Pet: "PET",
+  Garden: "NURSERY",
+  Jewellery: "JEWELLERY",
+  Automotive: "AUTO_PARTS",
+};
+
+/** A restaurant runs on a menu, not the standard catalogue, so it can't be combined with a shop. */
+export const EXCLUSIVE_DEPARTMENTS = new Set(["Food"]);
+
+/** Licensed lines inside a department, asked as plain yes/no — they add that trade's licence step. */
+export const DEPARTMENT_EXTRAS: Record<string, { key: string; label: string }[]> = {
+  Health: [
+    { key: "PHARMACY", label: "I sell medicines (needs a drug licence)" },
+    { key: "MEDICAL_DEVICE", label: "I sell medical devices (needs a licence)" },
+  ],
+};
+
+/**
+ * Lead-form category string ("Grocery,Fresh") → registry keys: first = shopType, rest = also-sell.
+ * Unknown tokens are dropped (the old free-text leads contain things like "kirana"); an exclusive
+ * department wins alone, since it can't be mixed. Returns null when nothing usable was found.
+ */
+export function categoriesFromLead(raw: string | null | undefined): { shopType: string; alsoSell: string[] } | null {
+  const keys: string[] = [];
+  let exclusive: string | null = null;
+  for (const token of String(raw ?? "").split(",")) {
+    const dept = Object.keys(DEPARTMENT_REP).find((d) => d.toLowerCase() === token.trim().toLowerCase());
+    if (!dept) continue;
+    if (EXCLUSIVE_DEPARTMENTS.has(dept)) exclusive = DEPARTMENT_REP[dept]!;
+    else if (!keys.includes(DEPARTMENT_REP[dept]!)) keys.push(DEPARTMENT_REP[dept]!);
+  }
+  if (exclusive) return { shopType: exclusive, alsoSell: [] };
+  if (keys.length === 0) return null;
+  return { shopType: keys[0]!, alsoSell: keys.slice(1) };
+}
 
 /**
  * The profile for a seller's stored shopType.

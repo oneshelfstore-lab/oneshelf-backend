@@ -58,6 +58,10 @@ function shape(s: any) {
     entityType: s.entityType,
     gstScheme: s.gstScheme,
     city: s.city,
+    shopAddress: s.shopAddress,
+    pincode: s.pincode,
+    lat: s.lat != null ? Number(s.lat) : null,
+    lng: s.lng != null ? Number(s.lng) : null,
     // Vertical + restaurant details (null/ignored for a SHOP seller).
     vertical: s.vertical,
     cuisines: s.cuisines,
@@ -398,6 +402,13 @@ const patchSchema = z.object({
   closeTime: hhMm,
   avgPrepMinutes: z.number().int().min(1).max(240).optional(),
   minOrderValue: z.number().min(0).max(100000).optional(),
+  // Where the shop is. The owner can pin the exact spot at any time (the seller's own pin is optional
+  // at onboarding), so a rider is never sent to a town centroid. Range-checked, not trusted.
+  shopAddress: z.string().max(300).optional(),
+  city: z.string().max(80).optional(),
+  pincode: z.string().max(10).optional(),
+  lat: z.number().min(-90).max(90).optional(),
+  lng: z.number().min(-180).max(180).optional(),
 });
 
 router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
@@ -406,7 +417,8 @@ router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
     const parsed = patchSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid data", parsed.error.errors);
     const { status, commissionPct, name, isActive, entityType, gstScheme,
-            cuisines, openTime, closeTime, avgPrepMinutes, minOrderValue } = parsed.data;
+            cuisines, openTime, closeTime, avgPrepMinutes, minOrderValue,
+            shopAddress, city, pincode, lat, lng } = parsed.data;
 
     const seller = await prisma.seller.findUnique({ where: { id }, select: { id: true, isHouse: true } });
     if (!seller) throw new NotFoundError("Seller", id);
@@ -447,6 +459,11 @@ router.patch("/:id", async (req: FirebaseAuthRequest, res: Response) => {
         ...(closeTime !== undefined ? { closeTime: closeTime || null } : {}),
         ...(avgPrepMinutes !== undefined ? { avgPrepMinutes } : {}),
         ...(minOrderValue !== undefined ? { minOrderValue } : {}),
+        ...(shopAddress !== undefined ? { shopAddress: shopAddress.trim() || null } : {}),
+        ...(city !== undefined ? { city: city.trim() || null } : {}),
+        ...(pincode !== undefined ? { pincode: pincode.trim() || null } : {}),
+        // Both or neither: a latitude without its longitude is a point in the wrong place.
+        ...(lat !== undefined && lng !== undefined ? { lat, lng } : {}),
       },
       include: INCLUDE,
     });

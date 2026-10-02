@@ -76,6 +76,11 @@ async function shapeSellerProfile(s: any, agreementCurrent: boolean) {
     ? await signDocFields({ ...(s.categoryData as Record<string, unknown>) }, categoryDocKeys(profile))
     : null;
   const missingFields = missingRequiredFields(profile, s, s.categoryData as Record<string, unknown> | null);
+  // The person behind this shop, so the wizard can offer "same as me" for the complaints contact
+  // instead of making them retype a name and email they gave when applying.
+  const owner = s.ownerUserId
+    ? await prisma.user.findUnique({ where: { id: s.ownerUserId }, select: { name: true, email: true } })
+    : null;
   // ⚠️ signDocFields is not cosmetic. The KYC buckets have had correct storage.rules since July
   // 2026 and those rules were doing nothing, because the app uploaded with ref.downloadUrl — a
   // permanent token that bypasses rules entirely. The app now stores the bare object path and this
@@ -142,6 +147,11 @@ async function shapeSellerProfile(s: any, agreementCurrent: boolean) {
     // public GET /api/app/onboarding/requirements — static, cacheable, and not worth repeating for
     // every row of the house manager's all-sellers list.
     shopType: profile.key,
+    // False for a seller who never picked a trade (shopType is null and `shopType` above is only the
+    // general-store FALLBACK). Without it the wizard would show "Grocery" ticked for someone who ticked nothing.
+    shopTypeChosen: Boolean(s.shopType),
+    ownerName: owner?.name && owner.name !== "App User" ? owner.name : null,
+    ownerEmail: owner?.email ?? null,
     alsoSellCategories: (s.alsoSellCategories ?? []) as string[],
     offeredCommissionPct: s.offeredCommissionPct != null ? Number(s.offeredCommissionPct) : null,
     shopTypeLabel: profile.label,
@@ -340,10 +350,17 @@ router.put("/", async (req: SellerRequest, res: Response) => {
         onboardingStatus: true, everApproved: true, kycEditUnlocked: true,
         gstin: true, pan: true, fssaiNumber: true, fssaiExpiry: true,
         gstinDocUrl: true, panDocUrl: true, fssaiDocUrl: true, bankProofUrl: true, bankDetails: true,
-        shopType: true, categoryData: true, vertical: true, alsoSellCategories: true,
+        shopType: true, categoryData: true, vertical: true, alsoSellCategories: true, phone: true,
       },
     });
     if (!current) throw new NotFoundError("Seller", req.sellerId ?? "");
+
+    // The shop phone is the login number (set from the application at approval) and is not
+    // seller-editable: drop a changed value rather than erroring, so a stale client that still sends
+    // the whole form keeps saving everything else. The house manager's route and the owner can change it.
+    if (current.phone && parsed.data.phone !== undefined && parsed.data.phone !== current.phone) {
+      delete parsed.data.phone;
+    }
 
     // Resolve the profile this write lands under — the shop type / also-sell list may be changing in
     // this request, and the incoming category fields must be validated against what they'll end up in.

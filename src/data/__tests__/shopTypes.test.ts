@@ -12,6 +12,9 @@ import {
   readSellerPath,
   effectiveProfile,
   isAlsoSellKey,
+  DEPARTMENT_REP,
+  DEPARTMENT_EXTRAS,
+  categoriesFromLead,
 } from "../shopTypes.js";
 
 /**
@@ -128,6 +131,48 @@ describe("category-specific fields", () => {
     const gstin = fieldsFor(PHARMACY).find((f) => f.key === "gstin");
     expect(drugLicence?.sellerColumn).toBeUndefined();
     expect(gstin?.sellerColumn).toBe("gstin");
+  });
+});
+
+describe("departments (what the seller picks)", () => {
+  it("gives every department a representative that exists and belongs to it", () => {
+    for (const dept of new Set(SHOP_TYPES.map((s) => s.department))) {
+      const rep = SHOP_TYPES.find((s) => s.key === DEPARTMENT_REP[dept]);
+      expect(rep, dept).toBeDefined();
+      expect(rep!.department).toBe(dept);
+    }
+  });
+
+  // Picking "Health" must not, by itself, demand a drug licence (an optician has none) — the licensed
+  // lines are explicit extras. If a regulated rep slips in, every optical shop is blocked at submit.
+  it("never lets a department imply a regulated trade", () => {
+    for (const rep of Object.values(DEPARTMENT_REP)) {
+      expect(SHOP_TYPES.find((s) => s.key === rep)!.regulated).toBeFalsy();
+    }
+    expect(DEPARTMENT_EXTRAS.Health!.map((e) => e.key)).toEqual(["PHARMACY", "MEDICAL_DEVICE"]);
+  });
+
+  it("turns a lead-form category string into primary + also-sell", () => {
+    expect(categoriesFromLead("Grocery,Fresh,Electronics")).toEqual({
+      shopType: "GENERAL_STORE",
+      alsoSell: ["FRUIT_VEG", "ELECTRONICS"],
+    });
+    // Case-insensitive, tolerates old free text and gaps, dedupes.
+    expect(categoriesFromLead(" fresh , kirana ,, Fresh")).toEqual({ shopType: "FRUIT_VEG", alsoSell: [] });
+    expect(categoriesFromLead("kirana store")).toBeNull();
+    expect(categoriesFromLead(null)).toBeNull();
+  });
+
+  it("lets a restaurant stand alone", () => {
+    expect(categoriesFromLead("Grocery,Food")).toEqual({ shopType: "RESTAURANT", alsoSell: [] });
+  });
+
+  it("locks the phone and offers an optional map pin on the shop step", () => {
+    const shop = stepsFor(GENERAL).find((s) => s.key === "shop")!;
+    expect(shop.fields.find((f) => f.key === "phone")?.locked).toBe(true);
+    const pin = shop.fields.find((f) => f.type === "location")!;
+    expect(pin.required).toBe(false);
+    expect(shop.fields.some((f) => f.key === "landmark")).toBe(true);
   });
 });
 

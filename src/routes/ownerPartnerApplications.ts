@@ -9,6 +9,7 @@ import {
 } from "../middleware/firebaseAuth.js";
 import { shapePartnerApplication } from "./partnerApplications.js";
 import { notifyPartnerApproved } from "../services/fcmNotifier.js";
+import { categoriesFromLead } from "../data/shopTypes.js";
 
 // Owner inbox for "Partner with us" applications. Mounted at
 // /api/app/owner/partner-applications (Firebase-auth + OWNER, mirrors ownerQuotes).
@@ -45,26 +46,53 @@ async function uniqueSlug(base: string): Promise<string> {
 // nothing to create, just triage the lead.
 // Returns the provisioned user's id so the caller can notify them, or null when nothing was
 // provisioned (bad phone / already a seller) — in which case there is nothing to announce.
-async function provisionSeller(app: { businessName: string; contactName: string; phone: string; gstin: string | null; category: string | null }): Promise<string | null> {
+// The applicant's email, only if no other account already owns it. User.email is UNIQUE and also the
+// dashboard-login identifier, so a clash must be skipped silently — losing a contact email is better
+// than failing the whole approval, and the applicant can still add it later.
+async function emailIfFree(db: Pick<typeof prisma, "user">, email: string | null | undefined, selfId?: string): Promise<string | null> {
+  const e = email?.trim().toLowerCase();
+  if (!e) return null;
+  const clash = await db.user.findUnique({ where: { email: e }, select: { id: true } });
+  return clash && clash.id !== selfId ? null : e;
+}
+
+async function provisionSeller(app: { businessName: string; contactName: string; phone: string; email: string | null; gstin: string | null; category: string | null }): Promise<string | null> {
   const phone = normalizePhone(app.phone);
   if (phone.length !== 10) return null; // shouldn't happen (already validated at submission), be defensive
 
   const existingUser = await prisma.user.findFirst({
     where: { phone: { in: [phone, `+91${phone}`, `91${phone}`] } },
     orderBy: { createdAt: "asc" },
-    include: { sellerAccount: { select: { id: true } } },
+    include: { sellerAccount: { select: { id: true, onboardingStatus: true } } },
   });
-  if (existingUser?.sellerAccount) return null; // already a seller — nothing to provision
+  if (existingUser?.sellerAccount) {
+    // ⚠️ A REJECTED seller who applies again is the normal retry path (the rejection screen reads
+    // like "apply again", so people do). Returning null here left the row REJECTED with the old
+    // reason, so the owner approved the new lead and the applicant still saw "Changes needed" on
+    // login. Re-open it instead: keep everything they already filled in, drop the stale reason.
+    if (existingUser.sellerAccount.onboardingStatus === "REJECTED") {
+      await prisma.seller.update({
+        where: { id: existingUser.sellerAccount.id },
+        data: { onboardingStatus: "IN_PROGRESS", onboardingRejectionReason: null },
+      });
+      return existingUser.id;
+    }
+    return null; // already a seller (in progress or approved) — nothing to provision
+  }
 
+  // What they ticked on the lead form becomes the wizard's starting selection (null = free text).
+  const cats = categoriesFromLead(app.category);
   const slug = await uniqueSlug(slugify(app.businessName || app.contactName));
   return prisma.$transaction(async (tx) => {
     let userId: string;
     if (existingUser) {
       const keepName = existingUser.name && existingUser.name !== "App User" ? existingUser.name : app.contactName;
-      const u = await tx.user.update({ where: { id: existingUser.id }, data: { role: "SELLER", phone, name: keepName } });
+      const email = existingUser.email ? undefined : (await emailIfFree(tx, app.email, existingUser.id)) ?? undefined;
+      const u = await tx.user.update({ where: { id: existingUser.id }, data: { role: "SELLER", phone, name: keepName, ...(email ? { email } : {}) } });
       userId = u.id;
     } else {
-      const u = await tx.user.create({ data: { name: app.contactName, phone, role: "SELLER", phoneVerified: false } });
+      const email = await emailIfFree(tx, app.email);
+      const u = await tx.user.create({ data: { name: app.contactName, phone, role: "SELLER", phoneVerified: false, ...(email ? { email } : {}) } });
       userId = u.id;
     }
     // NOTE: PartnerApplication has no "city" field (only category/gstin) — leave city unset;
@@ -78,6 +106,7 @@ async function provisionSeller(app: { businessName: string; contactName: string;
         status: "PENDING",
         onboardingStatus: "NOT_STARTED",
         gstin: app.gstin ?? null,
+        ...(cats ? { shopType: cats.shopType, alsoSellCategories: cats.alsoSell } : {}),
       },
     });
     return userId;
@@ -88,25 +117,38 @@ async function provisionSeller(app: { businessName: string; contactName: string;
 // same resolution ownerStaff.ts POST / uses) and a stub DeliveryProfile. If a profile already
 // exists for this user, skip — nothing to create.
 // Returns the provisioned user's id (see provisionSeller), or null when nothing was provisioned.
-async function provisionDeliveryRider(app: { contactName: string; phone: string }): Promise<string | null> {
+async function provisionDeliveryRider(app: { contactName: string; phone: string; email: string | null }): Promise<string | null> {
   const phone = normalizePhone(app.phone);
   if (phone.length !== 10) return null;
 
   const existing = await prisma.user.findFirst({
     where: { phone: { in: [phone, `+91${phone}`, `91${phone}`] } },
     orderBy: { createdAt: "asc" },
-    include: { deliveryProfile: { select: { id: true } } },
+    include: { deliveryProfile: { select: { id: true, onboardingStatus: true } } },
   });
 
   return prisma.$transaction(async (tx) => {
     let userId: string;
     if (existing) {
       const keepName = existing.name && existing.name !== "App User" ? existing.name : app.contactName;
-      const u = await tx.user.update({ where: { id: existing.id }, data: { role: "DELIVERY", phone, name: keepName } });
+      const email = existing.email ? undefined : (await emailIfFree(tx, app.email, existing.id)) ?? undefined;
+      const u = await tx.user.update({ where: { id: existing.id }, data: { role: "DELIVERY", phone, name: keepName, ...(email ? { email } : {}) } });
       userId = u.id;
-      if (existing.deliveryProfile) return null; // already has a profile — nothing more to do
+      if (existing.deliveryProfile) {
+        // Same retry trap as provisionSeller: a rejected rider who re-applies must be re-opened, or
+        // they keep seeing the old rejection after the owner approves them again.
+        if (existing.deliveryProfile.onboardingStatus === "REJECTED") {
+          await tx.deliveryProfile.update({
+            where: { id: existing.deliveryProfile.id },
+            data: { onboardingStatus: "IN_PROGRESS", rejectionReason: null },
+          });
+          return userId;
+        }
+        return null; // already has a live profile — nothing more to do
+      }
     } else {
-      const u = await tx.user.create({ data: { name: app.contactName, phone, role: "DELIVERY", phoneVerified: false } });
+      const email = await emailIfFree(tx, app.email);
+      const u = await tx.user.create({ data: { name: app.contactName, phone, role: "DELIVERY", phoneVerified: false, ...(email ? { email } : {}) } });
       userId = u.id;
     }
     await tx.deliveryProfile.create({ data: { userId, onboardingStatus: "NOT_STARTED" } });
@@ -157,11 +199,12 @@ async function review(
       try {
         const kind = existing.kind === "DELIVERY" ? "DELIVERY" : "SELLER";
         const provisionedUserId = kind === "DELIVERY"
-          ? await provisionDeliveryRider({ contactName: existing.contactName, phone: existing.phone })
+          ? await provisionDeliveryRider({ contactName: existing.contactName, phone: existing.phone, email: existing.email })
           : await provisionSeller({
             businessName: existing.businessName,
             contactName: existing.contactName,
             phone: existing.phone,
+            email: existing.email,
             gstin: existing.gstin,
             category: existing.category,
           });

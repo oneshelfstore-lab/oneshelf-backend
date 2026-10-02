@@ -56,7 +56,9 @@ const applicationSchema = z.object({
     .refine((p) => p.length === 10, "A valid 10-digit phone number is required"),
   email: z.preprocess(blankToNull, z.string().email().max(160).nullable().optional()),
   gstin: z.preprocess(blankToNull, z.string().max(20).nullable().optional()),
-  category: z.preprocess(blankToNull, z.string().max(80).nullable().optional()),
+  // Sellers: comma-separated department names ("Grocery,Fresh"); riders: a free-text area. 400 fits
+  // all eighteen departments with room to spare — 80 would have cut a long list mid-word.
+  category: z.preprocess(blankToNull, z.string().max(400).nullable().optional()),
   message: z.string().max(2000).default(""),
 });
 

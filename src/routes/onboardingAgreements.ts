@@ -9,7 +9,15 @@ import {
   SENSITIVE_DATA_CONSENT_TEXT,
   LOCATION_TRACKING_CONSENT_TEXT,
 } from "../data/onboardingAgreements.js";
-import { SHOP_TYPES, isKnownShopType, effectiveProfile, stepsFor } from "../data/shopTypes.js";
+import {
+  SHOP_TYPES,
+  DEPARTMENT_REP,
+  DEPARTMENT_EXTRAS,
+  EXCLUSIVE_DEPARTMENTS,
+  isKnownShopType,
+  effectiveProfile,
+  stepsFor,
+} from "../data/shopTypes.js";
 
 // Public read of the onboarding consent copy (Phase 1). Served over the API rather than hardcoded
 // in the Android app so the (currently placeholder, non-lawyer-reviewed — see
@@ -42,11 +50,20 @@ router.get("/agreements", (req: Request, res: Response) => {
 
 /** GET /api/app/onboarding/shop-types → the picker, grouped by department. */
 router.get("/shop-types", (_req: Request, res: Response) => {
-  const departments: { department: string; shopTypes: unknown[] }[] = [];
+  // `repKey` = the shop type this department stands for when the seller picks it as a whole (see
+  // DEPARTMENT_REP). `exclusive` departments can't be combined with others. `extras` are licensed
+  // lines inside the department, asked as plain yes/no.
+  const departments: { department: string; repKey: string; exclusive: boolean; extras: unknown[]; shopTypes: unknown[] }[] = [];
   for (const s of SHOP_TYPES) {
     let group = departments.find((d) => d.department === s.department);
     if (!group) {
-      group = { department: s.department, shopTypes: [] };
+      group = {
+        department: s.department,
+        repKey: DEPARTMENT_REP[s.department] ?? s.key,
+        exclusive: EXCLUSIVE_DEPARTMENTS.has(s.department),
+        extras: DEPARTMENT_EXTRAS[s.department] ?? [],
+        shopTypes: [],
+      };
       departments.push(group);
     }
     group.shopTypes.push({

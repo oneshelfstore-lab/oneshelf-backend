@@ -88,8 +88,30 @@ async function persist(userIds: string[], data: Record<string, string>) {
 async function toUsers(userIds: string[], data: Record<string, string>, priority: "high" | "normal" = "high") {
   if (userIds.length === 0) return;
   await persist(userIds, data);
-  const rows = await prisma.fcmToken.findMany({ where: { userId: { in: userIds } }, select: { token: true } });
+  // People who switched this topic off still get the inbox row above (it is quiet and complete), just
+  // no push. Only topics in PREFERENCE_TOPICS can be switched off; anything else is always sent.
+  const pushIds = await withoutMuted(userIds, data);
+  if (pushIds.length === 0) return;
+  const rows = await prisma.fcmToken.findMany({ where: { userId: { in: pushIds } }, select: { token: true } });
   await sendToTokens(rows.map((r) => r.token), data, priority);
+}
+
+async function withoutMuted(userIds: string[], data: Record<string, string>): Promise<string[]> {
+  const topic = resolveCatalog(data).topic;
+  if (!topic) return userIds;
+  try {
+    const muted = await prisma.notificationPreference.findMany({
+      where: { topic, push: false, userId: { in: userIds } },
+      select: { userId: true },
+    });
+    if (muted.length === 0) return userIds;
+    const off = new Set(muted.map((m) => m.userId));
+    return userIds.filter((id) => !off.has(id));
+  } catch (e) {
+    // A preference lookup failing must never silence a notification — fail open.
+    console.error("Notification preference lookup failed:", e);
+    return userIds;
+  }
 }
 
 const toUser = (userId: string, data: Record<string, string>) => toUsers([userId], data);

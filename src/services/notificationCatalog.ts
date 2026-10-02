@@ -23,6 +23,8 @@ export type CatalogEntry = {
   entity?: { type: string; idKey: string };
   /** Deep-link key the app maps to a screen. */
   action?: string;
+  /** The person can switch this off (see PREFERENCE_TOPICS). No topic = always delivered. */
+  topic?: string;
 };
 
 const order = { type: "ORDER", idKey: "orderId" };
@@ -68,25 +70,38 @@ export const CATALOG: Record<string, CatalogEntry> = {
 
   // ── Routines / subscriptions ──
   routine_held: { category: "ROUTINES", kind: "ACTION", severity: "HIGH", entity: { type: "ROUTINE", idKey: "subscriptionId" }, action: "REVIEW_ROUTINE" },
-  routine_items_skipped: { category: "ROUTINES", kind: "INFO" },
-  routine_substituted: { category: "ROUTINES", kind: "INFO" },
-  routine_price_up: { category: "ROUTINES", kind: "INFO" },
-  subscription_skipped: { category: "ROUTINES", kind: "INFO" },
-  subscription_ending_soon: { category: "ROUTINES", kind: "INFO" },
+  routine_items_skipped: { category: "ROUTINES", kind: "INFO", topic: "routines" },
+  routine_substituted: { category: "ROUTINES", kind: "INFO", topic: "routines" },
+  routine_price_up: { category: "ROUTINES", kind: "INFO", topic: "routines" },
+  subscription_skipped: { category: "ROUTINES", kind: "INFO", topic: "routines" },
+  subscription_ending_soon: { category: "ROUTINES", kind: "INFO", topic: "routines" },
   subscription_low_balance: { category: "PAYMENTS", kind: "ACTION", severity: "HIGH", action: "TOP_UP_WALLET" },
   // A bill that was already auto-paid needs nothing from the customer; one that is "ready" does.
   subscription_statement: { category: "PAYMENTS", kind: (d) => (d.autoPaid === "true" ? "INFO" : "ACTION"), action: "OPEN_STATEMENT" },
 
   // ── Account / onboarding / catalog ──
-  tier_up: { category: "ACCOUNT", kind: "INFO" },
+  tier_up: { category: "ACCOUNT", kind: "INFO", topic: "loyalty" },
   partner_approved: { category: "ACCOUNT", kind: (d) => (d.stage === "PROVISIONED" ? "ACTION" : "INFO"), severity: "HIGH", action: "OPEN_ONBOARDING" },
   product_decision: { category: "INVENTORY", kind: (d) => (d.approved === "false" ? "ACTION" : "INFO"), action: "OPEN_PRODUCTS" },
-  back_in_stock: { category: "INVENTORY", kind: "INFO" },
+  back_in_stock: { category: "INVENTORY", kind: "INFO", topic: "back_in_stock" },
 
   // ── Promotional (kept apart from everything transactional) ──
   broadcast: { category: "PROMO", kind: "PROMO" },
-  abandoned_cart: { category: "PROMO", kind: "PROMO", action: "OPEN_CART" },
+  abandoned_cart: { category: "PROMO", kind: "PROMO", action: "OPEN_CART", topic: "cart_reminders" },
 };
+
+/**
+ * The ONLY things a person may switch off. Everything not tied to one of these (orders, delivery,
+ * payments, every action request, support) is always delivered. Served to the app by
+ * GET /me/notification-preferences, so a new topic needs no app release. Offers are deliberately absent:
+ * they follow the MARKETING_COMMS consent, which stays the single source of truth for marketing.
+ */
+export const PREFERENCE_TOPICS = [
+  { key: "routines", label: "Routine updates", description: "Skipped or swapped items and price changes on your routines" },
+  { key: "back_in_stock", label: "Back in stock", description: "When an item you asked about is available again" },
+  { key: "loyalty", label: "Membership", description: "Tier upgrades and perks" },
+  { key: "cart_reminders", label: "Cart reminders", description: "A nudge when you leave items in your cart" },
+] as const;
 
 /** Pushes that are deliberately NOT written to the inbox. */
 export const NOT_PERSISTED = new Set<string>([
@@ -101,11 +116,12 @@ export function resolveCatalog(data: Data): {
   entityType: string | null;
   entityId: string | null;
   action: string | null;
+  topic: string | null;
   known: boolean;
 } {
   const e = CATALOG[data.type ?? ""];
   if (!e) {
-    return { category: "SYSTEM", kind: "INFO", severity: "NORMAL", entityType: null, entityId: null, action: null, known: false };
+    return { category: "SYSTEM", kind: "INFO", severity: "NORMAL", entityType: null, entityId: null, action: null, topic: null, known: false };
   }
   return {
     category: e.category,
@@ -114,6 +130,7 @@ export function resolveCatalog(data: Data): {
     entityType: e.entity?.type ?? null,
     entityId: e.entity ? data[e.entity.idKey] || null : null,
     action: e.action ?? null,
+    topic: e.topic ?? null,
     known: true,
   };
 }

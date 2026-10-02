@@ -330,6 +330,7 @@ export async function anonymizeUser(userId: string): Promise<string[]> {
     await tx.cartItem.deleteMany({ where: { userId } });
     await tx.fcmToken.deleteMany({ where: { userId } });
     await tx.notification.deleteMany({ where: { userId } }); // titles/bodies carry names + order details
+    await tx.notificationPreference.deleteMany({ where: { userId } });
     await tx.favorite.deleteMany({ where: { userId } });
     // Courier bookings are retained (payment record) but the people on them are scrubbed: the
     // recipient is a THIRD PARTY whose name/number we hold only to serve this account.

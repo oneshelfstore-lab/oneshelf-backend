@@ -419,6 +419,7 @@ model User {
   cartReminderCount  Int       @default(0)
 
   notifications Notification[]
+  notificationPreferences NotificationPreference[]
 
   // Wallet / store credit. Denormalized spendable balance — the source of
   // truth for the guarded atomic decrement at checkout. Every mutation also writes a
@@ -1849,6 +1850,19 @@ enum NotifSeverity {
   NORMAL
   HIGH
   CRITICAL
+}
+
+// Per-person switches for the OPTIONAL notification topics (services/notificationCatalog.ts
+// PREFERENCE_TOPICS). Only overrides are stored: no row = the topic's default (on). Anything not listed
+// there (orders, delivery, payments, every action request) cannot be switched off. Offers are NOT here:
+// they follow the MARKETING_COMMS consent in the existing privacy ledger, which stays the one source of truth.
+model NotificationPreference {
+  userId String
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  topic  String
+  push   Boolean @default(true)
+
+  @@id([userId, topic])
 }
 
 model Notification {

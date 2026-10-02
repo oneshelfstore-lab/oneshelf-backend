@@ -20,6 +20,7 @@ import companyRoutes from "./routes/company.js";
 import storeConfigRoutes from "./routes/storeConfig.js";
 import fcmTokenRoutes from "./routes/fcmTokens.js";
 import notificationRoutes from "./routes/notifications.js";
+import notificationPreferenceRoutes from "./routes/notificationPreferences.js";
 import { publicStoresRouter } from "./routes/stores.js";
 import favoriteStoresRoutes from "./routes/favoriteStores.js";
 import { publicCategoryRouter, adminCategoryRouter, publicSuperCategoryRouter } from "./routes/categories.js";
@@ -479,6 +480,7 @@ app.use("/api/app/delivery/onboarding", deliveryOnboardingRoutes);
 // More-specific than "/api/app/me" → MUST be mounted before it (Express matches prefixes in order).
 app.use("/api/app/me/subscriptions", subscriptionRoutes);
 app.use("/api/app/me/notifications", notificationRoutes);
+app.use("/api/app/me/notification-preferences", notificationPreferenceRoutes);
 app.use("/api/app/me", appUserRoutes);
 
 // ─── Auth routes (no auth middleware) ───────────────────────────────

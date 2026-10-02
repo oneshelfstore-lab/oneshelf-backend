@@ -7,7 +7,8 @@ import {
   requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
-import { istMonthKey } from "../services/referralRewards.js";
+import { istMonthKey } from "../utils/istMonthKey.js";
+import { resolveActions } from "../services/notificationInbox.js";
 import { computeUnsettledCash, pendingSettlementFor, computeRiderMonth } from "./delivery.js";
 
 // Owner-managed delivery staff. Mounted at /api/app/owner/delivery-agents.
@@ -142,6 +143,7 @@ router.post("/settlements/:id/confirm", async (req: FirebaseAuthRequest, res: Re
       where: { id },
       data: { status: "CONFIRMED", confirmedAt: new Date(), confirmedById: req.appUser!.id },
     });
+    await resolveActions({ entityType: "RIDER", entityId: settlement.deliveryBoyId, types: ["cash_settlement_declared"] });
     res.json({
       success: true,
       data: { id: updated.id, status: updated.status, amount: Number(updated.amount), confirmedAt: updated.confirmedAt },
@@ -159,6 +161,7 @@ router.post("/settlements/:id/confirm", async (req: FirebaseAuthRequest, res: Re
 router.post("/settlements/:id/reject", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const id = String(req.params.id ?? "");
+    const riderId = (await prisma.cashSettlement.findUnique({ where: { id }, select: { deliveryBoyId: true } }))?.deliveryBoyId;
     // ⚠️ The delete is its own guard — a conditional deleteMany, not findUnique-then-delete.
     // This destroys a financial record, and the old read-then-delete could destroy the WRONG one:
     // a confirm committing between the read and the delete meant this erased an ALREADY-CONFIRMED
@@ -173,6 +176,7 @@ router.post("/settlements/:id/reject", async (req: FirebaseAuthRequest, res: Res
       if (!existing) throw new NotFoundError("Cash settlement", id);
       throw new ValidationError("This handover is already confirmed — it can't be rejected.");
     }
+    if (riderId) await resolveActions({ entityType: "RIDER", entityId: riderId, types: ["cash_settlement_declared"] });
     res.json({ success: true, data: { id, rejected: true } });
   } catch (e) {
     sendError(res, e);

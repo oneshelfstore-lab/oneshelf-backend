@@ -4,7 +4,7 @@ import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { requireRole } from "../middleware/auth.js";
 import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orderInvoice.js";
-import { accrueReferralCommission, refundWalletOnCancel } from "../services/referralRewards.js";
+import { refundWalletOnCancel } from "../services/walletRefund.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { assertSellersPacked, reverseSellerLedgerOnCancel, cancelOrder } from "../services/subOrderFulfillment.js";
 import { signOrderMedia, signOrderMediaList } from "../lib/storageUrls.js";
@@ -143,9 +143,8 @@ router.put("/:id/status", requireRole("OWNER", "ACCOUNTANT", "BILLING_CLERK") as
     if (newStatus === "DELIVERED" && !order.invoiceId) {
       generateOrderInvoice(order.id).catch((e) => console.error("Invoice generation failed:", e));
     }
-    // Referral hooks (idempotent + best-effort).
+    // Post-delivery / cancel hooks (idempotent + best-effort).
     if (newStatus === "DELIVERED") {
-      accrueReferralCommission(order.id).catch((e) => console.error("referral commission accrual failed:", e));
       checkTierUpOnDelivery(order.id).catch((e) => console.error("tier-up check failed:", e));
     }
     if (newStatus === "CANCELLED") {

@@ -10,6 +10,7 @@ import {
 import { shapeComplaint, quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 import { shapeOrderMessage } from "../services/orderMessages.js";
 import { notifyComplaintForwarded, notifyComplaintMessage } from "../services/fcmNotifier.js";
+import { resolveActions } from "../services/notificationInbox.js";
 
 // Owner complaint inbox. Mounted at /api/app/owner/complaints.
 const router = Router();
@@ -135,6 +136,7 @@ router.post("/:id/resolve", async (req: FirebaseAuthRequest, res: Response) => {
       data: { status: "RESOLVED", resolvedAt: new Date() },
       include: { user: { select: { name: true, phone: true, role: true } }, forwardedSeller: { select: { name: true } } },
     });
+    await resolveActions({ entityType: "COMPLAINT", entityId: id, types: ["complaint", "complaint_forwarded"] });
     res.json({ success: true, data: shapeComplaint(updated) });
   } catch (e) {
     sendError(res, e);

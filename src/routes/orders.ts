@@ -22,7 +22,7 @@ import { signOrderMedia, signOrderMediaList } from "../lib/storageUrls.js";
 import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 import { generateOrderInvoice, syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { generateInvoicePdf } from "../services/pdfGenerator.js";
-import { refundWalletOnCancel } from "../services/referralRewards.js";
+import { refundWalletOnCancel } from "../services/walletRefund.js";
 import { reverseSellerLedgerOnCancel, cancelOrder, claimRefund, cancelSubOrderAndRefund } from "../services/subOrderFulfillment.js";
 import { customerCancelInfo, shapeSubOrders, orderVertical, CANCEL_WINDOW_MESSAGE } from "../lib/customerOrderView.js";
 import { markOrderPaid } from "../services/orderPayment.js";
@@ -559,7 +559,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     if (paymentMethod === "COD" || fullyWalletPaid) {
       notifyNewOrder(order).catch((e: unknown) => console.error("[background task failed]", e));
       for (const sn of sellerNotifications) {
-        notifySubOrderNew(sn.ownerUserId, { orderNumber: order.orderNumber, itemCount: sn.itemCount, subtotal: sn.subtotal }).catch((e: unknown) => console.error("[background task failed]", e));
+        notifySubOrderNew(sn.ownerUserId, { orderId: order.id, orderNumber: order.orderNumber, itemCount: sn.itemCount, subtotal: sn.subtotal }).catch((e: unknown) => console.error("[background task failed]", e));
       }
     }
 
@@ -774,7 +774,7 @@ router.post("/:id/sub-orders/:subOrderId/cancel", async (req: FirebaseAuthReques
       reason: `customer cancelled ${sub.seller.name}'s items`,
     });
     if (sub.seller.ownerUserId) {
-      notifySubOrderCancelled(sub.seller.ownerUserId, { orderNumber: order.orderNumber })
+      notifySubOrderCancelled(sub.seller.ownerUserId, { orderId: order.id, orderNumber: order.orderNumber })
         .catch((e: unknown) => console.error("[background task failed]", e));
     }
 

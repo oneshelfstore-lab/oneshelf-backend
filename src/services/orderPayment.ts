@@ -95,6 +95,7 @@ async function notifyOrderPaid(orderId: string) {
   for (const so of order.subOrders) {
     if (!so.seller?.ownerUserId) continue;
     await notifySubOrderNew(so.seller.ownerUserId, {
+      orderId: order.id,
       orderNumber: order.orderNumber,
       itemCount: so._count.items,
       subtotal: Number(so.subtotal),

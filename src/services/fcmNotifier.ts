@@ -1,6 +1,8 @@
 import { admin, isFirebaseInitialized } from "../lib/firebase.js";
 import { haversineKm } from "../lib/distance.js";
 import prisma from "../lib/prisma.js";
+import { NOT_PERSISTED, resolveCatalog } from "./notificationCatalog.js";
+import { resolveActions } from "./notificationInbox.js";
 
 async function getUserTokens(userId: string): Promise<string[]> {
   const tokens = await prisma.fcmToken.findMany({
@@ -44,6 +46,77 @@ async function sendToTopic(topic: string, data: Record<string, string>) {
   } catch (e) {
     console.error("FCM topic send failed:", e);
   }
+}
+
+// ─── Inbox persistence ───────────────────────────────────────────────
+// Every push to a person is ALSO written to the Notification table first, so the in-app inbox does not
+// depend on the push arriving (Doze, no token, new phone). Persisting never blocks or fails the push.
+
+const warnedUnknown = new Set<string>();
+
+async function persist(userIds: string[], data: Record<string, string>) {
+  if (userIds.length === 0 || NOT_PERSISTED.has(data.type ?? "")) return;
+  try {
+    const c = resolveCatalog(data);
+    if (!c.known && !warnedUnknown.has(data.type ?? "")) {
+      warnedUnknown.add(data.type ?? "");
+      console.warn(`[notifications] no catalog entry for push type "${data.type}" — filed under SYSTEM/INFO`);
+    }
+    const etaMs = Number(data.etaAt);
+    await prisma.notification.createMany({
+      data: [...new Set(userIds)].map((userId) => ({
+        userId,
+        type: data.type ?? "",
+        category: c.category,
+        kind: c.kind,
+        severity: c.severity,
+        title: data.title ?? "",
+        body: data.body ?? "",
+        entityType: c.entityType,
+        entityId: c.entityId,
+        action: c.action,
+        imageUrl: data.imageUrl || null,
+        etaAt: Number.isFinite(etaMs) && etaMs > 0 ? new Date(etaMs) : null,
+      })),
+    });
+  } catch (e) {
+    console.error("Notification persist failed:", e);
+  }
+}
+
+/** Inbox row + FCM push for these users. A user with no device token still gets the row. */
+async function toUsers(userIds: string[], data: Record<string, string>, priority: "high" | "normal" = "high") {
+  if (userIds.length === 0) return;
+  await persist(userIds, data);
+  const rows = await prisma.fcmToken.findMany({ where: { userId: { in: userIds } }, select: { token: true } });
+  await sendToTokens(rows.map((r) => r.token), data, priority);
+}
+
+const toUser = (userId: string, data: Record<string, string>) => toUsers([userId], data);
+
+/** The store owner(s). The push itself stays on the `owner_orders` topic; the inbox row is per OWNER user. */
+async function toOwners(data: Record<string, string>) {
+  const owners = await prisma.user.findMany({ where: { role: "OWNER", isActive: true }, select: { id: true } });
+  await persist(owners.map((o) => o.id), data);
+  await sendToTopic("owner_orders", data);
+}
+
+/** Customers whose CURRENT MARKETING_COMMS answer is "granted" (latest row wins; no row = not granted). */
+async function marketingOptedInUserIds(): Promise<string[]> {
+  const rows = await prisma.consentRecord.findMany({
+    where: { subjectType: "USER", consentType: "MARKETING_COMMS" },
+    orderBy: { grantedAt: "desc" },
+    select: { subjectId: true, granted: true },
+  });
+  const latest = new Map<string, boolean>();
+  for (const r of rows) if (!latest.has(r.subjectId)) latest.set(r.subjectId, r.granted);
+  const ids = [...latest].filter(([, g]) => g).map(([id]) => id);
+  if (ids.length === 0) return [];
+  const users = await prisma.user.findMany({
+    where: { id: { in: ids }, role: "CUSTOMER", isActive: true, deletionStatus: "ACTIVE" },
+    select: { id: true },
+  });
+  return users.map((u) => u.id);
 }
 
 // NOTE: messages are data-only (so the app's MyFirebaseMessagingService builds the
@@ -95,7 +168,7 @@ export async function notifyNewOrder(order: { id: string; orderNumber: string; t
   if (imageUrl) data.imageUrl = imageUrl;
   if (etaAt) data.etaAt = etaAt;
 
-  await sendToTopic("owner_orders", data);
+  await toOwners(data);
 }
 
 // A new order includes items from this specific seller (their slice = SubOrder). Pings the seller's
@@ -103,12 +176,11 @@ export async function notifyNewOrder(order: { id: string; orderNumber: string; t
 // reason to be subscribed to that topic and previously found out only by opening the app.
 export async function notifySubOrderNew(
   sellerOwnerUserId: string,
-  info: { orderNumber: string; itemCount: number; subtotal: number },
+  info: { orderId: string; orderNumber: string; itemCount: number; subtotal: number },
 ) {
-  const tokens = await getUserTokens(sellerOwnerUserId);
-  if (tokens.length === 0) return;
-  await sendToTokens(tokens, {
+  await toUser(sellerOwnerUserId, {
     type: "sub_order_new",
+    orderId: info.orderId,
     orderNumber: info.orderNumber,
     title: `New order — #${info.orderNumber}`,
     body: `${info.itemCount} item${info.itemCount === 1 ? "" : "s"} for you, Rs.${Math.round(info.subtotal)}. Tap to pack.`,
@@ -117,11 +189,10 @@ export async function notifySubOrderNew(
 
 // The customer cancelled THIS shop's part inside the 3-minute window — the seller's new-order card
 // disappears, so tell them why rather than let it vanish.
-export async function notifySubOrderCancelled(sellerOwnerUserId: string, info: { orderNumber: string }) {
-  const tokens = await getUserTokens(sellerOwnerUserId);
-  if (tokens.length === 0) return;
-  await sendToTokens(tokens, {
+export async function notifySubOrderCancelled(sellerOwnerUserId: string, info: { orderId: string; orderNumber: string }) {
+  await toUser(sellerOwnerUserId, {
     type: "sub_order_cancelled",
+    orderId: info.orderId,
     orderNumber: info.orderNumber,
     title: `Order #${info.orderNumber} cancelled`,
     body: "The customer cancelled your items on this order. Nothing to pack.",
@@ -135,7 +206,10 @@ export async function notifySubOrderPacked(
   order: { id: string; orderNumber: string },
   sellerName: string,
   agentId?: string | null,
+  /** The seller's own login — clears THEIR "new order" card (other sellers on the order keep theirs). */
+  sellerUserId?: string | null,
 ) {
+  if (sellerUserId) await resolveActions({ entityType: "ORDER", entityId: order.id, userId: sellerUserId, types: ["sub_order_new"] });
   const data = {
     type: "sub_order_packed",
     orderId: order.id,
@@ -143,16 +217,23 @@ export async function notifySubOrderPacked(
     title: `${sellerName} packed their items`,
     body: `Order #${order.orderNumber}: ${sellerName}'s items are ready to collect.`,
   };
-  await sendToTopic("owner_orders", data);
-  if (agentId) {
-    const tokens = await getUserTokens(agentId);
-    await sendToTokens(tokens, data);
-  }
+  await toOwners(data);
+  if (agentId) await toUser(agentId, data);
 }
 
 export async function notifyOrderStatusChange(order: { id: string; orderNumber: string; status: string; customerId: string }) {
-  const tokens = await getUserTokens(order.customerId);
-  await sendToTokens(tokens, {
+  // Every order status change funnels through here, so this is where "the thing the owner/seller/rider
+  // was asked to do" gets closed. Past placing ⇒ somebody packed it; on the road or finished ⇒ no rider
+  // is needed any more; delivered/cancelled ⇒ a pending substitution question is moot.
+  const s = order.status;
+  const types = [
+    ...(s !== "PLACED" && s !== "CONFIRMED" ? ["new_order", "sub_order_new"] : []),
+    ...(["OUT_FOR_DELIVERY", "DELIVERED", "CANCELLED"].includes(s)
+      ? ["delivery_available", "delivery_assignment", "delivery_unclaimed", "delivery_failed"] : []),
+    ...(s === "DELIVERED" || s === "CANCELLED" ? ["substitution_proposal"] : []),
+  ];
+  await resolveActions({ entityType: "ORDER", entityId: order.id, types });
+  await toUser(order.customerId, {
     type: "order_status",
     orderId: order.id,
     orderNumber: order.orderNumber,
@@ -163,8 +244,9 @@ export async function notifyOrderStatusChange(order: { id: string; orderNumber: 
 }
 
 export async function notifyDeliveryAssignment(order: { id: string; orderNumber: string }, agentId: string) {
-  const tokens = await getUserTokens(agentId);
-  await sendToTokens(tokens, {
+  // The owner just handled a failed / unclaimed order by putting a rider on it.
+  await resolveActions({ entityType: "ORDER", entityId: order.id, types: ["delivery_failed", "delivery_unclaimed"] });
+  await toUser(agentId, {
     type: "delivery_assignment",
     orderId: order.id,
     orderNumber: order.orderNumber,
@@ -199,20 +281,13 @@ export async function notifyNewDeliveryAvailable(order: {
     select: { id: true },
   });
   if (agents.length === 0) return;
-  const tokenRows = await prisma.fcmToken.findMany({
-    where: { userId: { in: agents.map((a) => a.id) } },
-    select: { token: true },
+  await toUsers(agents.map((a) => a.id), {
+    type: "delivery_available",
+    orderId: order.id,
+    orderNumber: order.orderNumber,
+    title: "New delivery available",
+    body: `Order #${order.orderNumber} is ready to pick up. Tap to accept.`,
   });
-  await sendToTokens(
-    tokenRows.map((t) => t.token),
-    {
-      type: "delivery_available",
-      orderId: order.id,
-      orderNumber: order.orderNumber,
-      title: "New delivery available",
-      body: `Order #${order.orderNumber} is ready to pick up. Tap to accept.`,
-    },
-  );
 }
 
 // A rider says they've handed over their COD cash. The debt does NOT clear until the owner confirms
@@ -220,7 +295,7 @@ export async function notifyNewDeliveryAvailable(order: {
 // rider would stay blocked by the cash-in-hand cap waiting on it.
 export async function notifyCashSettlementDeclared(riderId: string, amount: number) {
   const rider = await prisma.user.findUnique({ where: { id: riderId }, select: { name: true } });
-  await sendToTopic("owner_orders", {
+  await toOwners({
     type: "cash_settlement_declared",
     riderId,
     amount: String(amount),
@@ -235,7 +310,7 @@ export async function notifyDeliveryFailed(
   order: { id: string; orderNumber: string },
   info: { riderName: string; reason: string; attempts: number },
 ) {
-  await sendToTopic("owner_orders", {
+  await toOwners({
     type: "delivery_failed",
     orderId: order.id,
     orderNumber: order.orderNumber,
@@ -249,7 +324,7 @@ export async function notifyDeliveryFailed(
 // they can assign it by hand or ride it out themselves — and until this existed the first sign of
 // a stuck order was the customer phoning to ask where their groceries were.
 export async function notifyUnclaimedOrder(order: { id: string; orderNumber: string }, waitingMinutes: number) {
-  await sendToTopic("owner_orders", {
+  await toOwners({
     type: "delivery_unclaimed",
     orderId: order.id,
     orderNumber: order.orderNumber,
@@ -266,8 +341,7 @@ export async function notifyDocumentExpiry(
   info: { riderName: string; document: string; daysLeft: number },
 ) {
   const expired = info.daysLeft <= 0;
-  const tokens = await getUserTokens(riderId);
-  await sendToTokens(tokens, {
+  await toUser(riderId, {
     type: "document_expiry",
     document: info.document,
     daysLeft: String(info.daysLeft),
@@ -279,7 +353,7 @@ export async function notifyDocumentExpiry(
   // The store needs to know the moment it actually lapses — that rider just stopped being able to
   // pick up work, which is a staffing problem, not just the rider's admin.
   if (expired) {
-    await sendToTopic("owner_orders", {
+    await toOwners({
       type: "rider_document_expired",
       riderId,
       title: "Rider document expired",
@@ -336,8 +410,7 @@ export async function notifyRiderEta(info: {
 }
 
 export async function notifyDeliveryArrived(order: { id: string; orderNumber: string; customerId: string }) {
-  const tokens = await getUserTokens(order.customerId);
-  await sendToTokens(tokens, {
+  await toUser(order.customerId, {
     type: "delivery_arrived",
     orderId: order.id,
     orderNumber: order.orderNumber,
@@ -350,16 +423,13 @@ export async function notifySubstitutionProposal(
   customerId: string,
   info: { orderId: string; orderNumber: string; originalItem: string; substituteItem: string; priceDelta: number },
 ) {
-  const tokens = await getUserTokens(customerId);
-  if (tokens.length === 0) return;
-
   const deltaText = info.priceDelta === 0
     ? "Same price"
     : info.priceDelta > 0
       ? `+Rs.${Math.round(info.priceDelta)}`
       : `-Rs.${Math.round(Math.abs(info.priceDelta))}`;
 
-  await sendToTokens(tokens, {
+  await toUser(customerId, {
     type: "substitution_proposal",
     orderId: info.orderId,
     orderNumber: info.orderNumber,
@@ -373,7 +443,8 @@ export async function notifySubstitutionResponse(
   substituteItem: string,
   action: "approved" | "rejected",
 ) {
-  await sendToTopic("owner_orders", {
+  await resolveActions({ entityType: "ORDER", entityId: order.id, types: ["substitution_proposal"] });
+  await toOwners({
     type: "substitution_response",
     orderId: order.id,
     orderNumber: order.orderNumber,
@@ -383,7 +454,7 @@ export async function notifySubstitutionResponse(
 }
 
 export async function notifyNewComplaint(info: { id: string; subject: string; customerName: string }) {
-  await sendToTopic("owner_orders", {
+  await toOwners({
     type: "complaint",
     complaintId: info.id,
     title: "New complaint",
@@ -393,9 +464,7 @@ export async function notifyNewComplaint(info: { id: string; subject: string; cu
 
 // Owner paged this complaint to a seller, asking for a response.
 export async function notifyComplaintForwarded(sellerOwnerUserId: string, info: { complaintId: string; subject: string }) {
-  const tokens = await getUserTokens(sellerOwnerUserId);
-  if (tokens.length === 0) return;
-  await sendToTokens(tokens, {
+  await toUser(sellerOwnerUserId, {
     type: "complaint_forwarded",
     complaintId: info.complaintId,
     title: "The store needs your response",
@@ -405,7 +474,8 @@ export async function notifyComplaintForwarded(sellerOwnerUserId: string, info: 
 
 // Seller replied — surfaces to the owner only (the seller never talks to the customer directly).
 export async function notifyComplaintSellerResponded(info: { complaintId: string; subject: string; sellerName: string }) {
-  await sendToTopic("owner_orders", {
+  await resolveActions({ entityType: "COMPLAINT", entityId: info.complaintId, types: ["complaint_forwarded"] });
+  await toOwners({
     type: "complaint_seller_response",
     complaintId: info.complaintId,
     title: `${info.sellerName} responded`,
@@ -414,7 +484,7 @@ export async function notifyComplaintSellerResponded(info: { complaintId: string
 }
 
 export async function notifyNewQuoteRequest(info: { id: string; type: string; customerName: string }) {
-  await sendToTopic("owner_orders", {
+  await toOwners({
     type: "quote_request",
     quoteId: info.id,
     title: "New quote request",
@@ -432,16 +502,14 @@ export async function notifyQuoteMessage(info: {
   preview: string;
 }) {
   if (info.fromSender === "CUSTOMER") {
-    await sendToTopic("owner_orders", {
+    await toOwners({
       type: "quote_message",
       quoteId: info.quoteId,
       title: `New message on ${info.requestNumber}`,
       body: info.preview,
     });
   } else {
-    const tokens = await getUserTokens(info.customerUserId);
-    if (tokens.length === 0) return;
-    await sendToTokens(tokens, {
+    await toUser(info.customerUserId, {
       type: "quote_message",
       quoteId: info.quoteId,
       title: `Store replied on ${info.requestNumber}`,
@@ -463,15 +531,10 @@ export async function notifyOrderMessage(info: {
 }) {
   const data = { type: "order_message", orderId: info.orderId, orderNumber: info.orderNumber };
   if (info.fromSender === "CUSTOMER") {
-    await sendToTopic("owner_orders", { ...data, title: `New message on #${info.orderNumber}`, body: info.preview });
-    for (const uid of info.sellerOwnerUserIds) {
-      const tokens = await getUserTokens(uid);
-      if (tokens.length > 0) await sendToTokens(tokens, { ...data, title: `New message on #${info.orderNumber}`, body: info.preview });
-    }
+    await toOwners({ ...data, title: `New message on #${info.orderNumber}`, body: info.preview });
+    await toUsers(info.sellerOwnerUserIds, { ...data, title: `New message on #${info.orderNumber}`, body: info.preview });
   } else {
-    const tokens = await getUserTokens(info.customerUserId);
-    if (tokens.length === 0) return;
-    await sendToTokens(tokens, { ...data, title: `Update on your order #${info.orderNumber}`, body: info.preview });
+    await toUser(info.customerUserId, { ...data, title: `Update on your order #${info.orderNumber}`, body: info.preview });
   }
 }
 
@@ -484,11 +547,10 @@ export async function notifyComplaintMessage(info: {
 }) {
   const data = { type: "complaint_message", complaintId: info.complaintId };
   if (info.fromSender === "CUSTOMER") {
-    await sendToTopic("owner_orders", { ...data, title: "New message on a complaint", body: info.preview });
+    await toOwners({ ...data, title: "New message on a complaint", body: info.preview });
   } else {
-    const tokens = await getUserTokens(info.customerUserId);
-    if (tokens.length === 0) return;
-    await sendToTokens(tokens, { ...data, title: "The store replied to your complaint", body: info.preview });
+    await resolveActions({ entityType: "COMPLAINT", entityId: info.complaintId, types: ["complaint"] }); // owner replied
+    await toUser(info.customerUserId, { ...data, title: "The store replied to your complaint", body: info.preview });
   }
 }
 
@@ -497,9 +559,8 @@ export async function notifyQuoteReady(
   userId: string,
   info: { id: string; requestNumber: string; total: number },
 ) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0) return;
-  await sendToTokens(tokens, {
+  await resolveActions({ entityType: "QUOTE", entityId: info.id, types: ["quote_request"] }); // the owner priced it
+  await toUser(userId, {
     type: "quote_ready",
     quoteId: info.id,
     title: "Your estimate is ready!",
@@ -527,13 +588,15 @@ export async function notifyBroadcast(
   const data: Record<string, string> = { type: "broadcast", title, body };
   if (imageUrl) data.imageUrl = imageUrl;
   if (endsAt) data.etaAt = String(endsAt);
+  // ⚠️ Compliance: the inbox row goes ONLY to customers who currently grant MARKETING_COMMS (silence =
+  // refusal, DPDP Rule 3). The push below still follows the topic as before — the "all_users" topic
+  // reaches people who never opted in; see NOTIFICATIONS_PLAN.md §5 (item 6) before widening this.
+  await persist(await marketingOptedInUserIds(), data);
   await sendToTopic(topic, data);
 }
 
 export async function notifyTierUp(userId: string, tierName: string, hamperGranted = false) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0) return;
-  await sendToTokens(tokens, {
+  await toUser(userId, {
     type: "tier_up",
     tierName,
     title: `You're a ${tierName} member now!`,
@@ -559,10 +622,10 @@ export async function notifyPartnerApproved(
   kind: "SELLER" | "DELIVERY",
   stage: "PROVISIONED" | "VERIFIED",
 ) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0) return;
   const role = kind === "DELIVERY" ? "delivery partner" : "seller";
-  await sendToTokens(tokens, {
+  // "Sign in and finish verification" is done once the owner verifies them.
+  if (stage === "VERIFIED") await resolveActions({ userId, types: ["partner_approved"] });
+  await toUser(userId, {
     type: "partner_approved",
     kind,
     stage,
@@ -574,9 +637,7 @@ export async function notifyPartnerApproved(
 }
 
 export async function notifyProductDecision(userId: string, productName: string, approved: boolean, reason?: string) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0) return;
-  await sendToTokens(tokens, {
+  await toUser(userId, {
     type: "product_decision",
     approved: String(approved),
     title: approved ? "Product approved" : "Product needs changes",
@@ -584,29 +645,15 @@ export async function notifyProductDecision(userId: string, productName: string,
   });
 }
 
-export async function notifyReferralReward(userId: string, amount: number) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0) return;
-  await sendToTokens(tokens, {
-    type: "referral_reward",
-    amount: String(amount),
-    title: "You earned store credit!",
-    body: `Your friend's first order was delivered — Rs.${Math.round(amount)} added to your wallet.`,
-  });
-}
-
 export async function notifyAbandonedCart(
   userId: string,
   info: { itemCount: number; cartValue: number; topItemName: string },
 ) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0) return;
-
   const itemText = info.itemCount === 1
     ? info.topItemName
     : `${info.topItemName} and ${info.itemCount - 1} more`;
 
-  await sendToTokens(tokens, {
+  await toUser(userId, {
     type: "abandoned_cart",
     title: "Your cart is waiting!",
     body: `${itemText} worth Rs.${info.cartValue} — complete your order before items sell out.`,
@@ -616,9 +663,7 @@ export async function notifyAbandonedCart(
 // A subscription delivery couldn't be generated today because the item ran out of stock. We skip
 // (never backfill) and let the customer know, so an empty bag is never a silent surprise.
 export async function notifySubscriptionSkipped(userId: string, productName: string) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0) return;
-  await sendToTokens(tokens, {
+  await toUser(userId, {
     type: "subscription_skipped",
     title: "Subscription paused for today",
     body: `${productName} is out of stock today, so we skipped today's delivery. It resumes automatically.`,
@@ -627,10 +672,8 @@ export async function notifySubscriptionSkipped(userId: string, productName: str
 
 // A routine ran but some lines were unavailable — the rest of the basket still went out.
 export async function notifyRoutineItemsSkipped(userId: string, routineName: string, itemNames: string[]) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0) return;
   const list = itemNames.length > 2 ? `${itemNames.slice(0, 2).join(", ")} and ${itemNames.length - 2} more` : itemNames.join(" and ");
-  await sendToTokens(tokens, {
+  await toUser(userId, {
     type: "routine_items_skipped",
     title: `${routineName}: some items skipped`,
     body: `${list} ${itemNames.length === 1 ? "is" : "are"} unavailable today. The rest of your routine is on its way.`,
@@ -639,20 +682,17 @@ export async function notifyRoutineItemsSkipped(userId: string, routineName: str
 
 // An unavailable item was swapped for a similar one (the item's rule was "use a similar one").
 export async function notifyRoutineSubstituted(userId: string, routineName: string, swaps: { from: string; to: string }[]) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0 || swaps.length === 0) return;
+  if (swaps.length === 0) return;
   const body = swaps.length === 1
     ? `${swaps[0]!.from} wasn't available, so we sent ${swaps[0]!.to} instead.`
     : `${swaps.length} items weren't available, so we sent similar ones instead.`;
-  await sendToTokens(tokens, { type: "routine_substituted", title: `${routineName}: items swapped`, body });
+  await toUser(userId, { type: "routine_substituted", title: `${routineName}: items swapped`, body });
 }
 
 // A routine WAS ordered, but prices are meaningfully above the usual (still within the customer's ceiling).
 // Sent once per price level, not every morning (see routineIntel.shouldAlertPriceChange).
 export async function notifyRoutinePriceUp(userId: string, routineName: string, drift: number, total: number) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0) return;
-  await sendToTokens(tokens, {
+  await toUser(userId, {
     type: "routine_price_up",
     title: `${routineName}: prices are up`,
     body: `Today's order came to Rs.${Math.round(total)}, about Rs.${Math.round(drift)} more than usual.`,
@@ -662,9 +702,7 @@ export async function notifyRoutinePriceUp(userId: string, routineName: string, 
 // A routine's refreshed total is above the customer's price ceiling, so today's run was HELD — nothing
 // was ordered or charged. Tapping it opens the routine review (approve → order placed at today's price).
 export async function notifyRoutineHeld(userId: string, routineName: string, subscriptionId: string, total: number, estimate: number) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0) return;
-  await sendToTokens(tokens, {
+  await toUser(userId, {
     type: "routine_held",
     subscriptionId,
     title: `Review today's ${routineName}`,
@@ -675,9 +713,7 @@ export async function notifyRoutineHeld(userId: string, routineName: string, sub
 // Prepaid-wallet subscription couldn't be funded today — the balance was too low (or autopay couldn't
 // collect). We skip the delivery rather than deliver unpaid; it resumes the next cycle once topped up.
 export async function notifySubscriptionLowBalance(userId: string, productName: string) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0) return;
-  await sendToTokens(tokens, {
+  await toUser(userId, {
     type: "subscription_low_balance",
     title: "Add money to resume delivery",
     body: `We couldn't fund today's ${productName} delivery from your store credit. Top up and it resumes automatically.`,
@@ -686,9 +722,7 @@ export async function notifySubscriptionLowBalance(userId: string, productName: 
 
 // A fixed-duration subscription ends in 3 days — nudge the customer to renew before deliveries stop.
 export async function notifySubscriptionEndingSoon(userId: string, productName: string, endLabel: string) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0) return;
-  await sendToTokens(tokens, {
+  await toUser(userId, {
     type: "subscription_ending_soon",
     title: "Your subscription ends soon",
     body: `Your ${productName} subscription ends on ${endLabel}. Renew it to keep deliveries coming.`,
@@ -697,9 +731,7 @@ export async function notifySubscriptionEndingSoon(userId: string, productName: 
 
 // A customer tapped "Notify me" on an out-of-stock item and it's just been restocked.
 export async function notifyBackInStock(userId: string, productName: string) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0) return;
-  await sendToTokens(tokens, {
+  await toUser(userId, {
     type: "back_in_stock",
     title: "Back in stock!",
     body: `${productName} is available again. Grab it before it runs out.`,
@@ -712,10 +744,9 @@ export async function notifySubscriptionStatement(
   userId: string,
   info: { amount: number; periodLabel: string; autoPaid: boolean },
 ) {
-  const tokens = await getUserTokens(userId);
-  if (tokens.length === 0) return;
-  await sendToTokens(tokens, {
+  await toUser(userId, {
     type: "subscription_statement",
+    autoPaid: String(info.autoPaid),
     title: info.autoPaid ? "Subscription bill paid" : "Subscription bill ready",
     body: info.autoPaid
       ? `Your ${info.periodLabel} subscription bill of Rs.${Math.round(info.amount)} was paid from your store credit.`
@@ -741,8 +772,7 @@ export async function notifyNewCourierAvailable(b: { id: string; number: string;
       haversineKm(Number(a.lastLat), Number(a.lastLng), b.pickupLat, b.pickupLng) <= COURIER_PING_RADIUS_KM)
     .map((a) => a.id);
   if (ids.length === 0) return;
-  const tokenRows = await prisma.fcmToken.findMany({ where: { userId: { in: ids } }, select: { token: true } });
-  await sendToTokens(tokenRows.map((t) => t.token), {
+  await toUsers(ids, {
     type: "courier_available",
     bookingId: b.id,
     title: "New courier pickup",
@@ -755,8 +785,7 @@ export async function notifyCourierCustomer(
   customerId: string,
   info: { bookingId: string; number: string; title: string; body: string },
 ) {
-  const tokens = await getUserTokens(customerId);
-  await sendToTokens(tokens, {
+  await toUser(customerId, {
     type: "courier_update",
     bookingId: info.bookingId,
     title: info.title,
@@ -766,7 +795,7 @@ export async function notifyCourierCustomer(
 
 // A parcel is stuck with a rider after a failed delivery — the owner has to decide what happens next.
 export async function notifyCourierFailed(info: { bookingId: string; number: string; reason: string }) {
-  await sendToTopic("owner_orders", {
+  await toOwners({
     type: "courier_failed",
     bookingId: info.bookingId,
     title: "Courier delivery failed",
@@ -776,6 +805,5 @@ export async function notifyCourierFailed(info: { bookingId: string; number: str
 
 // A courier job was put on / handed back to a specific rider by the owner.
 export async function notifyCourierRider(riderId: string, info: { bookingId: string; title: string; body: string }) {
-  const tokens = await getUserTokens(riderId);
-  await sendToTokens(tokens, { type: "courier_assigned", bookingId: info.bookingId, title: info.title, body: info.body });
+  await toUser(riderId, { type: "courier_assigned", bookingId: info.bookingId, title: info.title, body: info.body });
 }

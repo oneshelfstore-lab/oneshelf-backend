@@ -8,7 +8,7 @@ import {
 } from "../middleware/firebaseAuth.js";
 
 // Owner fulfillment queue for tier-up welcome hampers (Delight Phase 4). Same manual-ledger shape
-// as ownerReferralPayouts.ts: the owner physically packs a gift box, ships/hands it over, then marks
+// as the seller payouts: the owner physically packs a gift box, ships/hands it over, then marks
 // it here. No automated shipping API.
 const router = Router();
 router.use(firebaseAuthMiddleware as any);

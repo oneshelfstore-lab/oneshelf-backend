@@ -14,11 +14,9 @@ describe("isPhonelessAllowedPath", () => {
     expect(isPhonelessAllowedPath("/api/app/me")).toBe(true);
   });
 
-  it("allows consents, fcm-token and referral sub-paths", () => {
+  it("allows consents and fcm-token sub-paths", () => {
     expect(isPhonelessAllowedPath("/api/app/me/consents")).toBe(true);
     expect(isPhonelessAllowedPath("/api/app/me/fcm-token")).toBe(true);
-    expect(isPhonelessAllowedPath("/api/app/me/referral")).toBe(true);
-    expect(isPhonelessAllowedPath("/api/app/me/referral/apply")).toBe(true);
   });
 
   // The whole point of the gate. `/api/app/me` must be an EXACT match, never a prefix.
@@ -47,9 +45,8 @@ describe("isPhonelessAllowedPath", () => {
   });
 
   // A prefix entry must match on a path SEGMENT, not a bare string prefix — otherwise a route
-  // like /me/referral-payouts would inherit /me/referral's allowance.
+  // like /me/consents-export would inherit /me/consents' allowance.
   it("does not let a prefix leak into a longer sibling segment", () => {
-    expect(isPhonelessAllowedPath("/api/app/me/referral-payouts")).toBe(false);
     expect(isPhonelessAllowedPath("/api/app/me/consents-export")).toBe(false);
     expect(isPhonelessAllowedPath("/api/app/mextra")).toBe(false);
   });

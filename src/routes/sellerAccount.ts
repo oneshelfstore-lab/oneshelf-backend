@@ -429,8 +429,8 @@ router.put("/", async (req: SellerRequest, res: Response) => {
 
 // PUT /api/app/seller/me/bank-details { accountName, accountNumber, ifsc } → the account this
 // seller's monthly payout is settled to. Its own small validated route (not the generic PUT / above,
-// whose `bankDetails: z.any()` accepts anything) — mirrors appUser.ts's identical referral-payout
-// bank-details route so both money-settlement flows validate the same way.
+// whose `bankDetails: z.any()` accepts anything) — same
+// validation as the rider payout details.
 const bankDetailsSchema = z.object({
   accountName: z.string().trim().min(2).max(100),
   accountNumber: bankAccountNumberSchema,

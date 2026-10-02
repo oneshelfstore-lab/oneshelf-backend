@@ -12,8 +12,8 @@ import { formatProductForApp } from "./catalog.js";
 import { computeUserSavings } from "../services/savings.js";
 import { computeUserLoyalty } from "../services/loyalty.js";
 import { notifyNewComplaint, notifyNewQuoteRequest, notifyQuoteMessage, notifyComplaintMessage } from "../services/fcmNotifier.js";
+import { resolveActions } from "../services/notificationInbox.js";
 import { shapeOrderMessage } from "../services/orderMessages.js";
-import { mintReferralWelcomeCoupon, istMonthKey, maskName, getAvailableReferralBalance, withdrawReferralBalance } from "../services/referralRewards.js";
 import { createTopup, creditTopup, reconcileUserTopups } from "../services/walletTopup.js";
 import { verifyPaymentSignature, createRazorpayOrder, isRazorpayConfigured } from "../services/razorpay.js";
 import {
@@ -319,7 +319,7 @@ router.get("/data-export", async (req: FirebaseAuthRequest, res: Response) => {
         where: { id: userId },
         select: {
           id: true, name: true, email: true, phone: true, photoUrl: true, role: true,
-          phoneVerified: true, createdAt: true, walletBalance: true, referralCode: true,
+          phoneVerified: true, createdAt: true, walletBalance: true,
           nomineeName: true, nomineePhone: true, shoppingPrefs: true,
         },
       }),
@@ -586,186 +586,6 @@ router.post("/stock-alerts", async (req: FirebaseAuthRequest, res: Response) => 
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════
-// Referral program (refer & earn)
-// ═══════════════════════════════════════════════════════════════════════
-
-function genReferralCode(name: string): string {
-  const base = (name || "ONE").replace(/[^a-zA-Z]/g, "").toUpperCase().slice(0, 4) || "ONE";
-  const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
-  return `${base}${rand}`;
-}
-
-// GET /api/app/me/referral → the user's code (generated on first access) + stats + wallet +
-// commission-program summary + payout history
-router.get("/referral", async (req: FirebaseAuthRequest, res: Response) => {
-  try {
-    const userId = req.appUser!.id;
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      select: {
-        referralCode: true,
-        referredById: true,
-        walletBalance: true,
-        referralBankAccountName: true,
-        referralBankAccountNumber: true,
-        referralBankIfsc: true,
-      },
-    });
-
-    let code = user?.referralCode ?? null;
-    if (!code) {
-      // Generate a unique code (retry a few times on the rare collision).
-      for (let i = 0; i < 6; i++) {
-        const candidate = genReferralCode(req.appUser!.name);
-        const taken = await prisma.user.findUnique({
-          where: { referralCode: candidate },
-          select: { id: true },
-        });
-        if (!taken) {
-          await prisma.user.update({ where: { id: userId }, data: { referralCode: candidate } });
-          code = candidate;
-          break;
-        }
-      }
-    }
-
-    const currentMonth = istMonthKey(new Date());
-    const [referredCount, earned, cfg, pendingThisMonth, payouts, availableBalance] = await Promise.all([
-      prisma.user.count({ where: { referredById: userId } }),
-      prisma.referralCommission.aggregate({
-        _sum: { amount: true },
-        where: { referrerId: userId },
-      }),
-      prisma.storeConfig.findFirst(),
-      prisma.referralCommission.aggregate({
-        _sum: { amount: true },
-        where: { referrerId: userId, periodMonth: currentMonth },
-      }),
-      prisma.referralPayout.findMany({
-        where: { referrerId: userId },
-        orderBy: { createdAt: "desc" },
-        take: 12,
-        select: { periodMonth: true, amount: true, status: true, paidAt: true },
-      }),
-      getAvailableReferralBalance(userId),
-    ]);
-
-    const giveAmount = cfg?.referralWelcomeAmount ?? 50; // referee gets (welcome coupon)
-    const commissionPct = Number(cfg?.referralCommissionPct ?? 1);
-    const windowMonths = cfg?.referralCommissionMonths ?? 12;
-
-    // The code the referrer used to join (if any), for the "You joined via X" chip.
-    let referredByCode: string | null = null;
-    if (user?.referredById) {
-      const ref = await prisma.user.findUnique({
-        where: { id: user.referredById },
-        select: { referralCode: true },
-      });
-      referredByCode = ref?.referralCode ?? null;
-    }
-
-    // Rich "friends you invited" list: masked name + ₹earned + order count, newest first.
-    const [friends, friendCommissions] = await Promise.all([
-      prisma.user.findMany({
-        where: { referredById: userId },
-        orderBy: { createdAt: "desc" },
-        take: 20,
-        select: { id: true, name: true },
-      }),
-      prisma.referralCommission.groupBy({
-        by: ["refereeId"],
-        where: { referrerId: userId },
-        _sum: { amount: true },
-        _count: { orderId: true },
-      }),
-    ]);
-    const byReferee = new Map(friendCommissions.map((c) => [c.refereeId, c]));
-    const referredFriends = friends.map((f) => {
-      const c = byReferee.get(f.id);
-      return {
-        name: maskName(f.name),
-        earned: Number(c?._sum.amount ?? 0),
-        orders: c?._count.orderId ?? 0,
-      };
-    });
-
-    res.json({
-      success: true,
-      data: {
-        code,
-        referredCount,
-        reward: `₹${giveAmount} off`,
-        walletBalance: Number(user?.walletBalance ?? 0),
-        totalEarned: Number(earned._sum.amount ?? 0),
-        giveAmount,
-        commissionPct,
-        windowMonths,
-        pendingThisMonth: Number(pendingThisMonth._sum.amount ?? 0),
-        availableBalance,
-        hasBankDetails: Boolean(user?.referralBankAccountNumber),
-        bankLast4: user?.referralBankAccountNumber ? user.referralBankAccountNumber.slice(-4) : null,
-        wasReferred: Boolean(user?.referredById),
-        referredByCode,
-        referredFriends,
-        payouts: payouts.map((p) => ({
-          periodMonth: p.periodMonth,
-          amount: Number(p.amount),
-          status: p.status,
-          paidAt: p.paidAt ? p.paidAt.getTime() : null,
-        })),
-      },
-    });
-  } catch (e) {
-    sendError(res, e);
-  }
-});
-
-// PUT /api/app/me/referral/bank-details { accountName, accountNumber, ifsc } → save the bank
-// account the referrer's monthly commission payout is settled to. Its own small route (not folded
-// into the generic PUT /me) — smaller surface, no risk to unrelated profile fields.
-const bankDetailsSchema = z.object({
-  accountName: z.string().trim().min(2).max(100),
-  accountNumber: z.string().regex(/^\d{9,18}$/, "Invalid account number"),
-  ifsc: z
-    .string()
-    .trim()
-    .toUpperCase()
-    .regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, "Invalid IFSC code"),
-});
-
-router.put("/referral/bank-details", async (req: FirebaseAuthRequest, res: Response) => {
-  try {
-    const parsed = bankDetailsSchema.safeParse(req.body);
-    if (!parsed.success) throw new ValidationError("Invalid bank details", parsed.error.errors);
-    const { accountName, accountNumber, ifsc } = parsed.data;
-    await prisma.user.update({
-      where: { id: req.appUser!.id },
-      data: {
-        referralBankAccountName: accountName,
-        referralBankAccountNumber: accountNumber,
-        referralBankIfsc: ifsc,
-      },
-    });
-    res.json({ success: true, message: "Bank details saved" });
-  } catch (e) {
-    sendError(res, e);
-  }
-});
-
-// POST /api/app/me/referral/payout { method: "BANK" | "WALLET" } → withdraw the un-grouped
-// commission balance on demand. WALLET = instant store credit; BANK = queued for the owner.
-router.post("/referral/payout", async (req: FirebaseAuthRequest, res: Response) => {
-  try {
-    const method = req.body?.method === "WALLET" ? "WALLET" : req.body?.method === "BANK" ? "BANK" : null;
-    if (!method) throw new ValidationError("method must be BANK or WALLET");
-    const result = await withdrawReferralBalance(req.appUser!.id, method);
-    res.json({ success: true, data: result });
-  } catch (e) {
-    sendError(res, e);
-  }
-});
-
 // GET /api/app/me/wallet → store-credit balance + recent transaction history
 router.get("/wallet", async (req: FirebaseAuthRequest, res: Response) => {
   try {
@@ -867,78 +687,6 @@ router.post("/wallet/reconcile", async (req: FirebaseAuthRequest, res: Response)
   try {
     const result = await reconcileUserTopups(req.appUser!.id);
     res.json({ success: true, data: result });
-  } catch (e) {
-    sendError(res, e);
-  }
-});
-
-// POST /api/app/me/referral/apply { code } → link the referee to a referrer (once)
-const applyReferralSchema = z.object({ code: z.string().min(3).max(20) });
-
-router.post("/referral/apply", async (req: FirebaseAuthRequest, res: Response) => {
-  try {
-    const userId = req.appUser!.id;
-    const parsed = applyReferralSchema.safeParse(req.body);
-    if (!parsed.success) throw new ValidationError("Invalid referral code", parsed.error.errors);
-    const code = parsed.data.code.trim().toUpperCase();
-
-    const me = await prisma.user.findUnique({
-      where: { id: userId },
-      select: { referredById: true, referralCode: true },
-    });
-    if (me?.referredById) throw new ValidationError("You've already applied a referral code.");
-    if (me?.referralCode && me.referralCode === code) throw new ValidationError("You can't use your own code.");
-
-    const referrer = await prisma.user.findUnique({
-      where: { referralCode: code },
-      select: { id: true },
-    });
-    if (!referrer) throw new NotFoundError("Referral code", code);
-    if (referrer.id === userId) throw new ValidationError("You can't use your own code.");
-
-    const cfg = await prisma.storeConfig.findFirst();
-    const welcomeAmount = cfg?.referralWelcomeAmount ?? 50;
-    const minOrder = cfg?.referralMinOrder ?? 199;
-    const expiryDays = cfg?.referralWelcomeExpiryDays ?? 30;
-    const referralEnabled = cfg?.referralEnabled ?? true;
-
-    // Link the referee → referrer (one-time), mint the welcome coupon, and open the Referral record
-    // (PENDING) that gates the referrer's later store-credit payout — all atomically.
-    const welcome = await prisma.$transaction(async (tx) => {
-      await tx.user.update({ where: { id: userId }, data: { referredById: referrer.id } });
-
-      const minted = referralEnabled
-        ? await mintReferralWelcomeCoupon(tx, { amount: welcomeAmount, minOrder, expiryDays })
-        : null;
-
-      await tx.referral.create({
-        data: {
-          referrerId: referrer.id,
-          refereeId: userId,
-          status: "PENDING",
-          welcomeCouponCode: minted?.code ?? null,
-        },
-      });
-      return minted;
-    });
-
-    res.json({
-      success: true,
-      message: welcome
-        ? `Welcome reward unlocked — ₹${welcome.amount} off your first order!`
-        : "Referral applied!",
-      data: {
-        reward: `₹${welcomeAmount} off`,
-        welcomeCoupon: welcome
-          ? {
-              code: welcome.code,
-              amount: welcome.amount,
-              minOrder: welcome.minOrder,
-              expiresAt: welcome.expiresAt.toISOString(),
-            }
-          : null,
-      },
-    });
   } catch (e) {
     sendError(res, e);
   }
@@ -1278,6 +1026,7 @@ router.post("/quote-requests/:id/respond", async (req: FirebaseAuthRequest, res:
     if (parsed.data.accept) {
       await setQuoteAddress(quote.id, req.appUser!.id, parsed.data.addressId);
     }
+    await resolveActions({ entityType: "QUOTE", entityId: quote.id, userId: req.appUser!.id, types: ["quote_ready"] });
 
     const updated = await prisma.quoteRequest.update({
       where: { id: quote.id },
@@ -1340,6 +1089,7 @@ router.post("/quote-requests/:id/approve", async (req: FirebaseAuthRequest, res:
     // Persist the chosen delivery address before any conversion runs (the paid path materializes the
     // order later in markQuotePaid, so it must already be on the quote).
     await setQuoteAddress(quote.id, req.appUser!.id, parsed.data.addressId);
+    await resolveActions({ entityType: "QUOTE", entityId: quote.id, userId: req.appUser!.id, types: ["quote_ready"] });
 
     const total = quote.quotedAmount != null ? Number(quote.quotedAmount) : 0;
     const advancePercent = paymentOption === "ADVANCE" ? await getQuoteAdvancePercent() : 0;

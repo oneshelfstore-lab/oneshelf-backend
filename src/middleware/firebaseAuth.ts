@@ -38,7 +38,6 @@ const PHONELESS_EXACT = new Set(["/api/app/me"]);
 const PHONELESS_PREFIXES = [
   "/api/app/me/consents", // the DPDP notice gate can run before setup completes
   "/api/app/me/fcm-token", // device push registration happens at app start
-  "/api/app/me/referral", // ProfileSetupScreen renders its referral field ABOVE the phone step
 ];
 
 /**

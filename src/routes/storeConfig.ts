@@ -64,12 +64,6 @@ const updateSchema = z.object({
   // through the API). Omit/null to keep the current value; send [] is invalid (min 1 slab) — send
   // null explicitly to fall back to DEFAULT_DELIVERY_SLABS.
   deliverySlabs: deliverySlabsInputSchema.optional().nullable(),
-  // Referral wallet (Phase 2) — owner-tunable reward economics.
-  referralEnabled: z.boolean().optional(),
-  referralRewardAmount: z.number().int().min(0).max(100000).optional(),
-  referralWelcomeAmount: z.number().int().min(0).max(100000).optional(),
-  referralMinOrder: z.number().int().min(0).max(100000).optional(),
-  referralWelcomeExpiryDays: z.number().int().min(1).max(365).optional(),
   // Seller payout automation — off by default (manual "Pay out" stays the default flow).
   autoSellerPayoutEnabled: z.boolean().optional(),
   autoSellerPayoutMinAmount: z.number().int().min(0).max(100000).optional(),

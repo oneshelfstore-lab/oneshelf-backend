@@ -57,7 +57,7 @@ function hashPhone(phone: string): string | null {
 // Deletion is REFUSED while the user has open obligations (active subscriptions,
 // unsettled khata, a paid bulk-order advance, or in-flight orders). Wallet money is
 // NOT lost: real money (Razorpay top-ups) is refunded to source (the user chose this
-// policy — "Option B"); promotional credit (referral/scratch) is forfeited with a
+// policy — "Option B"); promotional credit (scratch) is forfeited with a
 // ledger row. We RETAIN financial/legal records (orders, invoices, wallet ledger,
 // quote requests) and only scrub PII off the user row + revoke the Firebase credential.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ export interface DeletionBlocker {
 export interface WalletDeletionSummary {
   balance: number;
   refundable: number; // real money (Razorpay top-ups) refunded to source
-  forfeit: number; // promotional credit (referral/scratch/etc.) lost on deletion
+  forfeit: number; // promotional credit (scratch/etc.) lost on deletion
 }
 
 interface RefundAllocation {
@@ -205,7 +205,7 @@ export async function getDeletionBlockers(userId: string): Promise<DeletionBlock
 /**
  * Splits the wallet balance into refundable-to-source (backed by Razorpay top-ups) vs
  * promotional credit (forfeited on deletion). Money is fungible, so refundable is capped at
- * min(currentBalance, Σ paid top-ups) — referral/scratch credit can't be refunded to a card.
+ * min(currentBalance, Σ paid top-ups) — scratch credit can't be refunded to a card.
  */
 export async function analyzeWallet(userId: string): Promise<WalletDeletionSummary> {
   const user = await prisma.user.findUnique({
@@ -329,6 +329,7 @@ export async function anonymizeUser(userId: string): Promise<string[]> {
     await tx.address.deleteMany({ where: { userId } });
     await tx.cartItem.deleteMany({ where: { userId } });
     await tx.fcmToken.deleteMany({ where: { userId } });
+    await tx.notification.deleteMany({ where: { userId } }); // titles/bodies carry names + order details
     await tx.favorite.deleteMany({ where: { userId } });
     // Courier bookings are retained (payment record) but the people on them are scrubbed: the
     // recipient is a THIRD PARTY whose name/number we hold only to serve this account.
@@ -451,6 +452,11 @@ export async function cancelAccountDeletion(userId: string): Promise<void> {
  * with money still owed. Returns the number of accounts fully purged.
  */
 export async function purgeExpiredDeletions(): Promise<number> {
+  // Housekeeping that rides this sweeper (it already runs daily via /internal and every 6h in-process):
+  // the inbox is a recent-activity feed, not an archive — keep 90 days.
+  await prisma.notification
+    .deleteMany({ where: { createdAt: { lt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) } } })
+    .catch((e) => console.error("notification prune failed:", e));
   const cfg = await prisma.storeConfig.findFirst({ select: { accountDeletionGraceDays: true } });
   const graceDays = cfg?.accountDeletionGraceDays ?? 15;
   const cutoff = new Date(Date.now() - graceDays * 24 * 60 * 60 * 1000);

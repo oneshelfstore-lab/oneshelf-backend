@@ -82,8 +82,8 @@ export const phoneSchema = z.string().regex(
 
 // ─── Settlement bank account ──────────────────────────────────────────────────
 // Shared by every "where does this partner's money go" field: seller payouts
-// (sellerAccount.ts), customer referral payouts (appUser.ts), and rider payout details
-// (deliveryOnboarding.ts). Lived as three byte-identical local copies before this.
+// (sellerAccount.ts) and rider payout details
+// (deliveryOnboarding.ts). Lived as byte-identical local copies before this.
 export const bankAccountNumberSchema = z.string().regex(/^\d{9,18}$/, "Invalid account number");
 
 // IFSC: 4-letter bank code + a literal 0 (reserved) + 6-char branch code.

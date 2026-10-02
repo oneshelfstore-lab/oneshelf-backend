@@ -11,7 +11,7 @@ import {
 import { notifyOrderStatusChange, notifyDeliveryAssignment, notifyNewDeliveryAvailable, notifyOrderMessage } from "../services/fcmNotifier.js";
 import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orderInvoice.js";
 import { markSamplePacked } from "../services/freeSample.js";
-import { accrueReferralCommission, refundWalletOnCancel } from "../services/referralRewards.js";
+import { refundWalletOnCancel } from "../services/walletRefund.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 
 import { shapeOrderMessage } from "../services/orderMessages.js";
@@ -240,10 +240,9 @@ router.put("/:id/status", async (req: FirebaseAuthRequest, res: Response) => {
     if (newStatus === "PACKED") {
       notifyNewDeliveryAvailable(order).catch((e: unknown) => console.error("[background task failed]", e));
     }
-    // Referral hooks (idempotent + best-effort). Accrue the referrer's ongoing commission on every
-    // delivery; refund any store credit if the order is cancelled.
+    // Post-delivery / cancel hooks (idempotent + best-effort): tier-up check on delivery; refund any
+    // store credit if the order is cancelled.
     if (newStatus === "DELIVERED") {
-      accrueReferralCommission(order.id).catch((e) => console.error("referral commission accrual failed:", e));
       checkTierUpOnDelivery(order.id).catch((e) => console.error("tier-up check failed:", e));
     }
     if (newStatus === "CANCELLED") {

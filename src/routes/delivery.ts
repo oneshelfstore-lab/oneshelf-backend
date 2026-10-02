@@ -3,6 +3,7 @@ import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { compareRunStops } from "../data/deliverySlots.js";
 import { sendError, ValidationError, NotFoundError, AppError } from "../lib/errors.js";
+import { resolveActions } from "../services/notificationInbox.js";
 import {
   firebaseAuthMiddleware,
   requireAppRole,
@@ -16,7 +17,7 @@ import {
   notifyNewDeliveryAvailable,
 } from "../services/fcmNotifier.js";
 import { pushRiderEta } from "../services/riderEtaPush.js";
-import { accrueReferralCommission, istMonthKey } from "../services/referralRewards.js";
+import { istMonthKey } from "../utils/istMonthKey.js";
 import { checkTierUpOnDelivery } from "../services/loyalty.js";
 import { syncInvoicePaymentStatus } from "../services/orderInvoice.js";
 import { OTP_LOCK_SECONDS } from "../lib/otp.js";
@@ -122,12 +123,12 @@ router.use(riderKycGate);
 /**
  * Everything that must happen once an order reaches DELIVERED, in ONE place so the two completion
  * paths (single `/:id/deliver` and the batched `/subscription-run/deliver-all`) can't drift — they
- * already had: deliver-all ran neither the referral accrual nor the tier-up check, so whether a
- * referrer earned their commission on a subscription delivery depended on which button the rider
- * tapped. Invoice sync was missing from BOTH, leaving every rider-completed COD order's invoice
+ * already had: deliver-all skipped the tier-up check, so whether a subscription delivery counted
+ * toward a customer's tier depended on which button the rider tapped. Invoice sync was missing
+ * from BOTH, leaving every rider-completed COD order's invoice
  * unpaid in the books even though the cash was collected.
  *
- * All three are best-effort and fire-and-forget: a delivery must never fail because a push, a
+ * All of these are best-effort and fire-and-forget: a delivery must never fail because a push, a
  * ledger row, or an invoice update did.
  */
 function runDeliveredHooks(
@@ -146,7 +147,6 @@ function runDeliveredHooks(
   });
   notifyOrderStatusChange({ ...order, status: "DELIVERED" }).catch((e: unknown) => console.error("[background task failed]", e));
   syncInvoicePaymentStatus(order.id).catch((e) => console.error("Invoice sync failed:", e));
-  accrueReferralCommission(order.id).catch((e) => console.error("referral commission accrual failed:", e));
   checkTierUpOnDelivery(order.id).catch((e) => console.error("tier-up check failed:", e));
 }
 
@@ -822,6 +822,9 @@ router.post("/:id/accept", async (req: FirebaseAuthRequest, res: Response) => {
       data: { acceptedAt: new Date() },
     });
 
+    // Claimed: every other rider's "New delivery available" card is now stale, and so is this rider's own assignment.
+    await resolveActions({ entityType: "ORDER", entityId: order.id, types: ["delivery_available", "delivery_assignment"] });
+
     // Echo the order's ACTUAL status, not a hardcoded "PACKED": a pre-dispatch claim leaves the
     // order PLACED/CONFIRMED (still cooking), and the card needs to know not to offer Picked-up yet.
     res.json({ success: true, data: { orderId: order.id, status: order.status, claimed: true } });
@@ -1117,7 +1120,7 @@ router.post("/:id/deliver", async (req: FirebaseAuthRequest, res: Response) => {
 //
 // Before this, DELIVERED was the ONLY terminal state a rider could reach. A customer who wasn't home
 // left the order pinned at OUT_FOR_DELIVERY forever, so the rider's real options were to mark it
-// delivered anyway (which flips COD to PAID, accrues referral commission and fires a tier-up on
+// delivered anyway (which flips COD to PAID and fires a tier-up on
 // goods nobody received) or leave it hanging. Both are worse than recording the truth.
 //
 // ⚠️ The order stays ASSIGNED to this rider on purpose — they still physically have the goods.

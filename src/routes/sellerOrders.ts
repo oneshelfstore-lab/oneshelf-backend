@@ -10,7 +10,7 @@ import { bustUserSpend } from "../services/loyalty.js";
 import { refundPayment } from "../services/razorpay.js";
 import { syncInvoicePaymentStatus, generateOrderInvoice } from "../services/orderInvoice.js";
 import { generateInvoicePdf } from "../services/pdfGenerator.js";
-import { refundWalletOnCancel } from "../services/referralRewards.js";
+import { refundWalletOnCancel } from "../services/walletRefund.js";
 import { shapeOrderMessage } from "../services/orderMessages.js";
 import { cancelSubOrderAndRefund, reverseSellerLedgerOnCancel, cancelOrder, claimRefund } from "../services/subOrderFulfillment.js";
 import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
@@ -209,11 +209,11 @@ router.patch("/:id/status", async (req: SellerRequest, res: Response) => {
       // successful pack action into a 500 for the seller.
       try {
         const [seller, order] = await Promise.all([
-          prisma.seller.findUnique({ where: { id: req.sellerId }, select: { name: true } }),
+          prisma.seller.findUnique({ where: { id: req.sellerId }, select: { name: true, ownerUserId: true } }),
           prisma.order.findUnique({ where: { id: sub.orderId }, select: { id: true, orderNumber: true, deliveryBoyId: true } }),
         ]);
         if (seller && order) {
-          notifySubOrderPacked({ id: order.id, orderNumber: order.orderNumber }, seller.name, order.deliveryBoyId).catch((e: unknown) => console.error("[background task failed]", e));
+          notifySubOrderPacked({ id: order.id, orderNumber: order.orderNumber }, seller.name, order.deliveryBoyId, seller.ownerUserId).catch((e: unknown) => console.error("[background task failed]", e));
         }
       } catch (e) {
         console.error("notifySubOrderPacked lookup failed:", e);
@@ -371,7 +371,7 @@ router.post("/:id/reject", async (req: SellerRequest, res: Response) => {
 // Seller-initiated, owner-resolved (not an automatic cancel/refund): raises a Complaint linked to the
 // parent order, visible in the owner's existing Complaints inbox. The owner reviews and, if warranted,
 // cancels that ONE order via the existing order-management flow — which already auto-refunds any
-// wallet-applied amount (services/referralRewards.ts refundWalletOnCancel, keyed off Order.walletApplied,
+// wallet-applied amount (services/walletRefund.ts refundWalletOnCancel, keyed off Order.walletApplied,
 // which the subscription engine already stamps on prepaid deliveries). Deliberately NOT an automatic
 // money-moving action here: a bad-faith or mistaken flag should not self-service a refund.
 const flagSchema = z.object({ note: z.string().max(500).optional() });

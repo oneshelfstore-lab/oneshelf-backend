@@ -1,5 +1,5 @@
 import prisma from "../lib/prisma.js";
-import { refundWalletOnCancel } from "./referralRewards.js";
+import { refundWalletOnCancel } from "./walletRefund.js";
 import { reverseSellerLedgerOnCancel } from "./subOrderFulfillment.js";
 import { reconcileOrderPayment } from "./paymentReconciliation.js";
 import { cancelOrderInTx } from "./subOrderFulfillment.js";

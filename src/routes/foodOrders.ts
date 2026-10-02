@@ -522,6 +522,7 @@ router.post("/orders", async (req: FirebaseAuthRequest, res: Response) => {
       notifyNewOrder(order).catch((e: unknown) => console.error("[background task failed]", e));
       if (p.restaurant.ownerUserId) {
         notifySubOrderNew(p.restaurant.ownerUserId, {
+          orderId: order.id,
           orderNumber: order.orderNumber,
           itemCount: order.items.length,
           subtotal: p.totals.subtotal,

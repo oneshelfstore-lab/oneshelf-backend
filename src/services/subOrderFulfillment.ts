@@ -5,7 +5,7 @@ import { ValidationError, NotFoundError } from "../lib/errors.js";
 import { refundPayment } from "./razorpay.js";
 import { restoreConsumption } from "./stockBatches.js";
 
-// Local, like cartPricing/referralRewards/subscriptionEngine/taxEngine each keep their own — this
+// Local, like cartPricing/subscriptionEngine/taxEngine each keep their own — this
 // codebase duplicates the one-liner rather than sharing it.
 function round2(n: number): number {
   return Math.round(n * 100) / 100;

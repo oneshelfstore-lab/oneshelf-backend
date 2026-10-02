@@ -15,6 +15,7 @@ import {
 } from "../services/subscriptionEngine.js";
 import { DELIVERY_SLOTS, DELIVERY_SLOT_IDS } from "../data/deliverySlots.js";
 import { isLooseType } from "../services/routinePlan.js";
+import { resolveActions } from "../services/notificationInbox.js";
 import { toAppFormat } from "../utils/looseUnitConverter.js";
 import { detectRecurring, type Purchase } from "../services/routineIntel.js";
 
@@ -609,6 +610,7 @@ router.post("/:id/approve-run", async (req: FirebaseAuthRequest, res: Response) 
   try {
     const result = await approveHeldRun(String(req.params.id), req.appUser!.id);
     if (result === "not_held") throw new AppError(409, "NOT_HELD", "There is no held order to approve for this routine today.");
+    await resolveActions({ entityType: "ROUTINE", entityId: String(req.params.id), userId: req.appUser!.id, types: ["routine_held"] });
     res.json({ success: true, data: { result } });
   } catch (e) {
     sendError(res, e);

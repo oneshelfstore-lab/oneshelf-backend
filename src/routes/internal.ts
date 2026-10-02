@@ -8,7 +8,6 @@ import {
 } from "../services/subscriptionEngine.js";
 import { purgeExpiredDeletions } from "../services/accountDeletion.js";
 import { runAutoSellerPayouts } from "../services/sellerPayout.js";
-import { closeMonthlyReferralPayouts } from "../services/referralRewards.js";
 import { checkRiderDocumentExpiry } from "../services/deliveryEscalation.js";
 
 // Internal automation endpoints — NOT behind Firebase/JWT auth (an external scheduler with no user
@@ -60,8 +59,6 @@ router.post("/subscriptions/run", async (req: Request, res: Response) => {
     const purged = await purgeExpiredDeletions();
     // Piggyback seller auto-payout too — a no-op unless the owner has turned it on (StoreConfig).
     const payout = await runAutoSellerPayouts();
-    // Group last month's referral commissions into payouts for the owner's Referral Payouts queue.
-    const referralPayouts = await closeMonthlyReferralPayouts();
     // Warn riders whose licence/insurance is about to lapse, and tell the owner once it has. Rides
     // the DAILY driver deliberately: warnings fire on exact day-counts (30/7/0), so a half-hourly
     // driver would push the same rider over and over on the same day.
@@ -75,7 +72,6 @@ router.post("/subscriptions/run", async (req: Request, res: Response) => {
         endingSoonNotified: endingSoon.notified,
         purged,
         sellersPaidOut: payout.paidCount,
-        referralPayoutsCreated: referralPayouts.created,
         riderDocWarnings: docWarnings,
       },
     });

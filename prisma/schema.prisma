@@ -300,10 +300,9 @@ enum AdjustmentKind {
   MANUAL // an owner's deliberate correction, reason in the note
 }
 
-// ─── Enums (V4 — referral wallet / store credit) ───────────────────
+// ─── Enums (V4 — wallet / store credit) ───────────────────
 
 enum WalletTxnType {
-  REFERRAL_CREDIT // referrer earns when their referee's first order is delivered
   ORDER_DEBIT // store credit spent at checkout
   ORDER_REFUND // credit returned when a wallet-paying order is cancelled
   TOPUP // customer loaded money into the wallet via Razorpay
@@ -317,11 +316,6 @@ enum WalletTopupStatus {
   PENDING
   PAID
   FAILED
-}
-
-enum ReferralStatus {
-  PENDING // code applied + welcome coupon minted; referrer not yet paid
-  REWARDED // referee's first order delivered → referrer credited
 }
 
 // ─── Subscriptions (milk / newspaper / recurring deliveries) ─────────
@@ -424,13 +418,9 @@ model User {
   lastCartReminderAt DateTime?
   cartReminderCount  Int       @default(0)
 
-  // Referral program (refer & earn)
-  referralCode  String? @unique
-  referredById  String?
-  referredBy    User?   @relation("UserReferrals", fields: [referredById], references: [id])
-  referredUsers User[]  @relation("UserReferrals")
+  notifications Notification[]
 
-  // Referral wallet / store credit (Phase 2). Denormalized spendable balance — the source of
+  // Wallet / store credit. Denormalized spendable balance — the source of
   // truth for the guarded atomic decrement at checkout. Every mutation also writes a
   // WalletTransaction ledger row in the SAME db transaction (balance never drifts from the ledger).
   walletBalance Decimal @default(0) @db.Decimal(10, 2)
@@ -441,7 +431,7 @@ model User {
   deletedAt      DateTime?
   deletionReason String?
   // Keyed HMAC-SHA256 of the bare-10 phone, captured at PURGE before the number is nulled. Survives
-  // the scrub so a future re-signup with the same number can be recognised (referral/coupon-farming
+  // the scrub so a future re-signup with the same number can be recognised (coupon-farming
   // throttle). ⚠️ Must stay KEYED (PHONE_HASH_PEPPER) — a bare digest of a 10-digit number is
   // brute-forceable in seconds, which would make this a retained phone number, not an erased one.
   phoneHash      String?
@@ -489,8 +479,6 @@ model User {
   riderSalaryPayments      RiderSalaryPayment[]
   walletTxns               WalletTransaction[]
   walletTopups             WalletTopup[]
-  referralsMade            Referral[]              @relation("Referrer")
-  referralReceived         Referral?               @relation("Referee")
   subscriptions            Subscription[]
   subscriptionStatements   SubscriptionStatement[]
 
@@ -500,15 +488,6 @@ model User {
   // takeover) is recorded here instead of overwriting that column — so neither sign-in method
   // ever gets silently orphaned into re-creating a fresh duplicate row.
   linkedCredentials LinkedCredential[]
-
-  // Referral v2 — ongoing commission payouts. Bank details the referrer fills in once (Referral
-  // screen) so their monthly-accrued commission can be settled by manual bank transfer, same
-  // pattern as SellerPayout (owner sends the money outside the app, then marks it paid in-app).
-  referralBankAccountName   String?
-  referralBankAccountNumber String?
-  referralBankIfsc          String?
-  referralCommissionsEarned ReferralCommission[] @relation("ReferralCommissionsEarned")
-  referralPayoutsReceived   ReferralPayout[]     @relation("ReferralPayoutsReceived")
 
   @@index([phone])
   @@index([deletionStatus, deletedAt]) // the deletion sweeper's hot query
@@ -737,7 +716,7 @@ model Complaint {
   // ─── Seller-flagged return / owner-approved refund. Seller flags (only on a complaint tied to
   // one of their own SubOrders — see sellerComplaints.ts), owner reviews + actually moves the
   // money (ownerComplaints.ts POST /:id/refund) — same "owner does it by hand" precedent as
-  // SellerPayout/ReferralPayout everywhere else in this app; the seller never touches money. ──
+  // SellerPayout everywhere else in this app; the seller never touches money. ──
   returnRequested       Boolean   @default(false)
   suggestedRefundAmount Decimal?  @db.Decimal(10, 2) // seller's recommended amount
   sellerNote            String? // seller's reason for recommending a refund
@@ -1268,11 +1247,11 @@ model CouponRedemption {
   @@index([userId])
 }
 
-// ─── Referral wallet (Phase 2 — store-credit ledger) ─────────────────
+// ─── Wallet (store-credit ledger) ─────────────────
 // Append-only ledger backing User.walletBalance. Every balance mutation writes one row in the SAME
 // db transaction, snapshotting balanceAfter so history is self-verifying. @@unique([orderId, type])
-// makes order-linked debits/refunds idempotent (≤1 per order per type); referral-credit rows have a
-// null orderId and are unconstrained (Postgres treats NULLs as distinct in a unique index).
+// makes order-linked debits/refunds idempotent (≤1 per order per type); rows with a
+// null orderId are unconstrained (Postgres treats NULLs as distinct in a unique index).
 model WalletTransaction {
   id           String        @id @default(cuid())
   userId       String
@@ -1281,77 +1260,12 @@ model WalletTransaction {
   type         WalletTxnType
   balanceAfter Decimal       @db.Decimal(10, 2)
   orderId      String? // set for ORDER_DEBIT / ORDER_REFUND
-  referralId   String? // set for REFERRAL_CREDIT
   statementId  String? // set for a subscription monthly-statement ORDER_DEBIT
   note         String?
   createdAt    DateTime      @default(now())
 
   @@unique([orderId, type])
   @@index([userId, createdAt])
-}
-
-// One referral event per referee (refereeId @unique). Carries the reward state machine so the
-// referrer is credited exactly once: PENDING→REWARDED via a guarded update + qualifyingOrderId @unique.
-model Referral {
-  id                String         @id @default(cuid())
-  referrerId        String
-  referrer          User           @relation("Referrer", fields: [referrerId], references: [id])
-  refereeId         String         @unique
-  referee           User           @relation("Referee", fields: [refereeId], references: [id])
-  status            ReferralStatus @default(PENDING)
-  welcomeCouponCode String?
-  // rewardAmount/qualifyingOrderId/rewardedAt are historical — the old flat one-time bonus (Phase 2).
-  // Referral v2 replaced it with ongoing per-order ReferralCommission accrual; nothing new writes
-  // these fields, they're kept so old rows still read correctly.
-  rewardAmount      Decimal?       @db.Decimal(10, 2)
-  qualifyingOrderId String?        @unique
-  rewardedAt        DateTime?
-  createdAt         DateTime       @default(now())
-
-  @@index([referrerId])
-  @@index([status])
-}
-
-// ─── Referral v2 — ongoing 1% commission + monthly bank payout ──────
-// One row per DELIVERED order placed by a referred customer, within the commission window
-// (StoreConfig.referralCommissionMonths from Referral.createdAt). orderId @unique = the accrual's
-// idempotency key (mirrors ReferralCommission's own guard in accrueReferralCommission).
-model ReferralCommission {
-  id          String          @id @default(cuid())
-  referrerId  String
-  referrer    User            @relation("ReferralCommissionsEarned", fields: [referrerId], references: [id])
-  refereeId   String
-  orderId     String          @unique
-  amount      Decimal         @db.Decimal(10, 2)
-  periodMonth String // IST month of accrual, "2026-07" — the payout-grouping key
-  payoutId    String?
-  payout      ReferralPayout? @relation(fields: [payoutId], references: [id], onDelete: SetNull)
-  createdAt   DateTime        @default(now())
-
-  @@index([referrerId, payoutId])
-  @@index([periodMonth])
-}
-
-// One settlement per referrer per elapsed month, grouping that month's unpaid ReferralCommission
-// rows. No money moves here — this is the "what's owed to whom" queue the owner works from by hand
-// (same manual-ledger pattern as SellerPayout: transfer the money outside the app, then mark paid).
-model ReferralPayout {
-  id                String    @id @default(cuid())
-  referrerId        String
-  referrer          User      @relation("ReferralPayoutsReceived", fields: [referrerId], references: [id])
-  periodMonth       String // the settled month, e.g. "2026-06"
-  amount            Decimal   @db.Decimal(10, 2)
-  status            String    @default("PENDING") // PENDING | PAID
-  method            String    @default("BANK") // BANK (owner settles by transfer) | WALLET (instant store credit)
-  bankAccountName   String? // snapshotted at creation, same "snapshot at the time" convention as Order
-  bankAccountNumber String?
-  bankIfsc          String?
-  paidAt            DateTime?
-  createdAt         DateTime  @default(now())
-
-  commissions ReferralCommission[]
-
-  @@index([referrerId, status])
 }
 
 // ─── Wallet top-up (money-in via Razorpay) ───────────────────────────
@@ -1377,7 +1291,7 @@ model WalletTopup {
 // data/loyaltyTiers.ts). Created in loyalty.ts's checkTierUpOnDelivery — the same idempotent
 // detection that already drives the tier-up push, so a hamper never double-fires for one crossing.
 // Fulfillment is manual (owner packs a physical gift box + ships/hands it over), mirroring the
-// free-sample "packed" gate and the referral-payout manual-ledger pattern — no automated shipping.
+// free-sample "packed" gate and the seller-payout manual-ledger pattern — no automated shipping.
 
 enum HamperStatus {
   PENDING
@@ -1908,6 +1822,60 @@ model FcmToken {
   @@index([userId])
 }
 
+// In-app inbox: one row per (recipient, push). Written by services/fcmNotifier.ts BEFORE the FCM send,
+// so a push that never arrives (Doze, no token, new phone) still shows up. See NOTIFICATIONS_PLAN.md.
+// category/kind/severity/entity/action are stamped from services/notificationCatalog.ts.
+enum NotifCategory {
+  ORDERS
+  DELIVERY
+  ROUTINES
+  PAYMENTS
+  INVENTORY
+  BUSINESS
+  ACCOUNT
+  SUPPORT
+  PROMO
+  SYSTEM
+}
+
+enum NotifKind {
+  ACTION
+  STATUS
+  INFO
+  PROMO
+}
+
+enum NotifSeverity {
+  NORMAL
+  HIGH
+  CRITICAL
+}
+
+model Notification {
+  id         String        @id @default(cuid())
+  userId     String
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type       String // the FCM push type, e.g. "routine_held"
+  category   NotifCategory
+  kind       NotifKind
+  severity   NotifSeverity @default(NORMAL)
+  title      String
+  body       String
+  entityType String? // ORDER | ROUTINE | COMPLAINT | QUOTE | COURIER | RIDER …
+  entityId   String?
+  action     String? // deep-link key the app maps to a screen
+  imageUrl   String?
+  etaAt      DateTime?
+  readAt     DateTime?
+  resolvedAt DateTime? // ACTION rows only: the thing was dealt with, stop pinning it
+  createdAt  DateTime      @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([userId, readAt])
+  @@index([userId, kind, resolvedAt])
+  @@index([entityType, entityId])
+}
+
 // ─── 14. StoreConfig (singleton — app-facing store settings) ─────────
 
 model StoreConfig {
@@ -1987,20 +1955,6 @@ model StoreConfig {
   sampleChancePct                      Int      @default(12)
   sampleMaxValue                       Int      @default(50)
   monthlySampleBudget                  Int      @default(500)
-  // Referral wallet (Phase 2 — refer & earn). referralEnabled is the master gate.
-  // referralRewardAmount = ₹ store credit the referrer earns when their referee's first order is
-  // delivered; referralWelcomeAmount = ₹ off the referee's welcome coupon (min order
-  // referralMinOrder, valid for referralWelcomeExpiryDays).
-  referralEnabled                      Boolean  @default(true)
-  referralRewardAmount                 Int      @default(50)
-  referralWelcomeAmount                Int      @default(50)
-  referralMinOrder                     Int      @default(199)
-  referralWelcomeExpiryDays            Int      @default(30)
-  // Referral v2 — ongoing commission (replaces the old one-time referralRewardAmount bonus).
-  // referralCommissionPct = % of a referred customer's order subtotal the referrer earns, on every
-  // DELIVERED order; referralCommissionMonths = the accrual window from Referral.createdAt (0 = no cap).
-  referralCommissionPct                Decimal  @default(1) @db.Decimal(5, 2)
-  referralCommissionMonths             Int      @default(12)
   // Customer wallet top-up bounds (₹). A top-up amount must be within [min, max].
   walletTopupMin                       Int      @default(50)
   walletTopupMax                       Int      @default(10000)

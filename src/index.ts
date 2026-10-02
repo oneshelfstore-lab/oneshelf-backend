@@ -19,6 +19,7 @@ import reportRoutes from "./routes/reports.js";
 import companyRoutes from "./routes/company.js";
 import storeConfigRoutes from "./routes/storeConfig.js";
 import fcmTokenRoutes from "./routes/fcmTokens.js";
+import notificationRoutes from "./routes/notifications.js";
 import { publicStoresRouter } from "./routes/stores.js";
 import favoriteStoresRoutes from "./routes/favoriteStores.js";
 import { publicCategoryRouter, adminCategoryRouter, publicSuperCategoryRouter } from "./routes/categories.js";
@@ -47,7 +48,6 @@ import ownerPartnerApplicationRoutes from "./routes/ownerPartnerApplications.js"
 import ownerBroadcastRoutes from "./routes/ownerBroadcast.js";
 import ownerUsersRoutes from "./routes/ownerUsers.js";
 import ownerSellersRoutes from "./routes/ownerSellers.js";
-import ownerReferralPayoutsRoutes from "./routes/ownerReferralPayouts.js";
 import ownerHampersRoutes from "./routes/ownerHampers.js";
 import ownerAnalyticsRoutes from "./routes/ownerAnalytics.js";
 import ownerGstr8Routes from "./routes/ownerGstr8.js";
@@ -446,7 +446,6 @@ app.use("/api/app/owner/super-categories", ownerSuperCategoryRoutes);
 app.use("/api/app/owner/brands", ownerBrandRouter);
 app.use("/api/app/owner/users", ownerUsersRoutes);
 app.use("/api/app/owner/sellers", ownerSellersRoutes);
-app.use("/api/app/owner/referral-payouts", ownerReferralPayoutsRoutes);
 app.use("/api/app/owner/hampers", ownerHampersRoutes);
 app.use("/api/app/owner/analytics", ownerAnalyticsRoutes);
 app.use("/api/app/owner/gstr8", ownerGstr8Routes);
@@ -477,6 +476,7 @@ app.use("/api/app/delivery/orders", deliveryRoutes);
 app.use("/api/app/delivery/onboarding", deliveryOnboardingRoutes);
 // More-specific than "/api/app/me" → MUST be mounted before it (Express matches prefixes in order).
 app.use("/api/app/me/subscriptions", subscriptionRoutes);
+app.use("/api/app/me/notifications", notificationRoutes);
 app.use("/api/app/me", appUserRoutes);
 
 // ─── Auth routes (no auth middleware) ───────────────────────────────

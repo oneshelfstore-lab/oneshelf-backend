@@ -32,6 +32,7 @@ import { consumeFifo, recordConsumption, restoreConsumption, type ConsumeResult 
 import { drawFreeGiftStock } from "../services/freeGifts.js";
 import { computeSubOrderTds194o } from "../services/sellerTds194o.js";
 import { sumSellerLines, computeSellerSplit } from "../services/sellerSplit.js";
+import { loadCategoryRates } from "../services/categoryCommission.js";
 import { houseSellerIsSeparateEntity, isSameLegalEntity } from "../services/entitySplit.js";
 import { TCS_RATE_PCT } from "../data/taxRates.js";
 import { haversineKm } from "../lib/distance.js";
@@ -394,6 +395,11 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         ]),
       );
 
+      // variantId → the product's category, for the owner's per-seller category rate.
+      const categoryByVariant = new Map<string, string>(
+        cartItems.map((ci) => [ci.variantId, ci.variant.product.categoryId]),
+      );
+
       // Read once for the whole order - the flag is a property of the business, not of a seller.
       const houseIsSeparate = await houseSellerIsSeparateEntity(tx);
 
@@ -408,6 +414,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
           if (!seller) continue;
           // ⚠️ A free-gift line has no cart row, so it finds no override and falls back to the
           // seller's rate — times a lineTotal of 0, which is still nothing. Correct either way.
+          const categoryRates = await loadCategoryRates(tx, sid);
           const { subtotal, taxableValue, commissionPct, commissionAmount, commissionGstAmount,
                   lineCommissions } = sumSellerLines(
             sellerItems.map((it) => ({
@@ -415,6 +422,9 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
               taxableValue: Number(it.taxableValue),
               commissionPctOverride: it.variantId
                 ? overrideByVariant.get(it.variantId) ?? null
+                : null,
+              categoryCommissionPct: it.variantId
+                ? categoryRates.get(categoryByVariant.get(it.variantId) ?? "") ?? null
                 : null,
             })),
             Number(seller.commissionPct),

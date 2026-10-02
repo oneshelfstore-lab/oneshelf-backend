@@ -10,6 +10,8 @@ import {
   missingRequiredFields,
   completionPct,
   readSellerPath,
+  effectiveProfile,
+  isAlsoSellKey,
 } from "../shopTypes.js";
 
 /**
@@ -87,7 +89,17 @@ describe("profileFor", () => {
 describe("category-specific fields", () => {
   it("asks every shop for the core four steps", () => {
     const keys = stepsFor(HARDWARE).map((s) => s.key);
-    expect(keys).toEqual(["shop", "tax", "bank", "grievance"]);
+    // Ordered by stage (business → verification → settlement), so payout details come last.
+    expect(keys).toEqual(["shop", "tax", "grievance", "bank"]);
+  });
+
+  it("never moves backwards through the progress stages", () => {
+    const order = ["business", "verification", "settlement"];
+    for (const p of [GENERAL, PHARMACY, RESTAURANT, HARDWARE]) {
+      const idx = stepsFor(p).map((s) => order.indexOf(s.stage!));
+      expect(idx.every((v) => v >= 0)).toBe(true);
+      expect(idx).toEqual([...idx].sort((a, b) => a - b));
+    }
   });
 
   // The headline fix: FSSAI already existed as a column, asked of everyone and required of no one.
@@ -116,6 +128,62 @@ describe("category-specific fields", () => {
     const gstin = fieldsFor(PHARMACY).find((f) => f.key === "gstin");
     expect(drugLicence?.sellerColumn).toBeUndefined();
     expect(gstin?.sellerColumn).toBe("gstin");
+  });
+});
+
+describe("fresh follow-up questions (5c)", () => {
+  const FRESH = profileFor("FRUIT_VEG", "SHOP");
+
+  // They are guidance for the product editor, not paperwork — one unanswered must never block submit.
+  it("asks fresh trades the follow-ups, all optional", () => {
+    const fields = stepsFor(FRESH).find((s) => s.key === "fresh")!.fields;
+    expect(fields.length).toBeGreaterThan(0);
+    expect(fields.every((f) => f.type === "choice" && !f.required && (f.options?.length ?? 0) >= 2)).toBe(true);
+    expect(missingRequiredFields(FRESH, completeCore, null)).toEqual([]);
+  });
+
+  it("does not ask a non-fresh trade, but does when fresh is also sold", () => {
+    expect(stepsFor(HARDWARE).some((s) => s.key === "fresh")).toBe(false);
+    expect(stepsFor(effectiveProfile("HARDWARE", "SHOP", ["DAIRY"])).some((s) => s.key === "fresh")).toBe(true);
+  });
+
+  it("stores a valid choice and rejects one outside its options", () => {
+    const ok = mergeCategoryData(null, { freshStockChanges: "Daily" }, FRESH);
+    expect(ok.merged).toEqual({ freshStockChanges: "Daily" });
+    const bad = mergeCategoryData(null, { freshStockChanges: "Hourly" }, FRESH);
+    expect(bad.unknownKeys).toEqual(["freshStockChanges"]);
+    expect(bad.merged).toBeNull();
+    // Blank still clears, as for every other field.
+    expect(mergeCategoryData({ freshStockChanges: "Daily" }, { freshStockChanges: "" }, FRESH).merged).toBeNull();
+  });
+});
+
+describe("effectiveProfile", () => {
+  // The decision: a grocery that also sells medicines owes the drug licence too. If this silently
+  // returned the primary profile, the seller would be waved through without it.
+  it("requires a secondary regulated trade's licence", () => {
+    const p = effectiveProfile("GENERAL_STORE", "SHOP", ["PHARMACY"]);
+    expect(fieldsFor(p).some((f) => f.key === "drugLicenseNumber" && f.required)).toBe(true);
+    expect(p.regulated).toBe(true);
+    expect(missingRequiredFields(p, completeCore, null)).toContain("Drug licence number");
+  });
+
+  it("does not duplicate a step both trades share", () => {
+    const keys = stepsFor(effectiveProfile("GENERAL_STORE", "SHOP", ["DAIRY", "BAKERY"])).map((s) => s.key);
+    expect(keys.filter((k) => k === "fssai")).toHaveLength(1);
+  });
+
+  it("is a no-op with nothing extra, and ignores unknown, self and kitchen keys", () => {
+    expect(effectiveProfile("HARDWARE", "SHOP", []).extraSteps).toEqual([]);
+    const ignored = effectiveProfile("HARDWARE", "SHOP", ["NOPE", "HARDWARE", "RESTAURANT"]);
+    expect(ignored.extraSteps).toEqual([]);
+    expect(ignored.regulated).toBe(false);
+  });
+
+  it("only allows shop trades in the also-sell list", () => {
+    expect(isAlsoSellKey("PHARMACY")).toBe(true);
+    expect(isAlsoSellKey("RESTAURANT")).toBe(false);
+    expect(isAlsoSellKey("NOPE")).toBe(false);
   });
 });
 

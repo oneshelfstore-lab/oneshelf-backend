@@ -26,7 +26,8 @@
 
 export type CatalogueModel = "STANDARD" | "MENU";
 
-export type FieldType = "text" | "number" | "date" | "doc" | "phone" | "email";
+// "choice" = pick one of `options` (rendered as chips; the stored value is the option string).
+export type FieldType = "text" | "number" | "date" | "doc" | "phone" | "email" | "choice";
 
 export interface RequirementField {
   /** Storage key. With `sellerColumn` set this names a Seller scalar; otherwise it is a key inside
@@ -38,6 +39,8 @@ export interface RequirementField {
   required: boolean;
   /** Shown under the input. Format hints and — for the fields people hesitate over — why we ask. */
   helper?: string;
+  /** Required when `type` is "choice"; the allowed answers, in display order. */
+  options?: string[];
   /**
    * Present → this field lives on the Seller row. Absent → it lives in Seller.categoryData.
    *
@@ -60,10 +63,19 @@ export function readSellerPath(seller: Record<string, unknown>, path: string): u
   return cursor;
 }
 
+/** Which stage of the wizard's progress strip a step belongs to. The strip is
+ *  Business · Categories · Verification · Settlement · Review; "Categories" and "Review" are the
+ *  app's own picker/summary screens, so only these three come from the registry. */
+export type StepStage = "business" | "verification" | "settlement";
+
+const STAGE_ORDER: StepStage[] = ["business", "verification", "settlement"];
+
 export interface RequirementStep {
   key: string;
   title: string;
   subtitle?: string;
+  /** Defaults to "verification" — the stage most paperwork belongs to. */
+  stage?: StepStage;
   fields: RequirementField[];
 }
 
@@ -96,6 +108,7 @@ export const CORE_STEPS: RequirementStep[] = [
     key: "shop",
     title: "Your shop",
     subtitle: "How customers will find you",
+    stage: "business",
     fields: [
       { key: "name", label: "Shop name", type: "text", required: true, sellerColumn: "name" },
       { key: "phone", label: "Shop phone", type: "phone", required: false, sellerColumn: "phone" },
@@ -137,6 +150,7 @@ export const CORE_STEPS: RequirementStep[] = [
     key: "bank",
     title: "Where we pay you",
     subtitle: "Your sales are settled to this account",
+    stage: "settlement",
     fields: [
       // Not hard-required at submit, matching the behaviour this replaced — a seller can finish
       // onboarding and add payout details before their first settlement. The owner chases it.
@@ -200,6 +214,7 @@ const KITCHEN_STEP: RequirementStep = {
   key: "kitchen",
   title: "Your kitchen",
   subtitle: "When you cook, and how long you need",
+  stage: "business",
   fields: [
     { key: "cuisines", label: "Cuisines", type: "text", required: false, helper: "Comma separated, e.g. North Indian, Chinese.", sellerColumn: "cuisines" },
     { key: "openTime", label: "Opens at", type: "text", required: false, helper: "24-hour, e.g. 10:00.", sellerColumn: "openTime" },
@@ -230,6 +245,26 @@ const MEDICAL_DEVICE_STEP: RequirementStep = {
     { key: "deviceLicenseNumber", label: "Licence number", type: "text", required: true, helper: "Your CDSCO / State licence for selling medical devices." },
     { key: "deviceLicenseDocUrl", label: "Licence document", type: "doc", required: true },
     { key: "deviceLicenseExpiry", label: "Valid until", type: "date", required: false },
+  ],
+};
+
+/**
+ * How a fresh-produce shop runs day to day. Every field is OPTIONAL and lives in categoryData: these
+ * tell the product editor and (later) the store-setup checklist how to behave, they are not paperwork
+ * and must never stop a shop being submitted. Weight-based selling itself is NOT modelled here — it is
+ * a LOOSE/PRODUCE variant in the standard catalogue (see the header note); `variableWeight` on the
+ * profile is the default, this just records what the seller says they do.
+ */
+const FRESH_STEP: RequirementStep = {
+  key: "fresh",
+  title: "How you run fresh",
+  subtitle: "Helps us set up the right tools for your products",
+  stage: "business",
+  fields: [
+    { key: "freshSoldByWeight", label: "Do you sell products by weight?", type: "choice", required: false, options: ["Yes", "No"] },
+    { key: "freshPackedOnPremises", label: "Do you prepare or pack fresh products at your store?", type: "choice", required: false, options: ["Yes", "No"] },
+    { key: "freshStockChanges", label: "How often does your fresh stock change?", type: "choice", required: false, options: ["Daily", "Every few days", "Weekly"] },
+    { key: "freshAvailability", label: "Are these products available every day?", type: "choice", required: false, options: ["Every day", "Only on some days"] },
   ],
 };
 
@@ -272,10 +307,10 @@ export const SHOP_TYPES: ShopTypeProfile[] = [
   shop("SUPERMARKET", "Supermarket", "Grocery", { extraSteps: [FSSAI_STEP] }),
 
   // Fresh
-  shop("FRUIT_VEG", "Fruit & vegetable shop", "Fresh", { variableWeight: true, extraSteps: [FSSAI_STEP] }),
-  shop("DAIRY", "Dairy shop", "Fresh", { extraSteps: [FSSAI_STEP] }),
-  shop("EGGS", "Egg shop", "Fresh", { extraSteps: [FSSAI_STEP] }),
-  shop("MEAT_FISH", "Meat, fish & poultry", "Fresh", { variableWeight: true, extraSteps: [FSSAI_STEP] }),
+  shop("FRUIT_VEG", "Fruit & vegetable shop", "Fresh", { variableWeight: true, extraSteps: [FSSAI_STEP, FRESH_STEP] }),
+  shop("DAIRY", "Dairy shop", "Fresh", { extraSteps: [FSSAI_STEP, FRESH_STEP] }),
+  shop("EGGS", "Egg shop", "Fresh", { extraSteps: [FSSAI_STEP, FRESH_STEP] }),
+  shop("MEAT_FISH", "Meat, fish & poultry", "Fresh", { variableWeight: true, extraSteps: [FSSAI_STEP, FRESH_STEP] }),
 
   // Bakery & sweets
   shop("BAKERY", "Bakery", "Bakery & sweets", { extraSteps: [FSSAI_STEP] }),
@@ -368,9 +403,52 @@ export function isKnownShopType(key: string): boolean {
   return BY_KEY.has(key);
 }
 
-/** Core steps plus whatever this trade adds. The wizard renders these in order. */
+/**
+ * Core steps plus whatever this trade adds, ordered by stage so the progress strip only ever moves
+ * forward (a pharmacy licence must not appear after "Where we pay you"). Array#sort is stable, so
+ * steps keep their declared order within a stage. Every step comes back with `stage` filled in.
+ */
 export function stepsFor(profile: ShopTypeProfile): RequirementStep[] {
-  return [...CORE_STEPS, ...(profile.extraSteps ?? [])];
+  return [...CORE_STEPS, ...(profile.extraSteps ?? [])]
+    .map((s) => ({ ...s, stage: s.stage ?? ("verification" as StepStage) }))
+    .sort((a, b) => STAGE_ORDER.indexOf(a.stage) - STAGE_ORDER.indexOf(b.stage));
+}
+
+/**
+ * The profile a SELLER is actually held to: their primary trade plus the extra paperwork of every
+ * trade they also sell (grocery + pharmacy → the drug licence is required too).
+ *
+ * ⚠️ Everything that asks "what does this seller owe us" — the requirements endpoint, the submit
+ * gate, completion %, categoryData validation — must go through this, not profileFor. Two sources
+ * of truth here means a seller shown a form the server then rejects, or one waved through without
+ * the licence they declared. Unknown / same-as-primary / FOOD keys are ignored (a kitchen is a
+ * different catalogue, not something a shop also is).
+ */
+export function effectiveProfile(
+  shopType: string | null | undefined,
+  vertical: string,
+  alsoSell: readonly string[] | null | undefined = [],
+): ShopTypeProfile {
+  const base = profileFor(shopType, vertical);
+  const extra = [...(base.extraSteps ?? [])];
+  const seen = new Set(extra.map((s) => s.key));
+  let regulated = Boolean(base.regulated);
+  for (const key of alsoSell ?? []) {
+    const other = BY_KEY.get(key);
+    if (!other || other.key === base.key || other.vertical !== "SHOP") continue;
+    for (const step of other.extraSteps ?? []) {
+      if (seen.has(step.key)) continue;
+      seen.add(step.key);
+      extra.push(step);
+    }
+    regulated = regulated || Boolean(other.regulated);
+  }
+  return { ...base, extraSteps: extra, regulated };
+}
+
+/** True for keys valid in `alsoSellCategories` — a known SHOP trade (kitchens are a separate catalogue). */
+export function isAlsoSellKey(key: string): boolean {
+  return BY_KEY.get(key)?.vertical === "SHOP";
 }
 
 /** Every field of a profile, flattened. */
@@ -417,10 +495,13 @@ export function mergeCategoryData(
   if (incoming == null) return { merged: Object.keys(base).length ? base : null, unknownKeys: [] };
 
   const allowed = new Set(categoryFieldKeys(profile));
+  const choices = new Map(fieldsFor(profile).filter((f) => f.type === "choice").map((f) => [f.key, f.options ?? []]));
   const unknownKeys: string[] = [];
 
   for (const [key, value] of Object.entries(incoming)) {
-    if (!allowed.has(key)) {
+    // A "choice" answer outside its options is rejected the same way as a stray key (reported, not
+    // stored) — otherwise a typo'd value would sit in the blob looking like a real answer.
+    if (!allowed.has(key) || (choices.has(key) && !isBlank(value) && !choices.get(key)!.includes(String(value)))) {
       unknownKeys.push(key);
       continue;
     }

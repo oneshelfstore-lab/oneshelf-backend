@@ -1,6 +1,7 @@
 import prisma from "../lib/prisma.js";
 import { ValidationError, NotFoundError } from "../lib/errors.js";
 import { resolveCommissionPct } from "./sellerSplit.js";
+import { loadCategoryRatesFor } from "./categoryCommission.js";
 
 /**
  * Per-product commission negotiation (runbook step 20).
@@ -60,15 +61,23 @@ export async function effectiveCommissionPct(productId: string): Promise<{ pct: 
   const product = await prisma.catalogProduct.findUnique({
     where: { id: productId },
     select: {
-      id: true, name: true, sellerId: true, commissionPctOverride: true,
+      id: true, name: true, sellerId: true, commissionPctOverride: true, categoryId: true,
       seller: { select: { id: true, commissionPct: true } },
     },
   });
   if (!product) throw new NotFoundError("Product", productId);
+  // The owner's rate for this seller in this product's category sits between the product override and
+  // the seller default (Phase 5b) — leave it out and a request is snapshotted against the wrong rate.
+  const categoryRates = await loadCategoryRatesFor(prisma, [{ sellerId: product.sellerId, categoryId: product.categoryId }]);
   // ⚠️ Same helper the money math uses, so the number the seller is shown and the number they are
   // charged can never be two different readings of the same columns.
   const pct = resolveCommissionPct(
-    { lineTotal: 0, taxableValue: 0, commissionPctOverride: product.commissionPctOverride == null ? null : n(product.commissionPctOverride) },
+    {
+      lineTotal: 0,
+      taxableValue: 0,
+      commissionPctOverride: product.commissionPctOverride == null ? null : n(product.commissionPctOverride),
+      categoryCommissionPct: categoryRates.get(`${product.sellerId}:${product.categoryId}`) ?? null,
+    },
     n(product.seller?.commissionPct),
   );
   return { pct, sellerId: product.sellerId, productName: product.name };
@@ -252,10 +261,14 @@ async function buildViews(filter: { id?: string; sellerId?: string; status?: str
       approvedPct: true, sellerNote: true, ownerNote: true, status: true, createdAt: true,
       decidedAt: true,
       seller: { select: { name: true, commissionPct: true } },
-      product: { select: { name: true, commissionPctOverride: true } },
+      product: { select: { name: true, commissionPctOverride: true, categoryId: true } },
     },
   });
   if (requests.length === 0) return [];
+  const categoryRates = await loadCategoryRatesFor(
+    prisma,
+    requests.map((r) => ({ sellerId: r.sellerId, categoryId: r.product.categoryId })),
+  );
 
   // 30-day volume, per product, from the lines themselves.
   //
@@ -292,9 +305,15 @@ async function buildViews(filter: { id?: string; sellerId?: string; status?: str
 
   return requests.map((r) => {
     const vol = byProduct.get(r.productId) ?? { taxable: 0, commission: 0, count: 0 };
-    const effectiveNow = r.product.commissionPctOverride == null
-      ? n(r.seller.commissionPct)
-      : n(r.product.commissionPctOverride);
+    const effectiveNow = resolveCommissionPct(
+      {
+        lineTotal: 0,
+        taxableValue: 0,
+        commissionPctOverride: r.product.commissionPctOverride == null ? null : n(r.product.commissionPctOverride),
+        categoryCommissionPct: categoryRates.get(`${r.sellerId}:${r.product.categoryId}`) ?? null,
+      },
+      n(r.seller.commissionPct),
+    );
     // ⚠️ Priced at the rate in force NOW, not at the snapshot, because that is what the owner would
     // stop earning from today. The snapshot is what the seller was looking at when they asked.
     const atCurrent = r2((vol.taxable * effectiveNow) / 100);

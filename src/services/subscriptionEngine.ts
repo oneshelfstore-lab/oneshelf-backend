@@ -20,6 +20,7 @@ import { consumeFifo, recordConsumption, type ConsumeResult } from "./stockBatch
 import { AppError } from "../lib/errors.js";
 import { computeSubOrderTds194o } from "./sellerTds194o.js";
 import { sumSellerLines, computeSellerSplit } from "./sellerSplit.js";
+import { loadCategoryRates } from "./categoryCommission.js";
 import { houseSellerIsSeparateEntity, isSameLegalEntity } from "./entitySplit.js";
 import { TCS_RATE_PCT } from "../data/taxRates.js";
 
@@ -633,6 +634,7 @@ export async function generateRoutineOrder(
         const { tdsAmount } = await computeSubOrderTds194o(tx, seller, taxable);
         // Routed through sumSellerLines so the per-product override and the rounding come from the same
         // place as every other order (step 08).
+        const categoryRates = await loadCategoryRates(tx, sellerId);
         const lineTotals = sumSellerLines(
           group.map((l) => ({
             lineTotal: l.pricing.lineTotal,
@@ -640,6 +642,7 @@ export async function generateRoutineOrder(
             commissionPctOverride: l.variant.product.commissionPctOverride == null
               ? null
               : Number(l.variant.product.commissionPctOverride),
+            categoryCommissionPct: categoryRates.get(l.variant.product.categoryId) ?? null,
           })),
           Number(seller.commissionPct),
         );

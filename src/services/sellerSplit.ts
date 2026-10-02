@@ -35,18 +35,24 @@ export interface SellerLine {
    * how a seller stops being charged at all. Go through resolveCommissionPct.
    */
   commissionPctOverride?: number | null;
+  /**
+   * SellerCategoryCommission — the owner's rate for THIS seller in this line's product category.
+   * Same rule as above: NULL/UNDEFINED MEANS "FALL THROUGH", never zero.
+   */
+  categoryCommissionPct?: number | null;
 }
 
 /**
- * The rate that applies to ONE line: the product's negotiated override if it has one, otherwise the
- * seller's default (runbook step 08).
+ * The rate that applies to ONE line, most specific first: the product's negotiated override, then
+ * the owner's rate for this seller in this product's category, then the seller's default
+ * (runbook step 08 + onboarding Phase 5b).
  *
- * ⚠️ The nullish coalesce is the whole function and it is deliberate — `??` not `||`, because a
- * genuine 0% override (a product the platform carries at no cut) must survive as 0 rather than fall
- * through to the seller's 5%.
+ * ⚠️ The nullish coalesces are the whole function and they are deliberate — `??` not `||`, because
+ * a genuine 0% at either tier (a product or category the platform carries at no cut) must survive as
+ * 0 rather than fall through to the seller's 5%.
  */
 export function resolveCommissionPct(line: SellerLine, sellerCommissionPct: number): number {
-  return line.commissionPctOverride ?? sellerCommissionPct;
+  return line.commissionPctOverride ?? line.categoryCommissionPct ?? sellerCommissionPct;
 }
 
 export interface SellerSplitInput {

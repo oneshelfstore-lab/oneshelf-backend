@@ -18,7 +18,8 @@ import {
 import { PARTNER_AGREEMENT_VERSION } from "../data/onboardingAgreements.js";
 import { signDocFields, SELLER_KYC_DOC_FIELDS } from "../lib/storageUrls.js";
 import {
-  profileFor,
+  effectiveProfile,
+  isAlsoSellKey,
   isKnownShopType,
   stepsFor,
   categoryDocKeys,
@@ -67,7 +68,7 @@ router.use(resolveSeller as any);
 async function shapeSellerProfile(s: any, agreementCurrent: boolean) {
   // Which trade this is → which fields were asked for, which are still blank, whether a human must
   // read the licence. Falls back on `vertical` for every seller created before shopType existed.
-  const profile = profileFor(s.shopType, s.vertical);
+  const profile = effectiveProfile(s.shopType, s.vertical, s.alsoSellCategories);
   // Sign the Storage paths sitting INSIDE categoryData (a pharmacy's drug licence, a jeweller's BIS
   // certificate) exactly as the fixed KYC columns are signed below — a document is no less
   // sensitive for living in a JSON blob. signDocFields is already generic over its key list.
@@ -141,6 +142,8 @@ async function shapeSellerProfile(s: any, agreementCurrent: boolean) {
     // public GET /api/app/onboarding/requirements — static, cacheable, and not worth repeating for
     // every row of the house manager's all-sellers list.
     shopType: profile.key,
+    alsoSellCategories: (s.alsoSellCategories ?? []) as string[],
+    offeredCommissionPct: s.offeredCommissionPct != null ? Number(s.offeredCommissionPct) : null,
     shopTypeLabel: profile.label,
     department: profile.department,
     catalogueModel: profile.catalogueModel,
@@ -234,6 +237,17 @@ const updateSchema = z.object({
   // Category-specific fields. Keys are validated against the shop type's profile in the handler,
   // not here — the effective profile may be changing in this very request.
   categoryData: z.record(z.unknown()).optional().nullable(),
+  // Other SHOP trades also sold — each adds its own required paperwork (effectiveProfile). Unknown
+  // and kitchen keys are rejected, not dropped, for the same reason shopType is: silently ignoring
+  // "PHARMACY" would skip the licence the seller just told us they need.
+  // The commission the seller OFFERS (onboarding slider). 3% floor and 30% ceiling enforced HERE,
+  // not just on the slider — a hand-rolled request must not be able to offer 0% or 300%. A proposal
+  // only: the owner sets the real rate, and nothing reads this at order time.
+  offeredCommissionPct: z.coerce.number().min(3, "Minimum offer is 3%").max(30, "Maximum offer is 30%").optional(),
+  alsoSellCategories: z.array(z.string().max(40)).max(12).optional().refine(
+    (v) => v == null || v.every(isAlsoSellKey),
+    { message: "Unknown category in also-sell list" },
+  ),
 });
 
 // Fields that determine WHO the seller legally is or WHERE their payout money goes — the exact
@@ -246,6 +260,9 @@ const KYC_SENSITIVE_FIELDS = [
   // general store could otherwise re-badge itself a pharmacy and start listing medicines under an
   // approval that never looked at a drug licence.
   "shopType",
+  // Declaring a regulated trade here is the same move as re-badging shopType: it adds a licence
+  // requirement the approval never looked at.
+  "alsoSellCategories",
   // Holds the licences of whichever trade this is — the documents the owner actually read.
   "categoryData",
 ] as const;
@@ -323,15 +340,16 @@ router.put("/", async (req: SellerRequest, res: Response) => {
         onboardingStatus: true, everApproved: true, kycEditUnlocked: true,
         gstin: true, pan: true, fssaiNumber: true, fssaiExpiry: true,
         gstinDocUrl: true, panDocUrl: true, fssaiDocUrl: true, bankProofUrl: true, bankDetails: true,
-        shopType: true, categoryData: true, vertical: true,
+        shopType: true, categoryData: true, vertical: true, alsoSellCategories: true,
       },
     });
     if (!current) throw new NotFoundError("Seller", req.sellerId ?? "");
 
-    // Resolve the profile this write lands under — the shop type may be changing in this request,
-    // and the incoming category fields must be validated against the type they'll end up in.
+    // Resolve the profile this write lands under — the shop type / also-sell list may be changing in
+    // this request, and the incoming category fields must be validated against what they'll end up in.
     const nextShopType = parsed.data.shopType !== undefined ? parsed.data.shopType : current.shopType;
-    const profile = profileFor(nextShopType, current.vertical);
+    const nextAlsoSell = parsed.data.alsoSellCategories ?? current.alsoSellCategories;
+    const profile = effectiveProfile(nextShopType, current.vertical, nextAlsoSell);
 
     // Merge rather than replace: the wizard saves between steps, so step 5's two fields must not
     // wipe step 4's. Unknown keys are refused so a typo can't sit in the blob looking like data.
@@ -481,7 +499,7 @@ router.post("/onboarding/submit", async (req: SellerRequest, res: Response) => {
       return res.json({ success: true, data: await shapeSellerProfile(seller, await isAgreementCurrent(seller.id)) });
     }
 
-    const profile = profileFor(seller.shopType, seller.vertical);
+    const profile = effectiveProfile(seller.shopType, seller.vertical, seller.alsoSellCategories);
     const missing = missingRequiredFields(
       profile,
       seller as unknown as Record<string, unknown>,
@@ -1133,7 +1151,7 @@ router.put("/sellers/:id", async (req: SellerRequest, res: Response) => {
 
     const current = await prisma.seller.findUnique({
       where: { id },
-      select: { gstin: true, pan: true, shopType: true, categoryData: true, vertical: true },
+      select: { gstin: true, pan: true, shopType: true, categoryData: true, vertical: true, alsoSellCategories: true },
     });
     if (!current) throw new NotFoundError("Seller", id);
 
@@ -1150,9 +1168,10 @@ router.put("/sellers/:id", async (req: SellerRequest, res: Response) => {
     // Same merge + unknown-key rules as the seller's own PUT above. The manager edits a seller's
     // application step by step exactly as the seller would, so a replace here would wipe whichever
     // category fields this particular request didn't carry.
-    const managerProfile = profileFor(
+    const managerProfile = effectiveProfile(
       parsed.data.shopType !== undefined ? parsed.data.shopType : current.shopType,
       current.vertical,
+      parsed.data.alsoSellCategories ?? current.alsoSellCategories,
     );
     const { merged: managerMerged, unknownKeys: managerUnknown } = mergeCategoryData(
       current.categoryData,

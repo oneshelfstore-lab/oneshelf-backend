@@ -9,7 +9,7 @@ import {
   SENSITIVE_DATA_CONSENT_TEXT,
   LOCATION_TRACKING_CONSENT_TEXT,
 } from "../data/onboardingAgreements.js";
-import { SHOP_TYPES, isKnownShopType, profileFor, stepsFor } from "../data/shopTypes.js";
+import { SHOP_TYPES, isKnownShopType, effectiveProfile, stepsFor } from "../data/shopTypes.js";
 
 // Public read of the onboarding consent copy (Phase 1). Served over the API rather than hardcoded
 // in the Android app so the (currently placeholder, non-lawyer-reviewed — see
@@ -71,7 +71,10 @@ router.get("/shop-types", (_req: Request, res: Response) => {
  */
 router.get("/requirements", (req: Request, res: Response) => {
   const requested = String(req.query.shopType ?? "");
-  const profile = profileFor(isKnownShopType(requested) ? requested : null, "SHOP");
+  // `also` = comma-separated also-sell keys; effectiveProfile ignores unknown/kitchen ones. The
+  // submit gate uses the seller's STORED list, so this only decides what the screen shows.
+  const also = String(req.query.also ?? "").split(",").map((k) => k.trim()).filter(Boolean);
+  const profile = effectiveProfile(isKnownShopType(requested) ? requested : null, "SHOP", also);
   res.json({
     success: true,
     data: {

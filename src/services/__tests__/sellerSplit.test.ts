@@ -245,6 +245,19 @@ describe("per-line commission — runbook step 08", () => {
     expect(resolveCommissionPct({ lineTotal: 100, taxableValue: 100, commissionPctOverride: 2 }, 5)).toBe(2);
   });
 
+  // Phase 5b: product override → owner's category rate → seller default.
+  it("uses the owner's category rate between the product override and the seller default", () => {
+    const base = { lineTotal: 100, taxableValue: 100 };
+    expect(resolveCommissionPct({ ...base, categoryCommissionPct: 4 }, 5)).toBe(4);
+    expect(resolveCommissionPct({ ...base, categoryCommissionPct: null }, 5)).toBe(5);
+    // The more specific product override still wins over the category rate.
+    expect(resolveCommissionPct({ ...base, commissionPctOverride: 2, categoryCommissionPct: 4 }, 5)).toBe(2);
+  });
+
+  it("keeps a genuine 0% category rate at 0 instead of falling back", () => {
+    expect(resolveCommissionPct({ lineTotal: 100, taxableValue: 100, categoryCommissionPct: 0 }, 5)).toBe(0);
+  });
+
   // Step 08's prove: same numbers as before, to the paise, until a human sets an override.
   it("changes nothing while every override is null", () => {
     const lines = [

@@ -581,6 +581,7 @@ model Category {
   superCategory   SuperCategory? @relation(fields: [superCategoryId], references: [id], onDelete: SetNull)
 
   catalogProducts CatalogProduct[]
+  sellerCommissions SellerCategoryCommission[]
 }
 
 // ─── 3. CatalogProduct (Oneshelf app product — identity only) ────────
@@ -2206,6 +2207,16 @@ model Seller {
   // The cost is that querying across it needs JSONB (e.g. a future licence-expiry sweep); that is
   // a query to write when something needs it, not a reason to spread the schema now.
   categoryData     Json?
+  // Other SHOP trades this seller also sells ("PHARMACY", "BAKERY"…), beside the primary `shopType`.
+  // ⚠️ Not decoration: each one's extra paperwork is REQUIRED too (effectiveProfile in
+  // data/shopTypes.ts), so grocery + pharmacy owes a drug licence. String[] of registry keys for the
+  // same no-migration-per-trade reason as shopType. Empty for every pre-existing seller.
+  alsoSellCategories String[] @default([])
+  // What the seller OFFERED to give Oneshelf at onboarding (slider, 3–30%). A proposal only —
+  // ⚠️ NEVER read at order time and never copied into `commissionPct` automatically. The owner reads
+  // it, then sets the real rates (default + SellerCategoryCommission rows) when approving.
+  offeredCommissionPct Decimal? @db.Decimal(5, 2)
+  categoryCommissions SellerCategoryCommission[]
 
   // ─── Vertical (MULTIVERTICAL_PLAN.md §4.1) ──────────────────────────
   // Which business this seller trades in: "SHOP" (grocery/daily goods) | "FOOD" (restaurant).
@@ -2549,6 +2560,28 @@ model CommissionRequest {
   @@index([status, createdAt])
   @@index([sellerId, status])
   @@index([productId])
+}
+
+// ─── Owner-set commission for ONE seller in ONE product category ─────────────────────────────────
+// Rate precedence at order time (services/sellerSplit.ts resolveCommissionPct):
+//   product override (CommissionRequest) → THIS row → Seller.commissionPct.
+// ⚠️ Keyed on the PRODUCT Category (what an order line actually carries), not on the shop type the
+// seller declared at onboarding — those are different taxonomies. Owner-written only (never from a
+// seller route). A missing row means "fall through to the seller default", never 0%.
+model SellerCategoryCommission {
+  id          String   @id @default(cuid())
+  sellerId    String
+  seller      Seller   @relation(fields: [sellerId], references: [id], onDelete: Cascade)
+  categoryId  String
+  category    Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  pct         Decimal  @db.Decimal(5, 2)
+  // Plain id, no relation — same audit-stamp convention as CommissionRequest.decidedByUserId.
+  setByUserId String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([sellerId, categoryId])
+  @@index([categoryId])
 }
 
 // ─── Balance movements outside the normal per-order accrual (runbook step 12) ────────────────────

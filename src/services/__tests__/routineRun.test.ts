@@ -43,6 +43,8 @@ const h = vi.hoisted(() => {
       update: vi.fn(async () => ({})),
     },
     subOrder: { create: vi.fn(async () => ({ id: "so1" })) },
+    // No owner-set category rates in these fixtures → every line falls through to the seller rate.
+    sellerCategoryCommission: { findMany: vi.fn(async () => []) },
   };
   const prisma: any = {
     subscriptionException: {

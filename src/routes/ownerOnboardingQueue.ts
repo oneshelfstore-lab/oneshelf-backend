@@ -43,6 +43,7 @@ async function shapeSellerRow(s: {
   grievanceOfficerPhone: string | null; grievanceOfficerEmail: string | null; shopAddress: string | null;
   city: string | null; onboardingStatus: string; onboardingRejectionReason: string | null;
   createdAt: Date; ownerUser: { name: string; phone: string | null } | null;
+  commissionPct?: unknown; offeredCommissionPct?: unknown; alsoSellCategories?: string[];
 }) {
   const consents = await prisma.consentRecord.findMany({
     where: { subjectType: "SELLER", subjectId: s.id },
@@ -61,6 +62,11 @@ async function shapeSellerRow(s: {
     fssaiExpiry: s.fssaiExpiry,
     shopAddress: s.shopAddress,
     city: s.city,
+    // What the owner decides on at approval: the seller's offer vs the rate currently on file.
+    // The offer is a proposal; only the PUT /seller/:id/commission below changes real rates.
+    commissionPct: s.commissionPct != null ? Number(s.commissionPct) : null,
+    offeredCommissionPct: s.offeredCommissionPct != null ? Number(s.offeredCommissionPct) : null,
+    alsoSellCategories: s.alsoSellCategories ?? [],
     // Part of the KYC check: the typed account must match the bank-proof photo below.
     bankDetails: s.bankDetails ?? null,
     grievanceOfficerName: s.grievanceOfficerName,
@@ -189,6 +195,84 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
 });
 
 const rejectSchema = z.object({ reason: z.string().min(1).max(500) });
+
+// ─── Commission: the owner's decision ───────────────────────────────
+// The seller only OFFERS a rate (Seller.offeredCommissionPct). These two routes are the only place
+// the real rates are set at onboarding: the seller default (Seller.commissionPct) and per-category
+// overrides (SellerCategoryCommission). Order-time precedence: product override → category row →
+// seller default.
+
+// GET /seller/:id/commission → what the editor shows: current default, the seller's offer, and
+// every active category with its override (null = "uses the default").
+router.get("/seller/:id/commission", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const seller = await prisma.seller.findUnique({
+      where: { id },
+      select: { commissionPct: true, offeredCommissionPct: true, categoryCommissions: { select: { categoryId: true, pct: true } } },
+    });
+    if (!seller) throw new NotFoundError("Seller", id);
+    const overrides = new Map(seller.categoryCommissions.map((c) => [c.categoryId, Number(c.pct)]));
+    const categories = await prisma.category.findMany({
+      where: { isActive: true },
+      orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
+      select: { id: true, name: true },
+    });
+    res.json({
+      success: true,
+      data: {
+        commissionPct: Number(seller.commissionPct),
+        offeredCommissionPct: seller.offeredCommissionPct != null ? Number(seller.offeredCommissionPct) : null,
+        categories: categories.map((c) => ({ categoryId: c.id, name: c.name, pct: overrides.get(c.id) ?? null })),
+      },
+    });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// Owner can set anything from 0 to 50. 0 is a real, deliberate rate and is stored as 0.
+// Clearing an override is its own list rather than `pct: null`: the Android client's JSON layer
+// omits nulls, so a null could never reach us and "remove this override" would silently do nothing.
+const commissionSchema = z.object({
+  commissionPct: z.number().min(0).max(50).optional(),
+  categoryRates: z.array(z.object({
+    categoryId: z.string().min(1),
+    pct: z.number().min(0).max(50),
+  })).max(200).optional(),
+  clearCategoryIds: z.array(z.string().min(1)).max(200).optional(),
+});
+
+router.put("/seller/:id/commission", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const parsed = commissionSchema.safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("Invalid commission rates", parsed.error.errors);
+    const seller = await prisma.seller.findUnique({ where: { id }, select: { id: true } });
+    if (!seller) throw new NotFoundError("Seller", id);
+
+    const { commissionPct, categoryRates = [], clearCategoryIds = [] } = parsed.data;
+    const ownerId = req.appUser?.id ?? null;
+    await prisma.$transaction(async (tx) => {
+      if (commissionPct !== undefined) {
+        await tx.seller.update({ where: { id }, data: { commissionPct } });
+      }
+      if (clearCategoryIds.length > 0) {
+        await tx.sellerCategoryCommission.deleteMany({ where: { sellerId: id, categoryId: { in: clearCategoryIds } } });
+      }
+      for (const row of categoryRates) {
+        await tx.sellerCategoryCommission.upsert({
+          where: { sellerId_categoryId: { sellerId: id, categoryId: row.categoryId } },
+          create: { sellerId: id, categoryId: row.categoryId, pct: row.pct, setByUserId: ownerId },
+          update: { pct: row.pct, setByUserId: ownerId },
+        });
+      }
+    });
+    res.json({ success: true, data: { id } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
 
 // ─── POST /:type/:id/approve ────────────────────────────────────────
 router.post("/:type/:id/approve", async (req: FirebaseAuthRequest, res: Response) => {

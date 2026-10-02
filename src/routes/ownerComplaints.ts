@@ -9,7 +9,7 @@ import {
 } from "../middleware/firebaseAuth.js";
 import { shapeComplaint, quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 import { shapeOrderMessage } from "../services/orderMessages.js";
-import { notifyComplaintForwarded, notifyComplaintMessage } from "../services/fcmNotifier.js";
+import { notifyComplaintForwarded, notifyComplaintMessage, notifyWalletCredited } from "../services/fcmNotifier.js";
 import { resolveActions } from "../services/notificationInbox.js";
 
 // Owner complaint inbox. Mounted at /api/app/owner/complaints.
@@ -190,6 +190,8 @@ router.post("/:id/refund", async (req: FirebaseAuthRequest, res: Response) => {
           data: { status: "RESOLVED", resolvedAt: new Date(), refundedAmount: amount, refundMode: mode, refundedAt: new Date() },
         });
       });
+      notifyWalletCredited(complaint.userId, amount, "Your return refund has been added to your store credit.")
+        .catch((e: unknown) => console.error("[background task failed]", e));
     } else {
       // EXTERNAL — the money already moved outside the app; just record it for the books.
       await prisma.complaint.update({

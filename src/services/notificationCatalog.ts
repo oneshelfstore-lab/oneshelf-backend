@@ -31,6 +31,7 @@ const order = { type: "ORDER", idKey: "orderId" };
 const complaint = { type: "COMPLAINT", idKey: "complaintId" };
 const quote = { type: "QUOTE", idKey: "quoteId" };
 const courier = { type: "COURIER", idKey: "bookingId" };
+const variant = { type: "VARIANT", idKey: "variantId" };
 
 export const CATALOG: Record<string, CatalogEntry> = {
   // ── Orders ──
@@ -84,6 +85,19 @@ export const CATALOG: Record<string, CatalogEntry> = {
   partner_approved: { category: "ACCOUNT", kind: (d) => (d.stage === "PROVISIONED" ? "ACTION" : "INFO"), severity: "HIGH", action: "OPEN_ONBOARDING" },
   product_decision: { category: "INVENTORY", kind: (d) => (d.approved === "false" ? "ACTION" : "INFO"), action: "OPEN_PRODUCTS" },
   back_in_stock: { category: "INVENTORY", kind: "INFO", topic: "back_in_stock" },
+
+  // ── Payments, refunds, expiry (Phase 8) ──
+  payment_failed: { category: "PAYMENTS", kind: "ACTION", severity: "HIGH", entity: order, action: "OPEN_ORDER" },
+  refund_update: { category: "PAYMENTS", kind: "INFO", entity: order, action: "OPEN_ORDER" },
+  wallet_credited: { category: "PAYMENTS", kind: "INFO", action: "OPEN_WALLET" },
+  order_expired: { category: "ORDERS", kind: "INFO", entity: order, action: "OPEN_ORDER" },
+  courier_delayed: { category: "DELIVERY", kind: "INFO", entity: courier, action: "OPEN_COURIER" },
+
+  // ── Seller: stock and money (Phase 8) ──
+  low_stock: { category: "INVENTORY", kind: "ACTION", entity: variant, action: "OPEN_PRODUCTS" },
+  out_of_stock: { category: "INVENTORY", kind: "ACTION", severity: "HIGH", entity: variant, action: "OPEN_PRODUCTS" },
+  seller_payout: { category: "BUSINESS", kind: "INFO" },
+  commission_update: { category: "BUSINESS", kind: "INFO" },
 
   // ── Promotional (kept apart from everything transactional) ──
   broadcast: { category: "PROMO", kind: "PROMO" },

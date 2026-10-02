@@ -6,7 +6,7 @@ import { randomBytes } from "crypto";
 import { haversineKm } from "../lib/distance.js";
 import { signStoragePath } from "../lib/storageUrls.js";
 import { getRiderRoute } from "./riderRoute.js";
-import { notifyNewCourierAvailable, notifyCourierCustomer } from "./fcmNotifier.js";
+import { notifyNewCourierAvailable, notifyCourierCustomer, notifyCourierStillSearching } from "./fcmNotifier.js";
 import { getCurrentFinancialYear } from "./invoiceNumbering.js";
 import {
   checkCourierEligibility,
@@ -579,6 +579,20 @@ export async function expireStaleCourierBookings(): Promise<number> {
 
   // SEARCHING is entered at payment confirmation and nothing else touches the row while it waits,
   // so updatedAt is "when the search began".
+  //
+  // Halfway through the window: one "still finding a rider" heads-up, so the customer is not left
+  // guessing until the cancel arrives. notifyCourierStillSearching latches on its own inbox row, so the
+  // 2-minute sweep cannot repeat it. Rows already past the full window are about to be cancelled below.
+  const windowMs = cfg.searchTimeoutMin * 60_000;
+  const waiting = await prisma.courierBooking.findMany({
+    where: { status: "SEARCHING", updatedAt: { lt: new Date(Date.now() - windowMs / 2), gte: new Date(Date.now() - windowMs) } },
+    select: { id: true, number: true, customerId: true },
+  });
+  for (const w of waiting) {
+    notifyCourierStillSearching(w.customerId, { bookingId: w.id, number: w.number })
+      .catch((e: unknown) => console.error("[background task failed]", e));
+  }
+
   const searching = await prisma.courierBooking.findMany({
     where: { status: "SEARCHING", updatedAt: { lt: new Date(Date.now() - cfg.searchTimeoutMin * 60_000) } },
     select: { id: true },

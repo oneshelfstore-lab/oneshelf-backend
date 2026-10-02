@@ -4,6 +4,7 @@ import { reverseSellerLedgerOnCancel } from "./subOrderFulfillment.js";
 import { reconcileOrderPayment } from "./paymentReconciliation.js";
 import { cancelOrderInTx } from "./subOrderFulfillment.js";
 import { recordOrderEvent } from "./orderEvents.js";
+import { notifyOrderExpired } from "./fcmNotifier.js";
 
 // Online/UPI orders decrement stock at placement (to hold it during payment). If the
 // customer never completes payment (abandons the Razorpay sheet, app crash), that stock
@@ -29,12 +30,13 @@ export async function expireStaleUnpaidOrders(): Promise<number> {
       razorpayPaymentId: null, // never verified a payment
       createdAt: { lt: cutoff },
     },
-    select: { id: true, razorpayOrderId: true },
+    select: { id: true, razorpayOrderId: true, orderNumber: true, customerId: true },
   });
 
   let expired = 0;
 
   for (const order of stale) {
+    const expiredBefore = expired;
     try {
       // Ask Razorpay whether this "unpaid" order was in fact paid (a captured payment whose
       // confirmation never reached us). If so, reconcile marks it PAID (or refunds if it was already
@@ -81,6 +83,11 @@ export async function expireStaleUnpaidOrders(): Promise<number> {
       // status === CANCELLED internally and is idempotent.
       await refundWalletOnCancel(order.id);
       await reverseSellerLedgerOnCancel(order.id);
+      // Only when THIS pass cancelled it (a racing payment or another cancel leaves `expired` alone).
+      if (expired > expiredBefore) {
+        notifyOrderExpired(order.customerId, { orderId: order.id, orderNumber: order.orderNumber })
+          .catch((e: unknown) => console.error("[background task failed]", e));
+      }
     } catch (err) {
       console.error(JSON.stringify({ level: "error", msg: "order-expiry failed", orderId: order.id, err: String(err) }));
     }

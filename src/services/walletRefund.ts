@@ -1,4 +1,5 @@
 import prisma from "../lib/prisma.js";
+import { notifyWalletCredited } from "./fcmNotifier.js";
 
 /**
  * Refund store credit when a wallet-paying order is cancelled. Idempotent via the
@@ -8,7 +9,7 @@ import prisma from "../lib/prisma.js";
 export async function refundWalletOnCancel(orderId: string): Promise<void> {
   const order = await prisma.order.findUnique({
     where: { id: orderId },
-    select: { id: true, customerId: true, walletApplied: true, status: true },
+    select: { id: true, orderNumber: true, customerId: true, walletApplied: true, status: true },
   });
   const amt = Number(order?.walletApplied ?? 0);
   // Require CANCELLED so this is safe to call unconditionally (e.g. from the expiry sweeper loop):
@@ -33,6 +34,9 @@ export async function refundWalletOnCancel(orderId: string): Promise<void> {
         },
       });
     });
+    // Only reached when the credit was applied just now (a repeat call throws P2002 above), so once.
+    notifyWalletCredited(order.customerId, amt, `Refund for cancelled order #${order.orderNumber}.`)
+      .catch((e: unknown) => console.error("[background task failed]", e));
   } catch (e: any) {
     // P2002 on @@unique([orderId, type]) → already refunded → idempotent no-op.
     if (e?.code !== "P2002") {

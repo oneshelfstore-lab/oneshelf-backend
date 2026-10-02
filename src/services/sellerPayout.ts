@@ -5,6 +5,7 @@ import { ValidationError, NotFoundError } from "../lib/errors.js";
 import { quarterFor } from "./sellerTds194o.js";
 import { getCurrentFinancialYear } from "./invoiceNumbering.js";
 import { ManualRail, resolvePayoutRail } from "./payoutRail.js";
+import { notifySellerPayout } from "./fcmNotifier.js";
 
 /**
  * Which sub-orders a seller may actually be PAID for, as one Prisma filter.
@@ -59,7 +60,7 @@ export async function payoutSeller(
 ) {
   const seller = await prisma.seller.findUnique({
     where: { id: sellerId },
-    select: { id: true, isHouse: true, name: true, pan: true, payoutAccountRef: true },
+    select: { id: true, isHouse: true, name: true, pan: true, payoutAccountRef: true, ownerUserId: true },
   });
   if (!seller) throw new NotFoundError("Seller", sellerId);
 
@@ -86,6 +87,12 @@ export async function payoutSeller(
       data: { reference: sent.reference },
       select: { id: true },
     });
+  }
+
+  // After the commit (and after the rail): tell the seller a settlement was recorded. Best-effort.
+  if (seller.ownerUserId) {
+    notifySellerPayout(seller.ownerUserId, { payoutId: result.payout.id, amount: Number(result.payout.netPaid) })
+      .catch((e: unknown) => console.error("[background task failed]", e));
   }
 
   return { ...result, rail: rail.name, railStatus: sent.status };

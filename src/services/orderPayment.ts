@@ -2,6 +2,7 @@ import prisma from "../lib/prisma.js";
 import { generateOrderInvoice } from "./orderInvoice.js";
 import { generateOtp } from "../lib/otp.js";
 import { notifyNewOrder, notifySubOrderNew } from "./fcmNotifier.js";
+import { resolveActions } from "./notificationInbox.js";
 
 /**
  * The single, idempotent "this order's online payment is confirmed" routine. ALL THREE confirmation
@@ -67,6 +68,8 @@ export async function markOrderPaid(orderId: string, razorpayPaymentId: string):
     // anyone (see routes/orders.ts) — an unpaid ONLINE/UPI order is hidden from the owner board and
     // the seller list by PAYMENT_SETTLED, and the expiry sweeper cancels it, so packing it wastes goods.
     notifyOrderPaid(orderId).catch((e) => console.error("[background task failed]", e));
+    // A retry succeeded, so the earlier "Payment didn't go through" card is stale.
+    resolveActions({ entityType: "ORDER", entityId: orderId, types: ["payment_failed"] });
   }
   return flipped;
 }

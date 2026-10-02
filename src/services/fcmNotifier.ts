@@ -829,3 +829,129 @@ export async function notifyCourierFailed(info: { bookingId: string; number: str
 export async function notifyCourierRider(riderId: string, info: { bookingId: string; title: string; body: string }) {
   await toUser(riderId, { type: "courier_assigned", bookingId: info.bookingId, title: info.title, body: info.body });
 }
+
+// ─── Payments, refunds, expiry, stock, settlements (NOTIFICATIONS_PLAN.md Phase 8) ───
+
+/** Has this person already been told this? Used where the SOURCE can fire repeatedly (webhook retries, a sweeper). Fails open. */
+async function alreadySent(
+  userId: string,
+  type: string,
+  opts: { entityId?: string; body?: string; withinHours?: number } = {},
+): Promise<boolean> {
+  try {
+    const hit = await prisma.notification.findFirst({
+      where: {
+        userId,
+        type,
+        ...(opts.entityId ? { entityId: opts.entityId } : {}),
+        ...(opts.body ? { body: opts.body } : {}),
+        ...(opts.withinHours ? { createdAt: { gte: new Date(Date.now() - opts.withinHours * 3_600_000) } } : {}),
+      },
+      select: { id: true },
+    });
+    return !!hit;
+  } catch {
+    return false;
+  }
+}
+
+// An online payment attempt was declined. The order is held (stock reserved) until the expiry sweeper
+// cancels it, so the customer can still pay. Razorpay fires payment.failed for EVERY failed attempt
+// in the sheet, so this is once per order — the first failure is the one worth interrupting for.
+export async function notifyPaymentFailed(userId: string, info: { orderId: string; orderNumber: string }) {
+  if (await alreadySent(userId, "payment_failed", { entityId: info.orderId })) return;
+  await toUser(userId, {
+    type: "payment_failed",
+    orderId: info.orderId,
+    orderNumber: info.orderNumber,
+    title: "Payment didn't go through",
+    body: `Order #${info.orderNumber} is on hold. Open it to try again before it expires.`,
+  });
+}
+
+// Money is on its way back to the original payment method. "initiated" = we asked Razorpay (the bank
+// takes 5-7 working days); "completed" = Razorpay's refund.processed webhook.
+export async function notifyRefund(
+  userId: string,
+  info: { orderId?: string; label: string; amount: number; stage: "initiated" | "completed" },
+) {
+  const amount = `Rs.${Math.round(info.amount)}`;
+  const body = info.stage === "initiated"
+    ? `${amount} for ${info.label} is being returned to your original payment method. It can take 5-7 working days to show up.`
+    : `${amount} for ${info.label} has been returned to your original payment method.`;
+  // Webhooks are at-least-once; the same refund must not announce itself twice.
+  if (await alreadySent(userId, "refund_update", { body, withinHours: 24 })) return;
+  await toUser(userId, {
+    type: "refund_update",
+    ...(info.orderId ? { orderId: info.orderId } : {}),
+    title: info.stage === "initiated" ? "Refund started" : "Refund completed",
+    body,
+  });
+}
+
+// Store credit landed in the wallet (top-up confirmed, refund for a cancelled order, return refund).
+export async function notifyWalletCredited(userId: string, amount: number, reason: string) {
+  await toUser(userId, {
+    type: "wallet_credited",
+    amount: String(amount),
+    title: `Rs.${Math.round(amount)} added to your wallet`,
+    body: reason,
+  });
+}
+
+// An unpaid online order timed out and was cancelled by the sweeper. Without this the order just
+// vanishes from "active" and the customer has no idea why.
+export async function notifyOrderExpired(userId: string, info: { orderId: string; orderNumber: string }) {
+  await resolveActions({ entityType: "ORDER", entityId: info.orderId, types: ["payment_failed"] });
+  await toUser(userId, {
+    type: "order_expired",
+    orderId: info.orderId,
+    orderNumber: info.orderNumber,
+    title: `Order #${info.orderNumber} expired`,
+    body: "We didn't receive the payment in time, so the order was cancelled. No money was taken — you can place it again.",
+  });
+}
+
+// A paid courier booking has been waiting for a rider for half its search window. One heads-up, then
+// either a rider accepts or the booking is cancelled (which already notifies). Latch = the inbox row.
+export async function notifyCourierStillSearching(userId: string, info: { bookingId: string; number: string }) {
+  if (await alreadySent(userId, "courier_delayed", { entityId: info.bookingId })) return;
+  await toUser(userId, {
+    type: "courier_delayed",
+    bookingId: info.bookingId,
+    title: "Still finding a rider",
+    body: `Booking ${info.number}: this is taking a little longer than usual. We'll let you know as soon as someone accepts.`,
+  });
+}
+
+// A seller's variant just crossed into low stock, or ran out. The crossing is detected by the caller
+// (services/stockLevel.ts) so this fires once per drop, not on every sale below the line.
+export async function notifyLowStock(
+  sellerOwnerUserId: string,
+  info: { variantId: string; productName: string; stock: number; out: boolean },
+) {
+  const left = +info.stock.toFixed(3);
+  await toUser(sellerOwnerUserId, {
+    type: info.out ? "out_of_stock" : "low_stock",
+    variantId: info.variantId,
+    title: info.out ? `Out of stock: ${info.productName}` : `Low stock: ${info.productName}`,
+    body: info.out
+      ? "It's sold out and customers can't order it. Update the stock to list it again."
+      : `Only ${left} left. Restock soon to avoid cancellations.`,
+  });
+}
+
+// The owner recorded a payout to this seller.
+export async function notifySellerPayout(sellerOwnerUserId: string, info: { payoutId: string; amount: number }) {
+  await toUser(sellerOwnerUserId, {
+    type: "seller_payout",
+    payoutId: info.payoutId,
+    title: "Payout recorded",
+    body: `Rs.${Math.round(info.amount)} has been settled to you. See Earnings for the breakdown.`,
+  });
+}
+
+// The owner answered a seller's commission request, or changed the seller's rate.
+export async function notifyCommissionUpdate(sellerOwnerUserId: string, title: string, body: string) {
+  await toUser(sellerOwnerUserId, { type: "commission_update", title, body });
+}

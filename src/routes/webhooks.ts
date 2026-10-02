@@ -2,6 +2,8 @@ import { Router, type Request, type Response } from "express";
 import prisma from "../lib/prisma.js";
 import { verifyWebhookSignature } from "../services/razorpay.js";
 import { markOrderPaid } from "../services/orderPayment.js";
+import { notifyPaymentFailed } from "../services/fcmNotifier.js";
+import { noticeRefund } from "../services/paymentNotices.js";
 import { reconcileOrderPayment } from "../services/paymentReconciliation.js";
 import { creditTopupByRazorpayOrder } from "../services/walletTopup.js";
 import { creditQuoteByRazorpayOrder } from "../services/quotePayment.js";
@@ -52,6 +54,22 @@ router.post("/razorpay", async (req: Request, res: Response) => {
         const creditedTopup = await creditTopupByRazorpayOrder(razorpayOrderId, razorpayPaymentId);
         if (!creditedTopup) await creditQuoteByRazorpayOrder(razorpayOrderId, razorpayPaymentId);
       }
+    }
+
+    // A declined attempt on a live, still-unpaid order → tell the customer once (the order is held for
+    // them). Anything else (a top-up, a courier booking, an order that already got paid by a retry) is ignored.
+    if (event === "payment.failed" && razorpayOrderId) {
+      const failed = await prisma.order.findFirst({
+        where: { razorpayOrderId, status: "PLACED", paymentStatus: "PENDING" },
+        select: { id: true, orderNumber: true, customerId: true },
+      });
+      if (failed) await notifyPaymentFailed(failed.customerId, { orderId: failed.id, orderNumber: failed.orderNumber });
+    }
+
+    // The bank-side refund finished. (Needs `refund.processed` ticked on the webhook in the Razorpay dashboard.)
+    if (event === "refund.processed") {
+      const refund = req.body?.payload?.refund?.entity;
+      if (refund?.payment_id) await noticeRefund(String(refund.payment_id), Number(refund.amount) || undefined, "completed");
     }
 
     // Always 200 fast on a verified event (Razorpay retries non-2xx). Unknown events are ignored.

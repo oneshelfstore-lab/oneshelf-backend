@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { noticeRefund } from "./paymentNotices.js";
 
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
@@ -164,5 +165,9 @@ export async function refundPayment(
     throw new Error(`Razorpay refund failed: ${err}`);
   }
 
+  // Every online refund in the app (cancel, seller cancel, substitution, courier, reconciliation…)
+  // goes through here, so this is the one place that can tell the customer it started. Fire-and-forget:
+  // noticeRefund never throws and must not delay or fail a refund that already happened.
+  void noticeRefund(paymentId, amountInPaise, "initiated");
   return response.json() as Promise<{ id: string; status: string }>;
 }

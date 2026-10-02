@@ -1,5 +1,7 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
+import prisma from "../lib/prisma.js";
+import { notifyCommissionUpdate } from "../services/fcmNotifier.js";
 import { sendError, ValidationError } from "../lib/errors.js";
 import {
   firebaseAuthMiddleware,
@@ -57,6 +59,19 @@ router.post("/:id/decide", async (req: FirebaseAuthRequest, res: Response) => {
       ownerNote: parsed.data.ownerNote ?? null,
       decidedByUserId: req.appUser?.id ?? null,
     });
+    // Tell the seller what the owner decided about their ask. Best-effort; a lookup hiccup must never
+    // fail a decision that is already saved.
+    prisma.commissionRequest
+      .findUnique({
+        where: { id: String(req.params.id ?? "") },
+        select: { status: true, approvedPct: true, product: { select: { name: true } }, seller: { select: { ownerUserId: true } } },
+      })
+      .then((r) => {
+        if (!r?.seller?.ownerUserId) return;
+        const what = r.status === "REJECTED" ? "was declined" : r.status === "APPROVED" ? `was approved at ${Number(r.approvedPct)}%` : `got a counter-offer of ${Number(r.approvedPct)}%`;
+        return notifyCommissionUpdate(r.seller.ownerUserId, "Commission request answered", `Your request for ${r.product.name} ${what}.`);
+      })
+      .catch((e: unknown) => console.error("[background task failed]", e));
     res.json({ success: true, data });
   } catch (e) {
     sendError(res, e);

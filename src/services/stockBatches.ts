@@ -1,6 +1,9 @@
 import type { Prisma } from "@prisma/client";
 import { AppError } from "../lib/errors.js";
 import { notifyStockAlerts } from "./stockAlerts.js";
+import { notifyLowStock } from "./fcmNotifier.js";
+import { resolveActions } from "./notificationInbox.js";
+import { stockCrossing } from "./stockLevel.js";
 
 // ─── FIFO batch costing engine ───────────────────────────────────────
 //
@@ -68,7 +71,7 @@ export async function receiveBatch(
   if (qty <= 0) throw new AppError(400, "VALIDATION_ERROR", "Restock quantity must be greater than 0");
   if (unitCost < 0) throw new AppError(400, "VALIDATION_ERROR", "Unit cost cannot be negative");
 
-  const before = await tx.productVariant.findUnique({ where: { id: variantId }, select: { stock: true } });
+  const before = await tx.productVariant.findUnique({ where: { id: variantId }, select: { stock: true, lowStockThreshold: true } });
   const crossedIntoStock = before != null && Number(before.stock) <= 0;
 
   const batch = await tx.stockBatch.create({
@@ -83,6 +86,11 @@ export async function receiveBatch(
   });
   await tx.productVariant.update({ where: { id: variantId }, data: { stock: { increment: qty } } });
   await recomputeRollupCost(tx, variantId);
+
+  // Back above the seller's low-stock line → their "low stock" / "out of stock" cards are done.
+  if (before != null && Number(before.stock) + qty > before.lowStockThreshold) {
+    resolveActions({ entityType: "VARIANT", entityId: variantId, types: ["low_stock", "out_of_stock"] });
+  }
 
   if (crossedIntoStock) {
     // ponytail: fired outside this transaction's atomicity (best-effort, like every other FCM
@@ -153,8 +161,25 @@ export async function consumeFifo(
     throw new AppError(400, "INSUFFICIENT_STOCK", "Insufficient stock");
   }
 
-  await tx.productVariant.update({ where: { id: variantId }, data: { stock: { decrement: qtyNeeded } } });
+  const after = await tx.productVariant.update({
+    where: { id: variantId },
+    data: { stock: { decrement: qtyNeeded } },
+    select: { stock: true, lowStockThreshold: true, product: { select: { name: true, seller: { select: { ownerUserId: true } } } } },
+  });
   await recomputeRollupCost(tx, variantId);
+
+  // Tell the seller when this sale takes the item to/below its low-stock line (or to zero).
+  // ponytail: fired inside the transaction like notifyStockAlerts below — a sale that later rolls back
+  // could still produce one "low stock" ping. Same accepted edge; use an outbox if it ever matters.
+  const left = after?.stock != null ? Number(after.stock) : null;
+  const owner = after?.product?.seller?.ownerUserId;
+  if (left != null && owner) {
+    const crossing = stockCrossing(left + qtyNeeded, left, after.lowStockThreshold);
+    if (crossing) {
+      notifyLowStock(owner, { variantId, productName: after.product.name, stock: left, out: crossing === "OUT" })
+        .catch((e) => console.error("low-stock notify failed:", e));
+    }
+  }
 
   return { consumed, totalQty: qtyNeeded, weightedUnitCost: qtyNeeded > 0 ? totalCost / qtyNeeded : 0 };
 }

@@ -1,6 +1,7 @@
 import prisma from "../lib/prisma.js";
 import { createRazorpayOrder, isRazorpayConfigured, fetchCapturedPaymentForOrder } from "./razorpay.js";
 import { AppError } from "../lib/errors.js";
+import { notifyWalletCredited } from "./fcmNotifier.js";
 
 export interface CreateTopupResult {
   topupId: string;
@@ -44,7 +45,8 @@ export async function createTopup(userId: string, amount: number): Promise<Creat
  * Returns true if THIS call applied the credit.
  */
 export async function creditTopup(topupId: string, razorpayPaymentId: string): Promise<boolean> {
-  return prisma.$transaction(async (tx) => {
+  let credited = 0;
+  const applied = await prisma.$transaction(async (tx) => {
     const flip = await tx.walletTopup.updateMany({
       where: { id: topupId, status: "PENDING" },
       data: { status: "PAID", razorpayPaymentId },
@@ -71,8 +73,15 @@ export async function creditTopup(topupId: string, razorpayPaymentId: string): P
         note: "Wallet top-up",
       },
     });
-    return true;
+    credited = Number(topup.amount);
+    return topup.userId;
   });
+  // After commit, and only for the call that actually applied the credit (the app's /pay and the
+  // webhook race; the loser returns false above).
+  if (!applied) return false;
+  notifyWalletCredited(applied, credited, "Your top-up is confirmed and ready to use.")
+    .catch((e: unknown) => console.error("[background task failed]", e));
+  return true;
 }
 
 /**

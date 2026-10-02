@@ -24,6 +24,8 @@ import notificationPreferenceRoutes from "./routes/notificationPreferences.js";
 import { publicStoresRouter } from "./routes/stores.js";
 import favoriteStoresRoutes from "./routes/favoriteStores.js";
 import { publicCategoryRouter, adminCategoryRouter, publicSuperCategoryRouter } from "./routes/categories.js";
+import { publicCollectionRouter, adminCollectionRouter } from "./routes/collections.js";
+import { publicCategoryPageRouter } from "./routes/categoryPage.js";
 import ownerSuperCategoryRoutes from "./routes/ownerSuperCategories.js";
 import { publicCatalogRouter, adminCatalogRouter } from "./routes/catalog.js";
 import { publicBannerRouter, adminBannerRouter, ownerBannerRouter } from "./routes/banners.js";
@@ -278,6 +280,10 @@ app.use("/api/app/public/product-intake", express.json({ limit: LARGE_BODY_LIMIT
 // Grocery-list photo → text (Bulk Express). The client downscales to ~1280px JPEG (<1 MB raw, ~1.4 MB base64).
 app.use("/api/app/me/list-ocr", express.json({ limit: "3mb" }));
 
+// Product editor AI assistant (seller + owner): optional pack photo, same ~1 MB-raw JPEG as list-ocr.
+app.use("/api/app/seller/catalog/ai", express.json({ limit: "3mb" }));
+app.use("/api/app/owner/catalog/ai", express.json({ limit: "3mb" }));
+
 // Everything else. A real request on this API — place an order, save a product, update config — is
 // a few KB; 512 KB is already generous headroom.
 app.use(express.json({ limit: "512kb" }));
@@ -391,6 +397,8 @@ app.use("/api/app/me/fcm-token", fcmTokenRoutes);
 
 // Public app endpoints (no auth)
 app.use("/api/app/categories", publicCategoryRouter);
+app.use("/api/app/categories", publicCategoryPageRouter);
+app.use("/api/app/collections", publicCollectionRouter);
 app.use("/api/app/stores", publicStoresRouter);
 app.use("/api/app/me/favorite-stores", favoriteStoresRoutes);
 app.use("/api/app/super-categories", publicSuperCategoryRouter);
@@ -503,6 +511,7 @@ app.use("/api", auditLoggerMiddleware as any);
 
 app.use("/api/company", companyRoutes);
 app.use("/api/categories", adminCategoryRouter);
+app.use("/api/collections", adminCollectionRouter);
 app.use("/api/catalog", adminCatalogRouter);
 app.use("/api/banners", adminBannerRouter);
 app.use("/api/coupons", adminCouponRouter);

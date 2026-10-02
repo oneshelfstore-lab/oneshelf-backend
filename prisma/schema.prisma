@@ -560,8 +560,23 @@ model Category {
   superCategoryId String?
   superCategory   SuperCategory? @relation(fields: [superCategoryId], references: [id], onDelete: SetNull)
 
+  // Sub-category tree (CATALOG_PLAN.md phase 1). Null = a top-level category, exactly as before.
+  // ⚠️ Child rows are Category rows too, so every "list the categories" query must filter
+  // `parentId: null` or children leak into Home/Categories as if they were departments' children.
+  // Roots are the only nodes with a superCategoryId, a commission row or a Home chip; they are never
+  // moved or demoted (see services/categoryTree.ts).
+  parentId        String?
+  parent          Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children        Category[] @relation("CategoryTree")
+  nameHi          String?
+  description     String?
+  showInNavigation Boolean   @default(true)
+
   catalogProducts CatalogProduct[]
+  leafProducts    CatalogProduct[] @relation("ProductLeafCategory")
   sellerCommissions SellerCategoryCommission[]
+
+  @@index([parentId])
 }
 
 // ─── 3. CatalogProduct (Oneshelf app product — identity only) ────────
@@ -583,10 +598,20 @@ model CatalogProduct {
   nameHi                String?
   brand                 String?
   categoryId            String
+  // ⚠️ categoryId is always the TOP-LEVEL category (commission, GST, analytics read it). Only the
+  // server writes it when a leaf is set: it is derived from leafCategoryId's root (services/categoryTree.ts).
   category              Category    @relation(fields: [categoryId], references: [id])
+  // Deepest tree node this product sits in (null = only known to top-level, or legacy free-text subcategory).
+  leafCategoryId        String?
+  leafCategory          Category?   @relation("ProductLeafCategory", fields: [leafCategoryId], references: [id], onDelete: SetNull)
+  // Legacy free-text, kept in step with leafCategory.name until old app versions are gone.
   subcategory           String?
   productType           ProductType
   description           String?
+  // Hindi twin of `description` and a few short factual bullets — both written by the editor's "Product
+  // Intelligence" assistant only after the seller taps Apply (CATALOG_PLAN.md phase 6). Blank = not set.
+  descriptionHi         String?
+  highlights            String[]    @default([])
   hsnCode               String?     @db.VarChar(8)
   gstRate               Decimal?    @db.Decimal(5, 2)
   cessRate              Decimal     @default(0) @db.Decimal(5, 2)
@@ -632,12 +657,57 @@ model CatalogProduct {
 
   variants           ProductVariant[]
   favorites          Favorite[]
+  collectionLinks    CollectionProduct[]
   commissionRequests CommissionRequest[]
 
   @@index([categoryId])
+  @@index([leafCategoryId])
   @@index([name])
   @@index([isActive])
   @@index([sellerId])
+}
+
+// ─── Collection (CATALOG_PLAN.md phase 3) ───────────────────────────
+// A customer-facing grouping that is NOT taxonomy: Bestsellers, Diwali, Hostel essentials, "Hair fall care".
+// A product keeps its one canonical category and can sit in any number of collections.
+//  kind: COLLECTION | OCCASION | CONCERN (presentation + admin filtering only)
+//  mode: MANUAL = exactly the pinned products; SMART = products matching `rules`, plus pins, minus excludes
+//  rules (SMART): { categoryIds?: string[] (any tree node; its whole subtree), brands?: string[], priceMin?, priceMax?, inStock? }
+//  showOn: surfaces that may feature it (HOME | CATEGORIES); Home shelves are phase 8b.
+// Live window: startsAt/endsAt (null = open ended). Resolved in services/collections.ts.
+model Collection {
+  id           String    @id @default(cuid())
+  slug         String    @unique
+  name         String
+  nameHi       String?
+  description  String?
+  imageUrl     String?
+  kind         String    @default("COLLECTION")
+  mode         String    @default("MANUAL")
+  rules        Json?
+  showOn       String[]  @default([])
+  startsAt     DateTime?
+  endsAt       DateTime?
+  displayOrder Int       @default(0)
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  products CollectionProduct[]
+
+  @@index([isActive, displayOrder])
+}
+
+// PIN = always in the collection; EXCLUDE = never, even if a SMART rule matches.
+model CollectionProduct {
+  collectionId String
+  collection   Collection     @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  productId    String
+  product      CatalogProduct @relation(fields: [productId], references: [id], onDelete: Cascade)
+  mode         String         @default("PIN")
+
+  @@id([collectionId, productId])
+  @@index([productId])
 }
 
 // ─── Favorite (user's wishlist — product-level) ──────────────────────
@@ -1787,6 +1857,8 @@ model OrderItem {
   createdAt DateTime @default(now())
 
   @@index([orderId])
+  // "Frequently bought together" looks up order lines by product variant (services/recommendations.ts).
+  @@index([variantId])
   @@index([sellerId])
 }
 
@@ -3325,4 +3397,15 @@ model ListOcrUsage {
   count  Int    @default(0)
 
   @@id([userId, day])
+}
+
+// Per-user daily counter for paid AI calls other than list-OCR (which keeps its own table above).
+// `feature` e.g. "product-intel". Counted BEFORE the call, so a failed Gemini call still uses quota.
+model AiUsage {
+  userId  String
+  feature String
+  day     String // "YYYY-MM-DD" UTC
+  count   Int    @default(0)
+
+  @@id([userId, feature, day])
 }

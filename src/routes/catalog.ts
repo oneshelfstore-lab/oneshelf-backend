@@ -6,6 +6,8 @@ import { requireRole } from "../middleware/auth.js";
 import { formatVariantForApp } from "../utils/looseUnitConverter.js";
 import { cacheControl, memoCache } from "../lib/httpCache.js";
 import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
+import { resolveCategoryFields, subtreeIds } from "../services/categoryTree.js";
+import { getRecommendations } from "../services/recommendations.js";
 
 // Product reads carry live stock (decremented on every order), so they are NOT server-memoized —
 // they get a SHORT client Cache-Control window only, and checkout re-validates stock authoritatively.
@@ -33,10 +35,13 @@ export function formatProductForApp(product: any) {
     nameHi: product.nameHi ?? null,
     brand: product.brand,
     categoryId: product.categoryId,
+    leafCategoryId: product.leafCategoryId ?? null,
     category: product.category ?? undefined,
     subcategory: product.subcategory,
     productType: product.productType,
     description: product.description,
+    descriptionHi: product.descriptionHi ?? null,
+    highlights: product.highlights ?? [],
     hsnCode: product.hsnCode,
     gstRate: product.gstRate != null ? Number(product.gstRate) : null,
     cessRate: Number(product.cessRate ?? 0),
@@ -73,7 +78,7 @@ export function formatProductForApp(product: any) {
 }
 
 // Reusable include for the seller chip on customer-facing product reads.
-const SELLER_SELECT = {
+export const SELLER_SELECT = {
   select: { id: true, name: true, isHouse: true, grievanceOfficerName: true, grievanceOfficerPhone: true },
 } as const;
 
@@ -94,7 +99,7 @@ const SELLER_SELECT = {
  * would silently drop every legacy/house row. The OR sits INSIDE the `NOT` so spreading this can
  * never clobber a query's own top-level `OR` (the search query has one).
  */
-const SELLER_TRADING = {
+export const SELLER_TRADING = {
   NOT: { seller: { OR: [{ isActive: false }, { status: "SUSPENDED" as const }] } },
 };
 
@@ -189,7 +194,14 @@ publicCatalogRouter.get("/", cacheControl(CATALOG_LIST_TTL), async (req: Request
 
     if (category) {
       // Accept either the category slug or its id (the app sometimes navigates by id).
-      where.category = { OR: [{ slug: category }, { id: category }] };
+      const node = await prisma.category.findFirst({ where: { OR: [{ slug: category }, { id: category }] }, select: { id: true, parentId: true } });
+      if (node?.parentId) {
+        // A sub-category node: everything whose deepest node sits anywhere under it.
+        const rows = await prisma.category.findMany({ select: { id: true, parentId: true } });
+        where.leafCategoryId = { in: subtreeIds(rows, node.id) };
+      } else {
+        where.category = { OR: [{ slug: category }, { id: category }] };
+      }
     }
 
     const [products, total] = await Promise.all([
@@ -611,6 +623,30 @@ publicCatalogRouter.get("/:id/alternatives", cacheControl(CATALOG_LIST_TTL), asy
   }
 });
 
+// GET /api/app/products/:id/recommendations — ranked shelves for the product page (see services/recommendations.ts).
+// { sections: [{ type, products }] }; sections with too few real items are simply absent, so the app shows
+// only what exists. Every product in it is in stock and from a trading seller.
+publicCatalogRouter.get("/:id/recommendations", cacheControl(CATALOG_LIST_TTL), async (req: Request, res: Response) => {
+  try {
+    const id = String(req.params.id ?? "");
+    const sections = await getRecommendations(id, {
+      eligible: {
+        isActive: true, approvalStatus: "APPROVED", deletedAt: null, ...SELLER_TRADING,
+        variants: { some: { isActive: true, stock: { gt: 0 } } },
+      },
+      include: {
+        variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
+        category: { select: { slug: true, name: true } },
+        seller: SELLER_SELECT,
+      },
+    });
+    if (!sections) throw new NotFoundError("Product", id);
+    res.json({ success: true, data: { sections: sections.map((s) => ({ type: s.type, products: s.products.map(formatProductForApp) })) } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // GET /api/app/products/:id
 publicCatalogRouter.get("/:id", cacheControl(CATALOG_LIST_TTL), async (req: Request, res: Response) => {
   try {
@@ -664,6 +700,8 @@ const productCreateSchema = z.object({
   name: z.string().min(1).max(200),
   brand: z.string().max(100).optional().nullable(),
   categoryId: z.string().min(1),
+  // Optional deepest tree node; when sent, categoryId/subcategory are re-derived from it (services/categoryTree.ts).
+  leafCategoryId: z.string().min(1).optional().nullable(),
   subcategory: z.string().max(100).optional().nullable(),
   productType: ProductTypeEnum,
   description: z.string().max(1000).optional().nullable(),
@@ -724,10 +762,10 @@ adminCatalogRouter.post("/", requireRole("OWNER") as any, async (req: Request, r
   try {
     const parsed = productCreateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid product data", parsed.error.errors);
-    const { variants, ...productData } = parsed.data;
+    const { variants, leafCategoryId, ...rawData } = parsed.data;
 
-    const cat = await prisma.category.findUnique({ where: { id: productData.categoryId } });
-    if (!cat) throw new ValidationError(`Category '${productData.categoryId}' not found`);
+    // Throws if the category / leaf doesn't exist; also links a legacy free-text subcategory to its node.
+    const productData = { ...rawData, ...(await resolveCategoryFields(prisma, { categoryId: rawData.categoryId, subcategory: rawData.subcategory, leafCategoryId })) };
 
     const existing = await prisma.catalogProduct.findUnique({ where: { handle: productData.handle } });
     if (existing) throw new ConflictError(`Product handle '${productData.handle}' already exists`);
@@ -781,17 +819,14 @@ adminCatalogRouter.put("/:id", requireRole("OWNER") as any, async (req: Request,
 
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid product data", parsed.error.errors);
-    const { variants: variantUpdates, ...productData } = parsed.data;
+    const { variants: variantUpdates, leafCategoryId, ...rawData } = parsed.data;
 
-    if (productData.handle && productData.handle !== existing.handle) {
-      const dup = await prisma.catalogProduct.findUnique({ where: { handle: productData.handle } });
-      if (dup) throw new ConflictError(`Product handle '${productData.handle}' already exists`);
+    if (rawData.handle && rawData.handle !== existing.handle) {
+      const dup = await prisma.catalogProduct.findUnique({ where: { handle: rawData.handle } });
+      if (dup) throw new ConflictError(`Product handle '${rawData.handle}' already exists`);
     }
 
-    if (productData.categoryId) {
-      const cat = await prisma.category.findUnique({ where: { id: productData.categoryId } });
-      if (!cat) throw new ValidationError(`Category '${productData.categoryId}' not found`);
-    }
+    const productData = { ...rawData, ...(await resolveCategoryFields(prisma, { categoryId: rawData.categoryId, subcategory: rawData.subcategory, leafCategoryId }, existing.categoryId)) };
 
     await prisma.$transaction(async (tx) => {
       if (Object.keys(productData).length > 0) {

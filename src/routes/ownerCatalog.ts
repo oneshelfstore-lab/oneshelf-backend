@@ -11,6 +11,8 @@ import { formatVariantForApp, fromAppFormat, toAppFormat, assertVariantFloors } 
 import { memoCache } from "../lib/httpCache.js";
 import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
 import { recordPriceChange } from "../services/priceHistory.js";
+import { resolveCategoryFields } from "../services/categoryTree.js";
+import { analyzeProductHandler } from "../services/productIntelligence.js";
 import { notifyProductDecision } from "../services/fcmNotifier.js";
 import { calculateLineItemTax, calculateInvoiceTotals } from "../services/taxEngine.js";
 
@@ -40,10 +42,13 @@ function formatProductForApp(product: any) {
     name: product.name,
     brand: product.brand,
     categoryId: product.categoryId,
+    leafCategoryId: product.leafCategoryId ?? null,
     category: product.category ?? undefined,
     subcategory: product.subcategory,
     productType: product.productType,
     description: product.description,
+    descriptionHi: product.descriptionHi ?? null,
+    highlights: product.highlights ?? [],
     hsnCode: product.hsnCode,
     gstRate: product.gstRate != null ? Number(product.gstRate) : null,
     isPackaged: product.isPackaged,
@@ -135,10 +140,15 @@ const productCreateSchema = z.object({
   name: z.string().min(1).max(200),
   nameHi: z.string().max(200).optional().nullable(),
   brand: z.string().max(100).optional().nullable(),
-  categorySlug: z.string().min(1).max(50),
+  // Either the top-level slug (all existing app versions) or the deepest tree node. leafCategoryId wins and
+  // the server derives categoryId/subcategory from it (services/categoryTree.ts).
+  categorySlug: z.string().min(1).max(50).optional(),
+  leafCategoryId: z.string().min(1).optional().nullable(),
   subcategory: z.string().max(100).optional().nullable(),
   productType: ProductTypeEnum,
   description: z.string().max(1000).optional().nullable(),
+  descriptionHi: z.string().max(1000).optional().nullable(),
+  highlights: z.array(z.string().max(60)).max(6).optional(),
   hsnCode: z.string().min(4).max(8).optional().nullable(),
   gstRate: z.number().min(0).max(100).optional().nullable(),
   cessRate: z.number().min(0).max(100).default(0),
@@ -159,14 +169,18 @@ const productCreateSchema = z.object({
   variants: z.array(variantCreateSchema).min(1).max(20),
 });
 
+// POST /ai/analyze — Product Intelligence: proposes category + EN/HI description for the editor (never saves).
+router.post("/ai/analyze", analyzeProductHandler);
+
 router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const parsed = productCreateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid product data", parsed.error.errors);
-    const { variants, categorySlug, ...productData } = parsed.data;
+    const { variants, categorySlug, leafCategoryId, ...productData } = parsed.data;
 
-    const cat = await prisma.category.findUnique({ where: { slug: categorySlug } });
-    if (!cat) throw new ValidationError(`Category '${categorySlug}' not found`);
+    const resolved = await resolveCategoryFields(prisma, { categorySlug, subcategory: productData.subcategory, leafCategoryId });
+    if (!resolved.categoryId) throw new ValidationError("categorySlug or leafCategoryId is required");
+    const catFields = { ...resolved, categoryId: resolved.categoryId }; // narrowed to string for the create input
 
     // Auto-generate handle if it conflicts
     let handle = productData.handle;
@@ -233,8 +247,8 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       const created = await tx.catalogProduct.create({
         data: {
           ...productData,
+          ...catFields,
           handle,
-          categoryId: cat.id,
           variants: {
             create: convertedVariants.map(({ initialStock, initialCost, ...rest }) => rest),
           },
@@ -294,21 +308,14 @@ router.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
 
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid product data", parsed.error.errors);
-    const { variants: variantUpdates, categorySlug, ...productFields } = parsed.data;
+    const { variants: variantUpdates, categorySlug, leafCategoryId, ...productFields } = parsed.data;
 
-    let categoryId: string | undefined;
-    if (categorySlug) {
-      const cat = await prisma.category.findUnique({ where: { slug: categorySlug } });
-      if (!cat) throw new ValidationError(`Category '${categorySlug}' not found`);
-      categoryId = cat.id;
-    }
+    const catFields = await resolveCategoryFields(prisma, { categorySlug, subcategory: productFields.subcategory, leafCategoryId }, existing.categoryId);
 
     const isLoose = isLooseType(productFields.productType ?? existing.productType);
 
     await prisma.$transaction(async (tx) => {
-      const updateData: any = { ...productFields };
-      if (categoryId) updateData.categoryId = categoryId;
-      delete updateData.categorySlug;
+      const updateData: any = { ...productFields, ...catFields };
       // See the identical guard in sellerCatalog.ts's PUT: create auto-suffixes a colliding handle,
       // the app re-derives `slugify(name)` on every save and can't know about the suffix, so writing
       // it back here throws an uncaught P2002 and makes the product permanently uneditable.
@@ -646,7 +653,9 @@ router.get("/vendors/search", async (req: FirebaseAuthRequest, res: Response) =>
 // GET /categories — all categories (including inactive)
 router.get("/categories", async (_req: FirebaseAuthRequest, res: Response) => {
   try {
+    // Top-level only (the Android owner picker is flat); the web admin reads every node from /api/categories.
     const categories = await prisma.category.findMany({
+      where: { parentId: null },
       orderBy: { displayOrder: "asc" },
       include: { _count: { select: { catalogProducts: true } } },
     });
@@ -685,6 +694,9 @@ router.delete("/categories/:id", async (req: FirebaseAuthRequest, res: Response)
     const catId = String(req.params.id);
     const cat = await prisma.category.findUnique({ where: { id: catId } });
     if (!cat) throw new NotFoundError("Category", catId);
+    if (await prisma.category.count({ where: { parentId: catId } })) {
+      throw new ValidationError("This category has sub-categories; remove or move them first");
+    }
 
     await prisma.category.delete({ where: { id: catId } });
     res.json({ success: true, message: "Category deleted" });
@@ -715,7 +727,7 @@ router.post("/categories/seed", async (_req: FirebaseAuthRequest, res: Response)
       });
     }
 
-    const all = await prisma.category.findMany({ orderBy: { displayOrder: "asc" } });
+    const all = await prisma.category.findMany({ where: { parentId: null }, orderBy: { displayOrder: "asc" } });
     res.json({ success: true, data: all, message: `Seeded ${defaults.length} categories` });
   } catch (e) {
     sendError(res, e);

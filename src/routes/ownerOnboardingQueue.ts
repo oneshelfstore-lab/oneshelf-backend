@@ -214,7 +214,7 @@ router.get("/seller/:id/commission", async (req: FirebaseAuthRequest, res: Respo
     if (!seller) throw new NotFoundError("Seller", id);
     const overrides = new Map(seller.categoryCommissions.map((c) => [c.categoryId, Number(c.pct)]));
     const categories = await prisma.category.findMany({
-      where: { isActive: true },
+      where: { isActive: true, parentId: null }, // commission is per top-level category
       orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
       select: { id: true, name: true },
     });

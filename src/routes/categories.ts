@@ -5,16 +5,50 @@ import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib
 import { requireRole } from "../middleware/auth.js";
 import { SUBCATEGORIES, slugifySub } from "../data/subcategories.js";
 import { cacheControl, memoCache, PUBLIC_TTL_MS, PUBLIC_TTL_SECONDS } from "../lib/httpCache.js";
+import { buildTree, childSlug, moveCategory, subtreeIds, MAX_DEPTH, pathTo } from "../services/categoryTree.js";
 
 // ─── Public router (no auth, mounted at /api/app/categories) ────────
 
 export const publicCategoryRouter = Router();
 
+// GET /api/app/categories/tree — the whole active tree, nested, with live product counts. Hidden
+// (showInNavigation false) nodes and their descendants are left out. Declared before /:slug routes.
+publicCategoryRouter.get("/tree", cacheControl(PUBLIC_TTL_SECONDS), async (_req: Request, res: Response) => {
+  try {
+    const data = await memoCache.get("categories:tree", PUBLIC_TTL_MS, async () => {
+      const rows = await prisma.category.findMany({
+        where: { isActive: true },
+        orderBy: { displayOrder: "asc" },
+        select: {
+          id: true, slug: true, name: true, nameHi: true, imageUrl: true, description: true, displayOrder: true,
+          showInNavigation: true, isActive: true, superCategoryId: true, parentId: true,
+        },
+      });
+      // Drop hidden nodes together with everything under them.
+      const hidden = new Set(rows.filter((r) => !r.showInNavigation).flatMap((r) => subtreeIds(rows, r.id)));
+      const visible = rows.filter((r) => !hidden.has(r.id) && !(r.parentId && !rows.some((p) => p.id === r.parentId)));
+      const [leaf, root] = await Promise.all([
+        prisma.catalogProduct.groupBy({ by: ["leafCategoryId"], where: { isActive: true, leafCategoryId: { not: null } }, _count: { _all: true } }),
+        prisma.catalogProduct.groupBy({ by: ["categoryId"], where: { isActive: true }, _count: { _all: true } }),
+      ]);
+      return buildTree(
+        visible,
+        new Map(leaf.map((g) => [g.leafCategoryId!, g._count._all])),
+        new Map(root.map((g) => [g.categoryId, g._count._all])),
+      );
+    });
+    res.json({ success: true, data });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 publicCategoryRouter.get("/", cacheControl(PUBLIC_TTL_SECONDS), async (_req: Request, res: Response) => {
   try {
     const data = await memoCache.get("categories", PUBLIC_TTL_MS, async () => {
       const categories = await prisma.category.findMany({
-        where: { isActive: true },
+        // parentId null: sub-category nodes are Category rows too, and must not appear as top-level categories.
+        where: { isActive: true, parentId: null },
         orderBy: { displayOrder: "asc" },
         // ⚠️ ACTIVE products only. This is the PUBLIC/customer endpoint, and every customer-facing
         // catalog query filters `isActive: true` — so counting deactivated rows here reported
@@ -37,6 +71,77 @@ publicCategoryRouter.get("/", cacheControl(PUBLIC_TTL_SECONDS), async (_req: Req
   }
 });
 
+export type SubcategoryRow = { id?: string; slug: string; name: string; nameHi?: string | null; imageUrl?: string | null; productCount: number };
+
+/** Sub-categories of the category with this slug: real tree children first, plus any unlinked legacy free-text names. */
+export async function loadSubcategories(slug: string): Promise<SubcategoryRow[]> {
+    const category = await prisma.category.findUnique({ where: { slug }, select: { id: true } });
+    if (!category) return [] as SubcategoryRow[];
+
+    // Real tree children win when the category has any; legacy free-text stays below for products not yet linked.
+    const all = await prisma.category.findMany({
+      where: { isActive: true, parentId: { not: null } },
+      select: { id: true, parentId: true, name: true, nameHi: true, imageUrl: true, displayOrder: true, showInNavigation: true },
+    });
+    const kids = all.filter((c) => c.parentId === category.id && c.showInNavigation).sort((a, b) => a.displayOrder - b.displayOrder);
+    if (kids.length > 0) {
+      const byLeaf = await prisma.catalogProduct.groupBy({
+        by: ["leafCategoryId"],
+        where: { categoryId: category.id, isActive: true, leafCategoryId: { not: null } },
+        _count: { _all: true },
+      });
+      const leafCount = new Map(byLeaf.map((g) => [g.leafCategoryId!, g._count._all]));
+      const flat = all.map((c) => ({ id: c.id, parentId: c.parentId }));
+      const names = new Set(kids.map((k) => k.name.trim().toLowerCase()));
+      const out: SubcategoryRow[] = kids.map((k) => ({
+        id: k.id,
+        slug: slugifySub(k.name),
+        name: k.name,
+        nameHi: k.nameHi,
+        imageUrl: k.imageUrl,
+        productCount: subtreeIds(flat, k.id).reduce((n, id) => n + (leafCount.get(id) ?? 0), 0),
+      }));
+      const loose = await prisma.catalogProduct.groupBy({
+        by: ["subcategory"],
+        where: { categoryId: category.id, isActive: true, leafCategoryId: null, subcategory: { not: null } },
+        _count: { _all: true },
+      });
+      for (const g of loose) {
+        const name = (g.subcategory ?? "").trim();
+        if (name && !names.has(name.toLowerCase())) out.push({ slug: slugifySub(name), name, productCount: g._count._all });
+      }
+      return out;
+    }
+
+    const grouped = await prisma.catalogProduct.groupBy({
+      by: ["subcategory"],
+      where: { categoryId: category.id, isActive: true, subcategory: { not: null } },
+      _count: { _all: true },
+    });
+
+    // Sum counts by trimmed name (collapses "Rice" vs "Rice ").
+    const counts = new Map<string, number>();
+    for (const g of grouped) {
+      const name = (g.subcategory ?? "").trim();
+      if (name) counts.set(name, (counts.get(name) ?? 0) + g._count._all);
+    }
+
+    const canonical = SUBCATEGORIES[slug] ?? [];
+    const seen = new Set<string>();
+    const out: SubcategoryRow[] = [];
+
+    // Curated list first (preserves order), with live counts.
+    for (const name of canonical) {
+      seen.add(name);
+      out.push({ slug: slugifySub(name), name, productCount: counts.get(name) ?? 0 });
+    }
+    // Then any non-canonical values that exist in the data (legacy free-text).
+    for (const [name, count] of counts) {
+      if (!seen.has(name)) out.push({ slug: slugifySub(name), name, productCount: count });
+    }
+    return out;
+}
+
 // GET /api/app/categories/:slug/subcategories — canonical sub-categories for a
 // category, each with a live count of active products. Returns the curated list
 // (ordered) merged with any legacy/free-text values present in the data, so nothing
@@ -44,38 +149,7 @@ publicCategoryRouter.get("/", cacheControl(PUBLIC_TTL_SECONDS), async (_req: Req
 publicCategoryRouter.get("/:slug/subcategories", cacheControl(PUBLIC_TTL_SECONDS), async (req: Request, res: Response) => {
   try {
     const slug = String(req.params.slug);
-    const data = await memoCache.get(`categories:sub:${slug}`, PUBLIC_TTL_MS, async () => {
-      const category = await prisma.category.findUnique({ where: { slug }, select: { id: true } });
-      if (!category) return [] as { slug: string; name: string; productCount: number }[];
-
-      const grouped = await prisma.catalogProduct.groupBy({
-        by: ["subcategory"],
-        where: { categoryId: category.id, isActive: true, subcategory: { not: null } },
-        _count: { _all: true },
-      });
-
-      // Sum counts by trimmed name (collapses "Rice" vs "Rice ").
-      const counts = new Map<string, number>();
-      for (const g of grouped) {
-        const name = (g.subcategory ?? "").trim();
-        if (name) counts.set(name, (counts.get(name) ?? 0) + g._count._all);
-      }
-
-      const canonical = SUBCATEGORIES[slug] ?? [];
-      const seen = new Set<string>();
-      const out: { slug: string; name: string; productCount: number }[] = [];
-
-      // Curated list first (preserves order), with live counts.
-      for (const name of canonical) {
-        seen.add(name);
-        out.push({ slug: slugifySub(name), name, productCount: counts.get(name) ?? 0 });
-      }
-      // Then any non-canonical values that exist in the data (legacy free-text).
-      for (const [name, count] of counts) {
-        if (!seen.has(name)) out.push({ slug: slugifySub(name), name, productCount: count });
-      }
-      return out;
-    });
+    const data = await memoCache.get(`categories:sub:${slug}`, PUBLIC_TTL_MS, () => loadSubcategories(slug));
 
     res.json({ success: true, data });
   } catch (e) {
@@ -147,14 +221,26 @@ const categorySchema = z.object({
   imageUrl: z.string().max(500).optional().nullable(),
   displayOrder: z.number().int().min(0).default(0),
   isActive: z.boolean().default(true),
+  nameHi: z.string().max(100).optional().nullable(),
+  description: z.string().max(500).optional().nullable(),
+  showInNavigation: z.boolean().default(true),
 });
 
+// Create may omit the slug for a child (derived from the parent's slug + name). Re-parenting is a
+// separate endpoint (/:id/move), so update never accepts parentId.
+const categoryCreateSchema = categorySchema.extend({
+  slug: categorySchema.shape.slug.optional(),
+  parentId: z.string().min(1).optional(),
+});
+
+// GET / — EVERY node (children included, each with parentId and its own product count): this is the
+// admin tree editor's feed. The customer-facing lists filter parentId: null instead.
 adminCategoryRouter.get("/", async (_req: Request, res: Response) => {
   try {
     const categories = await prisma.category.findMany({
       orderBy: { displayOrder: "asc" },
-      include: { _count: { select: { catalogProducts: true } } },
-      take: 500,
+      include: { _count: { select: { catalogProducts: true, leafProducts: true } } },
+      take: 1000,
     });
     res.json({ success: true, data: categories });
   } catch (e) {
@@ -164,15 +250,55 @@ adminCategoryRouter.get("/", async (_req: Request, res: Response) => {
 
 adminCategoryRouter.post("/", requireRole("OWNER") as any, async (req: Request, res: Response) => {
   try {
-    const parsed = categorySchema.safeParse(req.body);
+    const parsed = categoryCreateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid category data", parsed.error.errors);
+    const { parentId, ...rest } = parsed.data;
 
-    const existing = await prisma.category.findUnique({ where: { slug: parsed.data.slug } });
-    if (existing) throw new ConflictError(`Category slug '${parsed.data.slug}' already exists`);
+    let slug = rest.slug;
+    if (parentId) {
+      const all = await prisma.category.findMany({ select: { id: true, parentId: true, slug: true } });
+      const parent = all.find((c) => c.id === parentId);
+      if (!parent) throw new NotFoundError("Category", parentId);
+      if (pathTo(new Map(all.map((c) => [c.id, c])), parentId).length >= MAX_DEPTH) {
+        throw new ValidationError(`Categories can be at most ${MAX_DEPTH} levels deep`);
+      }
+      slug ??= childSlug(parent.slug, rest.name);
+    }
+    if (!slug) throw new ValidationError("slug is required for a top-level category");
 
-    const category = await prisma.category.create({ data: parsed.data });
+    const existing = await prisma.category.findUnique({ where: { slug } });
+    if (existing) throw new ConflictError(`Category slug '${slug}' already exists`);
+
+    const category = await prisma.category.create({ data: { ...rest, slug, parentId } });
     memoCache.bust("categories", "super-cats");
     res.status(201).json({ success: true, data: category });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// PUT /:id/move { parentId } — re-parent a NON-root node. Top-level categories are never moved (they carry
+// commission, GST and Home references), and products in the subtree get their top-level categoryId re-derived.
+adminCategoryRouter.put("/:id/move", requireRole("OWNER") as any, async (req: Request, res: Response) => {
+  try {
+    const parsed = z.object({ parentId: z.string().min(1) }).safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("parentId is required", parsed.error.errors);
+    await prisma.$transaction((tx) => moveCategory(tx, String(req.params.id), parsed.data.parentId));
+    memoCache.bust("categories", "super-cats");
+    res.json({ success: true, message: "Category moved" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// POST /reorder { ids } — displayOrder := index in `ids` (the caller sends one sibling group in the new order).
+adminCategoryRouter.post("/reorder", requireRole("OWNER") as any, async (req: Request, res: Response) => {
+  try {
+    const parsed = z.object({ ids: z.array(z.string().min(1)).min(1).max(500) }).safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("ids must be a non-empty array", parsed.error.errors);
+    await prisma.$transaction(parsed.data.ids.map((id, i) => prisma.category.update({ where: { id }, data: { displayOrder: i } })));
+    memoCache.bust("categories", "super-cats");
+    res.json({ success: true, message: "Reordered" });
   } catch (e) {
     sendError(res, e);
   }

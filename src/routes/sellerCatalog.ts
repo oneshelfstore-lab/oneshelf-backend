@@ -9,6 +9,7 @@ import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
 import { recordPriceChange } from "../services/priceHistory.js";
 import { SELLER_SALE } from "../services/sellerSales.js";
 import { resolveCategoryFields } from "../services/categoryTree.js";
+import { fieldsForCategory, cleanAttributes } from "../services/categoryFields.js";
 import { analyzeProductHandler } from "../services/productIntelligence.js";
 import { calculateLineItemTax, calculateInvoiceTotals } from "../services/taxEngine.js";
 import {
@@ -73,6 +74,7 @@ function formatProductForApp(product: any) {
     description: product.description,
     descriptionHi: product.descriptionHi ?? null,
     highlights: product.highlights ?? [],
+    attributes: product.attributes ?? {},
     hsnCode: product.hsnCode,
     gstRate: product.gstRate != null ? Number(product.gstRate) : null,
     cessRate: product.cessRate != null ? Number(product.cessRate) : 0,
@@ -139,6 +141,8 @@ const productSchema = z.object({
   description: z.string().max(1000).optional().nullable(),
   descriptionHi: z.string().max(1000).optional().nullable(),
   highlights: z.array(z.string().max(60)).max(6).optional(),
+  // Category-specific spec values (services/categoryFields.ts); validated against the leaf category's fields.
+  attributes: z.record(z.string().max(100)).optional(),
   hsnCode: z.string().min(4).max(8).optional().nullable(),
   gstRate: z.number().min(0).max(100).optional().nullable(),
   cessRate: z.number().min(0).max(100).default(0),
@@ -208,11 +212,12 @@ router.post("/", async (req: SellerRequest, res: Response) => {
   try {
     const parsed = productSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid product data", parsed.error.errors);
-    const { variants, categorySlug, leafCategoryId, isActive, isSampleEligible, featuredIn99Store, isBuyOneGetOne, ...productData } = parsed.data;
+    const { variants, categorySlug, leafCategoryId, isActive, isSampleEligible, featuredIn99Store, isBuyOneGetOne, attributes: rawAttributes, ...productData } = parsed.data;
 
     const resolved = await resolveCategoryFields(prisma, { categorySlug, subcategory: productData.subcategory, leafCategoryId });
     if (!resolved.categoryId) throw new ValidationError("categorySlug or leafCategoryId is required");
     const catFields = { ...resolved, categoryId: resolved.categoryId }; // narrowed to string for the create input
+    const attributes = cleanAttributes(await fieldsForCategory(prisma, resolved.leafCategoryId ?? resolved.categoryId), rawAttributes);
 
     // The house manager (the store's own catalog) gets owner-level powers: products go LIVE
     // immediately and the merchandising toggles apply. Third-party sellers stay limited: their
@@ -275,6 +280,7 @@ router.post("/", async (req: SellerRequest, res: Response) => {
         data: {
           ...productData,
           ...catFields,
+          attributes,
           handle,
           sellerId: req.sellerId!,
           ...merchandising, // house → live now (+toggles); third-party → inactive pending approval
@@ -324,14 +330,21 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
     const updateSchema = productSchema.partial().omit({ variants: true }).extend({ variants: z.array(variantSchema).min(1).max(20).optional() });
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid product data", parsed.error.errors);
-    const { variants: variantUpdates, categorySlug, leafCategoryId, ...productFields } = parsed.data;
+    const { variants: variantUpdates, categorySlug, leafCategoryId, attributes: rawAttributes, ...productFields } = parsed.data;
 
     const catFields = await resolveCategoryFields(prisma, { categorySlug, subcategory: productFields.subcategory, leafCategoryId }, existing.categoryId);
+    // Only touched when the app sent `attributes` (older apps omit it and keep what's stored). Validated against
+    // the category the product will end up in, so a category change re-validates the new fields.
+    const attributes = rawAttributes === undefined ? undefined : cleanAttributes(
+      await fieldsForCategory(prisma, (catFields.leafCategoryId !== undefined ? catFields.leafCategoryId : existing.leafCategoryId) ?? catFields.categoryId ?? existing.categoryId),
+      rawAttributes,
+    );
 
     const isLoose = isLooseType(productFields.productType ?? existing.productType);
 
     await prisma.$transaction(async (tx) => {
       const updateData: any = { ...productFields, ...catFields };
+      if (attributes !== undefined) updateData.attributes = attributes;
       // NEVER re-write the handle on update. Create (above) auto-suffixes a colliding handle, but the
       // app can't know that — it recomputes `slugify(name)` and sends it on every save, so a product
       // that was suffixed at creation sends the ORIGINAL handle here, collides with whichever product

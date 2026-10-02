@@ -571,6 +571,9 @@ model Category {
   nameHi          String?
   description     String?
   showInNavigation Boolean   @default(true)
+  // Product-form fields this node ADDS (services/categoryFields.ts): [{key,label,type,options?,unit?,required?,filterable?,showOnCard?}].
+  // A product inherits every ancestor's fields down to its leaf; a child redefining a key overrides it.
+  fieldSchema      Json?
 
   catalogProducts CatalogProduct[]
   leafProducts    CatalogProduct[] @relation("ProductLeafCategory")
@@ -612,6 +615,8 @@ model CatalogProduct {
   // Intelligence" assistant only after the seller taps Apply (CATALOG_PLAN.md phase 6). Blank = not set.
   descriptionHi         String?
   highlights            String[]    @default([])
+  // Category-specific spec values keyed by CategoryField.key, all stored as strings ({"tip_size":"0.5"}).
+  attributes            Json?
   hsnCode               String?     @db.VarChar(8)
   gstRate               Decimal?    @db.Decimal(5, 2)
   cessRate              Decimal     @default(0) @db.Decimal(5, 2)

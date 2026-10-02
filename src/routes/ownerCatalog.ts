@@ -12,6 +12,7 @@ import { memoCache } from "../lib/httpCache.js";
 import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
 import { recordPriceChange } from "../services/priceHistory.js";
 import { resolveCategoryFields } from "../services/categoryTree.js";
+import { fieldsForCategory, cleanAttributes } from "../services/categoryFields.js";
 import { analyzeProductHandler } from "../services/productIntelligence.js";
 import { notifyProductDecision } from "../services/fcmNotifier.js";
 import { calculateLineItemTax, calculateInvoiceTotals } from "../services/taxEngine.js";
@@ -49,6 +50,7 @@ function formatProductForApp(product: any) {
     description: product.description,
     descriptionHi: product.descriptionHi ?? null,
     highlights: product.highlights ?? [],
+    attributes: product.attributes ?? {},
     hsnCode: product.hsnCode,
     gstRate: product.gstRate != null ? Number(product.gstRate) : null,
     isPackaged: product.isPackaged,
@@ -152,6 +154,7 @@ const productCreateSchema = z.object({
   description: z.string().max(1000).optional().nullable(),
   descriptionHi: z.string().max(1000).optional().nullable(),
   highlights: z.array(z.string().max(60)).max(6).optional(),
+  attributes: z.record(z.string().max(100)).optional(),
   hsnCode: z.string().min(4).max(8).optional().nullable(),
   gstRate: z.number().min(0).max(100).optional().nullable(),
   cessRate: z.number().min(0).max(100).default(0),
@@ -179,11 +182,12 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const parsed = productCreateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid product data", parsed.error.errors);
-    const { variants, categorySlug, leafCategoryId, ...productData } = parsed.data;
+    const { variants, categorySlug, leafCategoryId, attributes: rawAttributes, ...productData } = parsed.data;
 
     const resolved = await resolveCategoryFields(prisma, { categorySlug, subcategory: productData.subcategory, leafCategoryId });
     if (!resolved.categoryId) throw new ValidationError("categorySlug or leafCategoryId is required");
     const catFields = { ...resolved, categoryId: resolved.categoryId }; // narrowed to string for the create input
+    const attributes = cleanAttributes(await fieldsForCategory(prisma, resolved.leafCategoryId ?? resolved.categoryId), rawAttributes);
 
     // Auto-generate handle if it conflicts
     let handle = productData.handle;
@@ -251,6 +255,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
         data: {
           ...productData,
           ...catFields,
+          attributes,
           handle,
           variants: {
             create: convertedVariants.map(({ initialStock, initialCost, ...rest }) => rest),
@@ -311,14 +316,20 @@ router.put("/:id", async (req: FirebaseAuthRequest, res: Response) => {
 
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid product data", parsed.error.errors);
-    const { variants: variantUpdates, categorySlug, leafCategoryId, ...productFields } = parsed.data;
+    const { variants: variantUpdates, categorySlug, leafCategoryId, attributes: rawAttributes, ...productFields } = parsed.data;
 
     const catFields = await resolveCategoryFields(prisma, { categorySlug, subcategory: productFields.subcategory, leafCategoryId }, existing.categoryId);
+    // Only touched when the app sent `attributes`; validated against the category the product ends up in.
+    const attributes = rawAttributes === undefined ? undefined : cleanAttributes(
+      await fieldsForCategory(prisma, (catFields.leafCategoryId !== undefined ? catFields.leafCategoryId : existing.leafCategoryId) ?? catFields.categoryId ?? existing.categoryId),
+      rawAttributes,
+    );
 
     const isLoose = isLooseType(productFields.productType ?? existing.productType);
 
     await prisma.$transaction(async (tx) => {
       const updateData: any = { ...productFields, ...catFields };
+      if (attributes !== undefined) updateData.attributes = attributes;
       // See the identical guard in sellerCatalog.ts's PUT: create auto-suffixes a colliding handle,
       // the app re-derives `slugify(name)` on every save and can't know about the suffix, so writing
       // it back here throws an uncaught P2002 and makes the product permanently uneditable.

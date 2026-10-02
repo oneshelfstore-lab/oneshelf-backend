@@ -5,6 +5,7 @@ import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib
 import { requireRole } from "../middleware/auth.js";
 import { SUBCATEGORIES, slugifySub } from "../data/subcategories.js";
 import { cacheControl, memoCache, PUBLIC_TTL_MS, PUBLIC_TTL_SECONDS } from "../lib/httpCache.js";
+import { buildCategoryForm, fieldSchemaSchema } from "../services/categoryFields.js";
 import { buildTree, childSlug, moveCategory, mergeCategory, assignProducts, subtreeIds, MAX_DEPTH, pathTo } from "../services/categoryTree.js";
 
 // ─── Public router (no auth, mounted at /api/app/categories) ────────
@@ -38,6 +39,24 @@ publicCategoryRouter.get("/tree", cacheControl(PUBLIC_TTL_SECONDS), async (_req:
       );
     });
     res.json({ success: true, data });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// GET /api/app/categories/:slug/form — one payload with every sub-category (and its type grandchildren) of a
+// top-level category plus each one's full inherited product-form fields. Not cached: a seller who just got a
+// field added by the owner should see it on the next open. Declared before nothing it could shadow (/tree is above).
+publicCategoryRouter.get("/:slug/form", async (req: Request, res: Response) => {
+  try {
+    const slug = String(req.params.slug);
+    const root = await prisma.category.findUnique({ where: { slug }, select: { id: true, parentId: true } });
+    if (!root || root.parentId) throw new NotFoundError("Category", slug);
+    const rows = await prisma.category.findMany({
+      where: { isActive: true },
+      select: { id: true, name: true, parentId: true, displayOrder: true, fieldSchema: true },
+    });
+    res.json({ success: true, data: buildCategoryForm(rows, root.id) });
   } catch (e) {
     sendError(res, e);
   }
@@ -224,6 +243,8 @@ const categorySchema = z.object({
   nameHi: z.string().max(100).optional().nullable(),
   description: z.string().max(500).optional().nullable(),
   showInNavigation: z.boolean().default(true),
+  // Product-form fields this category adds (inherited by everything below it). Empty array clears them.
+  fieldSchema: fieldSchemaSchema.optional(),
 });
 
 // Create may omit the slug for a child (derived from the parent's slug + name). Re-parenting is a

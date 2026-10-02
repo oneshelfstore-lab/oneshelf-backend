@@ -8,6 +8,7 @@ import { cacheControl, memoCache } from "../lib/httpCache.js";
 import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
 import { resolveCategoryFields, subtreeIds } from "../services/categoryTree.js";
 import { getRecommendations } from "../services/recommendations.js";
+import { fieldsForCategory, specsFor } from "../services/categoryFields.js";
 
 // Product reads carry live stock (decremented on every order), so they are NOT server-memoized —
 // they get a SHORT client Cache-Control window only, and checkout re-validates stock authoritatively.
@@ -42,6 +43,7 @@ export function formatProductForApp(product: any) {
     description: product.description,
     descriptionHi: product.descriptionHi ?? null,
     highlights: product.highlights ?? [],
+    attributes: product.attributes ?? {},
     hsnCode: product.hsnCode,
     gstRate: product.gstRate != null ? Number(product.gstRate) : null,
     cessRate: Number(product.cessRate ?? 0),
@@ -668,7 +670,10 @@ publicCatalogRouter.get("/:id", cacheControl(CATALOG_LIST_TTL), async (req: Requ
     }
 
     const badges = await loadActiveFreeGiftBadges();
-    res.json({ success: true, data: attachFreeGiftBadges([formatProductForApp(product)], badges)[0] });
+    // "Specifications" table: filled category fields with labels/units resolved. Detail only — a listing of 50
+    // products would otherwise cost 50 tree walks, and cards don't show specs.
+    const specs = specsFor(await fieldsForCategory(prisma, product.leafCategoryId ?? product.categoryId), product.attributes);
+    res.json({ success: true, data: { ...attachFreeGiftBadges([formatProductForApp(product)], badges)[0], specs } });
   } catch (e) {
     sendError(res, e);
   }

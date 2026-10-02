@@ -537,6 +537,9 @@ model SuperCategory {
   imageUrl     String?
   displayOrder Int      @default(0)
   isActive     Boolean  @default(true)
+  // Registration departments ("Grocery", "Books & stationery"… — keys of DEPARTMENT_REP in data/shopTypes.ts) whose
+  // sellers may list products in this super-category. Empty = no seller can pick it (e.g. a seasonal "Diwali" shelf).
+  departments  String[] @default([])
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

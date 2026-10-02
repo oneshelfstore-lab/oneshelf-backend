@@ -10,6 +10,7 @@ import { recordPriceChange } from "../services/priceHistory.js";
 import { SELLER_SALE } from "../services/sellerSales.js";
 import { resolveCategoryFields } from "../services/categoryTree.js";
 import { fieldsForCategory, cleanAttributes } from "../services/categoryFields.js";
+import { loadAllowedRoots, assertSellerMayUseCategory } from "../services/sellerCategories.js";
 import { analyzeProductHandler } from "../services/productIntelligence.js";
 import { calculateLineItemTax, calculateInvoiceTotals } from "../services/taxEngine.js";
 import {
@@ -217,6 +218,7 @@ router.post("/", async (req: SellerRequest, res: Response) => {
     const resolved = await resolveCategoryFields(prisma, { categorySlug, subcategory: productData.subcategory, leafCategoryId });
     if (!resolved.categoryId) throw new ValidationError("categorySlug or leafCategoryId is required");
     const catFields = { ...resolved, categoryId: resolved.categoryId }; // narrowed to string for the create input
+    await assertSellerMayUseCategory(prisma, req.sellerId!, resolved.categoryId);
     const attributes = cleanAttributes(await fieldsForCategory(prisma, resolved.leafCategoryId ?? resolved.categoryId), rawAttributes);
 
     // The house manager (the store's own catalog) gets owner-level powers: products go LIVE
@@ -333,6 +335,7 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
     const { variants: variantUpdates, categorySlug, leafCategoryId, attributes: rawAttributes, ...productFields } = parsed.data;
 
     const catFields = await resolveCategoryFields(prisma, { categorySlug, subcategory: productFields.subcategory, leafCategoryId }, existing.categoryId);
+    if (catFields.categoryId && catFields.categoryId !== existing.categoryId) await assertSellerMayUseCategory(prisma, req.sellerId!, catFields.categoryId);
     // Only touched when the app sent `attributes` (older apps omit it and keep what's stored). Validated against
     // the category the product will end up in, so a category change re-validates the new fields.
     const attributes = rawAttributes === undefined ? undefined : cleanAttributes(
@@ -1042,11 +1045,16 @@ router.post("/commission-requests/:reqId/withdraw", async (req: SellerRequest, r
   } catch (e) { sendError(res, e); }
 });
 
-router.get("/categories", async (_req: SellerRequest, res: Response) => {
+router.get("/categories", async (req: SellerRequest, res: Response) => {
   try {
-    // Top-level only: this feeds the legacy flat picker; sub-category nodes come from GET /api/app/categories/tree.
-    const categories = await prisma.category.findMany({ where: { isActive: true, parentId: null }, orderBy: { displayOrder: "asc" } });
-    res.json({ success: true, data: categories });
+    // Top-level categories THIS seller may list in (see services/sellerCategories.ts), grouped by super-category:
+    // each row carries superSlug/superName so the editor can show Super → Category. Sub-category / type levels come
+    // from GET /api/app/categories/:slug/form.
+    const roots = await loadAllowedRoots(prisma, req.sellerId!);
+    res.json({
+      success: true,
+      data: roots.map(({ superCategory, ...c }) => ({ ...c, superSlug: superCategory?.slug ?? "", superName: superCategory?.name ?? "" })),
+    });
   } catch (e) {
     sendError(res, e);
   }

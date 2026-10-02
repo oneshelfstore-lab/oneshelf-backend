@@ -10,7 +10,7 @@ import type { FieldDef } from "../services/categoryFields.js";
 
 export type Node = { n: string; f?: FieldDef[]; k?: Node[] };
 export type Root = Node & { img?: string };
-export type Super = { slug: string; name: string; roots: Root[] };
+export type Super = { slug: string; name: string; departments: string[]; roots: Root[] };
 
 const t = (key: string, label: string, o: Partial<FieldDef> = {}): FieldDef => ({ key, label, type: "TEXT", ...o });
 const num = (key: string, label: string, o: Partial<FieldDef> = {}): FieldDef => ({ key, label, type: "NUMBER", ...o });
@@ -22,9 +22,23 @@ const sizeA = pick("size", "Size", ["A3", "A4", "A5", "A6", "Legal", "Letter", "
 const leaves = (...names: string[]): Node[] => names.map((n) => ({ n }));
 const withF = (n: string, f: FieldDef[], k?: string[]): Node => ({ n, f, k: k ? leaves(...k) : undefined });
 
+/**
+ * Departments for super-categories that already exist in the live DB (matched by slug; skipped if absent).
+ * Update-only: the seed never creates these. "diwali" is deliberately missing — a seasonal shelf, nobody lists in it.
+ */
+export const EXISTING_SUPER_DEPARTMENTS: Record<string, string[]> = {
+  grocery: ["Grocery"],
+  grocery_kitchen: ["Grocery"],
+  snacks_drinks: ["Grocery"],
+  household_care: ["Grocery"],
+  fresh_and_dairy: ["Fresh"],
+  electronics: ["Electronics"],
+};
+
 export const STATIONERY: Super[] = [
   {
     slug: "stationery_school_writing",
+    departments: ["Books & stationery"],
     name: "School & Writing",
     roots: [
       {
@@ -105,6 +119,7 @@ export const STATIONERY: Super[] = [
   },
   {
     slug: "stationery_art_craft",
+    departments: ["Books & stationery"],
     name: "Art & Craft",
     roots: [
       {
@@ -170,6 +185,7 @@ export const STATIONERY: Super[] = [
   },
   {
     slug: "stationery_office_business",
+    departments: ["Books & stationery"],
     name: "Office & Business",
     roots: [
       {
@@ -235,6 +251,7 @@ export const STATIONERY: Super[] = [
   },
   {
     slug: "stationery_gifts_learning",
+    departments: ["Books & stationery"],
     name: "Gifts, Learning & More",
     roots: [
       {

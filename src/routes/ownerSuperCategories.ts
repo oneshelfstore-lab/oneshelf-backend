@@ -3,6 +3,7 @@ import { z } from "zod";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
+import { DEPARTMENT_REP } from "../data/shopTypes.js";
 
 // ─── Owner super-category router (FIREBASE auth, mounted at /api/app/owner/super-categories) ──
 //
@@ -26,6 +27,8 @@ const superCategorySchema = z.object({
   imageUrl: z.string().max(500).optional().nullable(),
   displayOrder: z.number().int().min(0).default(0),
   isActive: z.boolean().default(true),
+  // Registration departments whose sellers may list in this super-category (see SuperCategory.departments).
+  departments: z.array(z.enum(Object.keys(DEPARTMENT_REP) as [string, ...string[]])).max(20).optional(),
 });
 
 // GET / — all super-categories (incl. inactive), each with its child categories so the owner UI can

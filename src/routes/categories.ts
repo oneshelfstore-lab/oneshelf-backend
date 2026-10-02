@@ -5,7 +5,7 @@ import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib
 import { requireRole } from "../middleware/auth.js";
 import { SUBCATEGORIES, slugifySub } from "../data/subcategories.js";
 import { cacheControl, memoCache, PUBLIC_TTL_MS, PUBLIC_TTL_SECONDS } from "../lib/httpCache.js";
-import { buildTree, childSlug, moveCategory, subtreeIds, MAX_DEPTH, pathTo } from "../services/categoryTree.js";
+import { buildTree, childSlug, moveCategory, mergeCategory, assignProducts, subtreeIds, MAX_DEPTH, pathTo } from "../services/categoryTree.js";
 
 // ─── Public router (no auth, mounted at /api/app/categories) ────────
 
@@ -286,6 +286,33 @@ adminCategoryRouter.put("/:id/move", requireRole("OWNER") as any, async (req: Re
     await prisma.$transaction((tx) => moveCategory(tx, String(req.params.id), parsed.data.parentId));
     memoCache.bust("categories", "super-cats");
     res.json({ success: true, message: "Category moved" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// POST /:id/merge { intoId } — fold a NON-root category into another: its products and sub-categories move there,
+// SMART collection rules are repointed, and the node is deleted. Atomic.
+adminCategoryRouter.post("/:id/merge", requireRole("OWNER") as any, async (req: Request, res: Response) => {
+  try {
+    const parsed = z.object({ intoId: z.string().min(1) }).safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("intoId is required", parsed.error.errors);
+    await prisma.$transaction((tx) => mergeCategory(tx, String(req.params.id), parsed.data.intoId));
+    memoCache.bust("categories", "super-cats", "collections");
+    res.json({ success: true, message: "Categories merged" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// POST /assign-products { productIds, categoryId } — bulk-file products under any category node.
+adminCategoryRouter.post("/assign-products", requireRole("OWNER") as any, async (req: Request, res: Response) => {
+  try {
+    const parsed = z.object({ productIds: z.array(z.string().min(1)).min(1).max(500), categoryId: z.string().min(1) }).safeParse(req.body);
+    if (!parsed.success) throw new ValidationError("productIds and categoryId are required", parsed.error.errors);
+    const moved = await prisma.$transaction((tx) => assignProducts(tx, parsed.data.productIds, parsed.data.categoryId));
+    memoCache.bust("categories", "collections");
+    res.json({ success: true, data: { moved } });
   } catch (e) {
     sendError(res, e);
   }

@@ -1,8 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 
 vi.mock("../../lib/prisma.js", () => ({ default: {} }));
+vi.mock("../../lib/firebase.js", () => ({ admin: {}, isFirebaseInitialized: () => false }));
 
-import { analyzeSchema, buildPrompt, claimWarnings, describeChoice, sanitizeAnalysis } from "../productIntelligence.js";
+import { analyzeSchema, buildPrompt, claimWarnings, describeChoice, isAllowedImageUrl, sanitizeAnalysis } from "../productIntelligence.js";
 
 const input = analyzeSchema.parse({ name: "Amul Taaza Milk", brand: "Amul", packSize: "500 ml" });
 const ids = new Set(["milk", "curd", "shampoo"]);
@@ -84,5 +85,17 @@ describe("describeChoice", () => {
     expect(describeChoice(opts, "g")?.subcategory).toBe("");
     expect(describeChoice(opts, "x")).toBeNull();
     expect(describeChoice(opts, null)).toBeNull();
+  });
+});
+
+describe("isAllowedImageUrl", () => {
+  it("allows only https Firebase/Google Storage hosts", () => {
+    expect(isAllowedImageUrl("https://firebasestorage.googleapis.com/v0/b/x/o/a.jpg?alt=media")).toBe(true);
+    expect(isAllowedImageUrl("https://storage.googleapis.com/bucket/a.png")).toBe(true);
+  });
+  it("rejects other hosts, plain http, internal addresses and junk", () => {
+    for (const u of ["http://firebasestorage.googleapis.com/a.jpg", "https://evil.com/a.jpg", "https://169.254.169.254/latest", "https://firebasestorage.googleapis.com.evil.com/a.jpg", "not a url"]) {
+      expect(isAllowedImageUrl(u)).toBe(false);
+    }
   });
 });

@@ -26,6 +26,7 @@ import favoriteStoresRoutes from "./routes/favoriteStores.js";
 import { publicCategoryRouter, adminCategoryRouter, publicSuperCategoryRouter } from "./routes/categories.js";
 import { publicCollectionRouter, adminCollectionRouter } from "./routes/collections.js";
 import { publicCategoryPageRouter } from "./routes/categoryPage.js";
+import { adminUploadRouter } from "./routes/uploads.js";
 import ownerSuperCategoryRoutes from "./routes/ownerSuperCategories.js";
 import { publicCatalogRouter, adminCatalogRouter } from "./routes/catalog.js";
 import { publicBannerRouter, adminBannerRouter, ownerBannerRouter } from "./routes/banners.js";
@@ -282,6 +283,8 @@ app.use("/api/app/me/list-ocr", express.json({ limit: "3mb" }));
 
 // Product editor AI assistant (seller + owner): optional pack photo, same ~1 MB-raw JPEG as list-ocr.
 app.use("/api/app/seller/catalog/ai", express.json({ limit: "3mb" }));
+// Web admin image upload (category / collection pictures): base64 of an image already downscaled in the browser.
+app.use("/api/uploads", express.json({ limit: "3mb" }));
 app.use("/api/app/owner/catalog/ai", express.json({ limit: "3mb" }));
 
 // Everything else. A real request on this API — place an order, save a product, update config — is
@@ -512,6 +515,7 @@ app.use("/api", auditLoggerMiddleware as any);
 app.use("/api/company", companyRoutes);
 app.use("/api/categories", adminCategoryRouter);
 app.use("/api/collections", adminCollectionRouter);
+app.use("/api/uploads", adminUploadRouter);
 app.use("/api/catalog", adminCatalogRouter);
 app.use("/api/banners", adminBannerRouter);
 app.use("/api/coupons", adminCouponRouter);

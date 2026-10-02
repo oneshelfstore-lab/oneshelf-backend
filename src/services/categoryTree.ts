@@ -174,3 +174,58 @@ export function childSlug(parentSlug: string, name: string): string {
   const part = name.toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   return `${parentSlug}__${part}`.slice(0, 50);
 }
+
+/** Throws if node `id` cannot be merged into `intoId` (its products and sub-categories move there, then it is deleted). Pure. */
+export function assertCanMerge(rows: TreeRow[], id: string, intoId: string): void {
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const node = byId.get(id);
+  if (!node) throw new NotFoundError("Category", id);
+  if (!byId.has(intoId)) throw new NotFoundError("Category", intoId);
+  if (!node.parentId) throw new ValidationError("Top-level categories cannot be merged (commission and Home depend on them)");
+  if (subtreeIds(rows, id).includes(intoId)) throw new ValidationError("A category cannot be merged into itself or one of its own sub-categories");
+  // Its children move up to sit under the target, so they must still fit the depth limit.
+  const childHeight = height(rows, id) - 1;
+  if (childHeight > 0 && pathTo(byId, intoId).length + childHeight > MAX_DEPTH) {
+    throw new ValidationError(`Categories can be at most ${MAX_DEPTH} levels deep`);
+  }
+}
+
+/**
+ * Merge `id` into `intoId`, atomically: products filed directly on it and its sub-categories move to the target,
+ * SMART collection rules that named it are repointed, then the empty node is deleted.
+ */
+export async function mergeCategory(tx: Prisma.TransactionClient, id: string, intoId: string): Promise<void> {
+  const rows = await tx.category.findMany({ select: { id: true, parentId: true } });
+  assertCanMerge(rows, id, intoId);
+  const { root, node: into } = await rootOf(tx, intoId);
+  const intoIsRoot = into.id === root.id;
+
+  await tx.catalogProduct.updateMany({
+    where: { leafCategoryId: id },
+    data: { leafCategoryId: intoIsRoot ? null : into.id, categoryId: root.id, subcategory: intoIsRoot ? null : into.name },
+  });
+  await tx.category.updateMany({ where: { parentId: id }, data: { parentId: intoId } });
+  const below = subtreeIds(rows, id).filter((x) => x !== id);
+  if (below.length) await tx.catalogProduct.updateMany({ where: { leafCategoryId: { in: below } }, data: { categoryId: root.id } });
+
+  // Collections whose rules selected the merged node now select its replacement.
+  const smart = await tx.collection.findMany({ where: { mode: "SMART" }, select: { id: true, rules: true } });
+  for (const c of smart) {
+    const r = c.rules as { categoryIds?: string[] } | null;
+    if (r?.categoryIds?.includes(id)) {
+      const ids = [...new Set(r.categoryIds.map((x) => (x === id ? intoId : x)))];
+      await tx.collection.update({ where: { id: c.id }, data: { rules: { ...r, categoryIds: ids } } });
+    }
+  }
+  await tx.category.delete({ where: { id } });
+}
+
+/** File these products under category node `categoryId` (any depth); categoryId/subcategory are derived from it. Returns the count moved. */
+export async function assignProducts(tx: Prisma.TransactionClient, productIds: string[], categoryId: string): Promise<number> {
+  const f = await resolveCategoryFields(tx, { leafCategoryId: categoryId });
+  const r = await tx.catalogProduct.updateMany({
+    where: { id: { in: productIds } },
+    data: { categoryId: f.categoryId!, leafCategoryId: f.leafCategoryId ?? null, subcategory: f.subcategory ?? null },
+  });
+  return r.count;
+}

@@ -113,3 +113,53 @@ describe("childSlug", () => {
     expect(childSlug("x".repeat(40), "A very long sub category name").length).toBeLessThanOrEqual(50);
   });
 });
+
+import { assertCanMerge, mergeCategory } from "../categoryTree.js";
+
+describe("assertCanMerge", () => {
+  // grocery > dairy > milk > toned ; grocery > staples ; fresh
+  it("allows merging a sub-category into a sibling or another root's child", () => {
+    expect(() => assertCanMerge(rows, "staples", "dairy")).not.toThrow();
+    expect(() => assertCanMerge(rows, "milk", "fresh")).not.toThrow();
+  });
+  it("refuses roots, itself, and its own descendants", () => {
+    expect(() => assertCanMerge(rows, "fresh", "grocery")).toThrow(/Top-level/);
+    expect(() => assertCanMerge(rows, "dairy", "dairy")).toThrow(/itself/);
+    expect(() => assertCanMerge(rows, "dairy", "toned")).toThrow(/itself/);
+  });
+  it("refuses when the moved-up children would exceed the depth limit", () => {
+    const deep = [...rows, { id: "a", parentId: "staples" }, { id: "b", parentId: "a" }, { id: "c", parentId: "b" }]; // staples>a>b>c = depth 4 under grocery
+    expect(() => assertCanMerge(deep, "dairy", "c")).toThrow(/levels deep/);
+  });
+});
+
+describe("mergeCategory", () => {
+  it("moves direct products and children, re-derives the root, repoints collection rules, deletes the node", async () => {
+    const calls: any[] = [];
+    const cats: Record<string, any> = {
+      fresh: { id: "fresh", name: "Fresh", parentId: null },
+      dairy: { id: "dairy", name: "Dairy", parentId: "grocery" },
+      grocery: { id: "grocery", name: "Grocery", parentId: null },
+    };
+    const tx: any = {
+      category: {
+        findMany: async () => rows,
+        findUnique: async ({ where }: any) => cats[where.id] ?? null,
+        updateMany: async (a: any) => calls.push(["cat.updateMany", a]),
+        delete: async (a: any) => calls.push(["cat.delete", a]),
+      },
+      catalogProduct: { updateMany: async (a: any) => calls.push(["prod.updateMany", a]) },
+      collection: {
+        findMany: async () => [{ id: "c1", rules: { categoryIds: ["milk", "other"], brands: ["Amul"] } }, { id: "c2", rules: { categoryIds: ["x"] } }],
+        update: async (a: any) => calls.push(["col.update", a]),
+      },
+    };
+    await mergeCategory(tx, "milk", "dairy"); // milk (child of dairy) into dairy
+    const by = (k: string) => calls.filter((c) => c[0] === k).map((c) => c[1]);
+    expect(by("prod.updateMany")[0]).toEqual({ where: { leafCategoryId: "milk" }, data: { leafCategoryId: "dairy", categoryId: "grocery", subcategory: "Dairy" } });
+    expect(by("cat.updateMany")[0]).toEqual({ where: { parentId: "milk" }, data: { parentId: "dairy" } });
+    expect(by("prod.updateMany")[1]).toEqual({ where: { leafCategoryId: { in: ["toned"] } }, data: { categoryId: "grocery" } });
+    expect(by("col.update")).toEqual([{ where: { id: "c1" }, data: { rules: { categoryIds: ["dairy", "other"], brands: ["Amul"] } } }]);
+    expect(by("cat.delete")).toEqual([{ where: { id: "milk" } }]);
+  });
+});

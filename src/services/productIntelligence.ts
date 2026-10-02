@@ -11,6 +11,7 @@ import prisma from "../lib/prisma.js";
 import { geminiJson, GeminiNotConfiguredError } from "../lib/gemini.js";
 import { ValidationError, sendError } from "../lib/errors.js";
 import { pathTo } from "./categoryTree.js";
+import { sniffImage } from "../routes/uploads.js";
 
 export const DAILY_CAP = 40;
 const FEATURE = "product-intel";
@@ -22,6 +23,8 @@ export const analyzeSchema = z.object({
   language: z.enum(["EN", "HI", "BOTH"]).default("BOTH"),
   imageBase64: z.string().min(100).max(2_800_000).optional(),
   mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]).default("image/jpeg"),
+  // An already-uploaded product photo (editing an existing product). Only our Firebase Storage hosts are fetched.
+  imageUrl: z.string().url().max(700).optional(),
 });
 export type AnalyzeInput = z.infer<typeof analyzeSchema>;
 
@@ -76,6 +79,30 @@ export function buildPrompt(input: AnalyzeInput, categories: CategoryOption[]): 
     "",
     "RULES: never state ingredients, nutrition, health or medical benefits, certifications, origin, freshness, shelf life, quality words (premium, best, pure, natural, organic) or anything not given above. If unsure, say less.",
   ].join("\n");
+}
+
+/** Only https URLs on Firebase/Google Storage hosts: the server must never be pointable at arbitrary addresses (SSRF). Pure. */
+export function isAllowedImageUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    return u.protocol === "https:" && ["firebasestorage.googleapis.com", "storage.googleapis.com"].includes(u.hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** Downloads an allowed image (≤ 2.5 MB, 8 s) and returns it base64-encoded with its real type, or null on any problem. */
+async function fetchImage(url: string): Promise<{ data: string; mime: string } | null> {
+  if (!isAllowedImageUrl(url)) return null;
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(8_000), redirect: "error" });
+    if (!r.ok) return null;
+    const buf = Buffer.from(await r.arrayBuffer());
+    const kind = buf.length <= 2_500_000 ? sniffImage(buf) : null;
+    return kind ? { data: buf.toString("base64"), mime: kind.mime } : null;
+  } catch {
+    return null;
+  }
 }
 
 const clip = (s: unknown, n: number) => String(s ?? "").trim().slice(0, n);
@@ -173,6 +200,10 @@ export async function analyzeProductHandler(req: any, res: Response) {
     const options = await categoryOptions();
     const parts: any[] = [{ text: buildPrompt(input, options) }];
     if (input.imageBase64) parts.push({ inline_data: { mime_type: input.mimeType, data: input.imageBase64 } });
+    else if (input.imageUrl) {
+      const img = await fetchImage(input.imageUrl); // a failed fetch just means text-only analysis
+      if (img) parts.push({ inline_data: { mime_type: img.mime, data: img.data } });
+    }
     try {
       const raw = await geminiJson(parts, RESPONSE_SCHEMA, "product-intel", { temperature: 0.2, timeoutMs: 25_000 });
       const a = sanitizeAnalysis(raw, input, new Set(options.map((o) => o.id)));

@@ -79,6 +79,9 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     const search = ((req.query.search as string) || "").slice(0, 100) || undefined;
 
     const where: any = { deletedAt: null };
+    // Lets the owner's approval queue fetch ALL pending products, not just those in the first name-sorted page.
+    const approvalStatus = req.query.approvalStatus as string | undefined;
+    if (approvalStatus && ["PENDING", "APPROVED", "REJECTED"].includes(approvalStatus)) where.approvalStatus = approvalStatus;
     if (search) {
       where.OR = [
         { name: { contains: search, mode: "insensitive" } },

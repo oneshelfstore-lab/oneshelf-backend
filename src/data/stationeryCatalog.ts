@@ -9,18 +9,18 @@
 import type { FieldDef } from "../services/categoryFields.js";
 
 export type Node = { n: string; f?: FieldDef[]; k?: Node[] };
-export type Root = Node & { img?: string };
+export type Root = Node & { img?: string; slug?: string }; // slug: reuse an existing root row instead of deriving one
 export type Super = { slug: string; name: string; roots: Root[] }; // groups are for readability only: every root lands on Stationery & Office (data/superCategories.ts)
 
-const t = (key: string, label: string, o: Partial<FieldDef> = {}): FieldDef => ({ key, label, type: "TEXT", ...o });
-const num = (key: string, label: string, o: Partial<FieldDef> = {}): FieldDef => ({ key, label, type: "NUMBER", ...o });
-const pick = (key: string, label: string, options: string[], o: Partial<FieldDef> = {}): FieldDef => ({ key, label, type: "CHOICE", options, ...o });
-const yn = (key: string, label: string, o: Partial<FieldDef> = {}): FieldDef => ({ key, label, type: "BOOLEAN", ...o });
+export const t = (key: string, label: string, o: Partial<FieldDef> = {}): FieldDef => ({ key, label, type: "TEXT", ...o });
+export const num = (key: string, label: string, o: Partial<FieldDef> = {}): FieldDef => ({ key, label, type: "NUMBER", ...o });
+export const pick = (key: string, label: string, options: string[], o: Partial<FieldDef> = {}): FieldDef => ({ key, label, type: "CHOICE", options, ...o });
+export const yn = (key: string, label: string, o: Partial<FieldDef> = {}): FieldDef => ({ key, label, type: "BOOLEAN", ...o });
 const packOf = num("pack_of", "Pack of", { showOnCard: true });
 const colour = t("colour", "Colour", { filterable: true, showOnCard: true });
 const sizeA = pick("size", "Size", ["A3", "A4", "A5", "A6", "Legal", "Letter", "Other"], { filterable: true, showOnCard: true });
-const leaves = (...names: string[]): Node[] => names.map((n) => ({ n }));
-const withF = (n: string, f: FieldDef[], k?: string[]): Node => ({ n, f, k: k ? leaves(...k) : undefined });
+export const leaves = (...names: string[]): Node[] => names.map((n) => ({ n }));
+export const withF = (n: string, f: FieldDef[], k?: string[]): Node => ({ n, f, k: k ? leaves(...k) : undefined });
 
 export const STATIONERY: Super[] = [
   {

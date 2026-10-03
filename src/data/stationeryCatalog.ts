@@ -246,16 +246,6 @@ export const STATIONERY: Super[] = [
         ],
       },
       {
-        n: "Educational Products",
-        f: [t("language", "Language", { filterable: true }), pick("age_group", "Age group", ["3-5 yrs", "6-8 yrs", "9-12 yrs", "13+ yrs", "All ages"], { filterable: true })],
-        k: [
-          withF("Charts & maps", [t("topic", "Topic", { filterable: true, showOnCard: true }), sizeA]),
-          { n: "Globes & science models" },
-          { n: "Workbooks & practice books" },
-          { n: "Educational toys" },
-        ],
-      },
-      {
         n: "Small Electronics",
         f: [t("warranty", "Warranty", { showOnCard: true })],
         k: [

@@ -117,7 +117,7 @@ export function buildPrompt(input: AnalyzeInput, categories: CategoryOption[]): 
       : "- categoryId and alternativeCategoryId: empty strings (the category is already chosen).",
     "- confidence: HIGH only if the category is obvious from the name; LOW if guessing.",
     "- brand: the brand if clear from the facts, else empty.",
-    "- description: 2 to 4 plain sentences describing what the product is, what it is for, and its pack size or variant. Mention the seller's details (colour, size, type…) where they matter.",
+    "- description: 90 to 130 words of plain English in 2 short paragraphs. Paragraph 1: what the product is, what it is used for and who or what it suits, using ordinary common knowledge of this kind of product. Paragraph 2: the seller's own details (colour, size, type, pack contents, how it is sold) and how they help the buyer choose. No filler, no repetition, no marketing adjectives, and no fact that is not in the FACTS or common knowledge of what this kind of product is.",
     "- highlights: up to 5 short factual bullets taken from the facts.",
     "- searchKeywords: up to 8 lowercase search terms a shopper might type (English or Hinglish).",
     "- table: OPTIONAL extra rows of {label, value}, only for facts that add something the product page does not already show (for example what is in the pack, or size options). Do NOT repeat the name, brand, category, pack size or any field already listed in the FACTS with its own label (the page shows those separately). Copy each value EXACTLY as given in the FACTS. If nothing useful remains, return an empty list.",
@@ -143,7 +143,7 @@ export function sanitizeAnalysis(raw: any, input: AnalyzeInput, allowedIds: Set<
   const alt = allowedIds.has(raw?.alternativeCategoryId) && raw.alternativeCategoryId !== categoryId ? String(raw.alternativeCategoryId) : null;
   const conf = ["HIGH", "MEDIUM", "LOW"].includes(raw?.confidence) ? raw.confidence : "LOW";
 
-  const description = clip(raw?.description, 700);
+  const description = clip(raw?.description, 950); // the editors cap a description at 1000 characters
   const risky = claimWarnings(`${description} ${raw?.highlights?.join?.(" ") ?? ""}`, supplied);
   if (risky.length) warnings.push(`The text mentions "${risky.join('", "')}", which you didn't enter. Check it is true or remove it.`);
 

@@ -76,7 +76,14 @@ describe("table rows", () => {
     const a = sanitizeAnalysis({
       table: [{ label: "Colour", value: "Blue" }, { label: "Tip size", value: "0.7 mm" }, { label: "Warranty", value: "2 years" }],
     }, pen, new Set());
-    expect(a.table).toEqual([{ label: "Colour", value: "Blue" }, { label: "Tip size", value: "0.7 mm" }]);
+    // Colour and Tip size are category fields the page already shows, so they are not repeated either.
+    expect(a.table).toEqual([]);
+  });
+  it("drops name/brand/category/pack-size rows but keeps a genuinely new fact", () => {
+    const a = sanitizeAnalysis({
+      table: [{ label: "Brand", value: "Cello" }, { label: "Pack size", value: "5" }, { label: "In the pack", value: "5" }],
+    }, pen, new Set());
+    expect(a.table).toEqual([{ label: "In the pack", value: "5" }]);
   });
 });
 

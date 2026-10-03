@@ -120,7 +120,7 @@ export function buildPrompt(input: AnalyzeInput, categories: CategoryOption[]): 
     "- description: 2 to 4 plain sentences describing what the product is, what it is for, and its pack size or variant. Mention the seller's details (colour, size, type…) where they matter.",
     "- highlights: up to 5 short factual bullets taken from the facts.",
     "- searchKeywords: up to 8 lowercase search terms a shopper might type (English or Hinglish).",
-    "- table: 3 to 8 rows of {label, value} summarising the key facts. Copy each value EXACTLY as given in the FACTS; never add a row for something not listed there.",
+    "- table: OPTIONAL extra rows of {label, value}, only for facts that add something the product page does not already show (for example what is in the pack, or size options). Do NOT repeat the name, brand, category, pack size or any field already listed in the FACTS with its own label (the page shows those separately). Copy each value EXACTLY as given in the FACTS. If nothing useful remains, return an empty list.",
     "- knownProduct: true ONLY if this is a widely sold, nationally known branded PACKAGED FOOD/DRINK/PERSONAL-CARE product whose label you genuinely know. Otherwise false (loose items, local brands, anything unsure).",
     "- ingredients / allergens / dietMark / nutrition: fill ONLY when knownProduct is true, from the product's usual pack label. Otherwise leave them empty (empty string, empty list, dietMark empty, nutrition basis NONE).",
     "  allergens: only items that the ingredients clearly contain, chosen from the allowed list. NEVER state that a product is free from anything.",
@@ -156,10 +156,15 @@ export function sanitizeAnalysis(raw: any, input: AnalyzeInput, allowedIds: Set<
     (Array.isArray(raw?.searchKeywords) ? raw.searchKeywords : []).map((k: unknown) => clip(k, 30).toLowerCase()).filter(Boolean),
   )].slice(0, 8);
 
-  // A table row survives only if its value is something the seller actually gave us.
+  // A table row survives only if its value is something the seller actually gave us, and it is not a repeat of what
+  // the product page already shows (name, brand, category, pack size, and every category field has its own spot).
+  const alreadyShown = new Set(
+    ["name", "product name", "brand", "category", "pack size", "size", "sizes", "packaged product", "product type", ...(input.attributes ?? []).map((a) => a.label)].map(norm),
+  );
   const table = (Array.isArray(raw?.table) ? raw.table : [])
     .map((r: any) => ({ label: clip(r?.label, 40), value: clip(r?.value, 80) }))
-    .filter((r: { label: string; value: string }) => r.label && r.value && suppliedNorm.includes(norm(r.value)))
+    .filter((r: { label: string; value: string }) =>
+      r.label && r.value && suppliedNorm.includes(norm(r.value)) && !alreadyShown.has(norm(r.label)))
     .slice(0, 8);
 
   const label = sanitizeLabel(raw, input.isPackaged !== false);

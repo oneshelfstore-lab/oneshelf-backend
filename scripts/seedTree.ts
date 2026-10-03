@@ -66,11 +66,14 @@ async function main() {
   let moved = 0;
   for (const m of tree.moves ?? []) {
     const target = idByPath.get(m.path.join(">"));
-    if (!target) throw new Error(`move '${m.name}': no node at ${m.path.join(" > ")}`);
+    if (!target) throw new Error(`move '${m.name ?? m.subcategory}': no node at ${m.path.join(" > ")}`);
     const fromRoot = await prisma.category.findUnique({ where: { slug: m.from }, select: { id: true } });
-    // every same-named product in that root (a name can repeat), not just the first
-    const all = fromRoot ? await prisma.catalogProduct.findMany({ where: { categoryId: fromRoot.id, name: { equals: m.name, mode: "insensitive" } }, select: { id: true } }) : [];
-    console.log(`move   ${m.name} (${all.length || (p ? 1 : 0)}) → ${m.path.join(" > ")}`);
+    const match = m.subcategory
+      ? { subcategory: { equals: m.subcategory, mode: "insensitive" as const } }
+      : { name: { equals: m.name!, mode: "insensitive" as const } };
+    // every matching product in that root (a name can repeat), not just the first
+    const all = fromRoot ? await prisma.catalogProduct.findMany({ where: { categoryId: fromRoot.id, ...match }, select: { id: true } }) : [];
+    console.log(`move   ${m.subcategory ? `[${m.subcategory}]` : m.name} (${all.length}) → ${m.path.join(" > ")}`);
     if (APPLY && all.length) {
       const root = idByPath.get(m.path[0]!)!;
       const isRoot = m.path.length === 1;

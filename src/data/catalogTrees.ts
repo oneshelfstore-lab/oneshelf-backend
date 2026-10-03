@@ -15,6 +15,7 @@ import { BABY_KIDS, BABY_KIDS_MOVES } from "./babyKidsCatalog.js";
 import { AUTOMOTIVE } from "./automotiveCatalog.js";
 import { PETS } from "./petCatalog.js";
 import { SPORTS } from "./sportsCatalog.js";
+import { GROCERY, GROCERY_MOVES } from "./groceryCatalog.js";
 import type { Root } from "./stationeryCatalog.js";
 
 export type TreeDef = {
@@ -47,4 +48,6 @@ export const TREES: Record<string, TreeDef> = {
   automotive: { superSlug: "automotive", prefix: "auto_", roots: AUTOMOTIVE },
   pets: { superSlug: "pet_supplies", prefix: "pet_", roots: PETS },
   sports: { superSlug: "sports_fitness", prefix: "sp_", roots: SPORTS },
+  // Seven roots reuse existing rows (see groceryCatalog.ts); the rest are new (gf_ prefix).
+  grocery: { superSlug: "grocery_food", prefix: "gf_", roots: GROCERY, moves: GROCERY_MOVES },
 };

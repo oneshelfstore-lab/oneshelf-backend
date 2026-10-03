@@ -7,10 +7,11 @@
 // (scripts/restructureSupers.ts).
 //   npx tsx scripts/seedTree.ts fresh_dairy
 //   DATABASE_URL="<external URL>" npx tsx scripts/seedTree.ts fresh_dairy --apply
+import { mkdirSync, writeFileSync } from "node:fs";
 import { PrismaClient } from "@prisma/client";
 import { TREES } from "../src/data/catalogTrees.js";
 import type { Node } from "../src/data/stationeryCatalog.js";
-import { childSlug } from "../src/services/categoryTree.js";
+import { childSlug, subtreeIds } from "../src/services/categoryTree.js";
 import { fieldSchemaSchema } from "../src/services/categoryFields.js";
 
 const prisma = new PrismaClient();
@@ -25,6 +26,8 @@ async function main() {
   let nodes = 0;
   let withFields = 0;
   const idByPath = new Map<string, { id: string | null; name: string; rootId: string }>(); // "Dairy>Milk>Toned Milk"
+  const touched = new Set<string>(); // ids of every node this run wrote (to prune stale ones under reused roots)
+  const undo: { id: string; categoryId: string; leafCategoryId: string | null; subcategory: string | null }[] = [];
 
   /** childSlug truncates to 50 chars, so deep sibling names can collide. Suffixing is deterministic (same tree → same
    *  slugs), so a re-run lands on the same rows. Slugs are internal; nothing user-facing shows them. */
@@ -45,6 +48,7 @@ async function main() {
     if (APPLY) {
       const data = { name: node.n, displayOrder: order, parentId, superCategoryId: superId, fieldSchema: node.f?.length ? (node.f as any) : undefined, isActive: true };
       id = (await prisma.category.upsert({ where: { slug }, update: data, create: { slug, ...data } })).id;
+      touched.add(id);
     }
     idByPath.set(path, { id, name: node.n, rootId: rootId ?? id ?? slug });
     const kids = node.k ?? [];
@@ -72,9 +76,10 @@ async function main() {
       ? { subcategory: { equals: m.subcategory, mode: "insensitive" as const } }
       : { name: { equals: m.name!, mode: "insensitive" as const } };
     // every matching product in that root (a name can repeat), not just the first
-    const all = fromRoot ? await prisma.catalogProduct.findMany({ where: { categoryId: fromRoot.id, ...match }, select: { id: true } }) : [];
+    const all = fromRoot ? await prisma.catalogProduct.findMany({ where: { categoryId: fromRoot.id, ...match }, select: { id: true, categoryId: true, leafCategoryId: true, subcategory: true } }) : [];
     console.log(`move   ${m.subcategory ? `[${m.subcategory}]` : m.name} (${all.length}) → ${m.path.join(" > ")}`);
     if (APPLY && all.length) {
+      undo.push(...all.map((x) => ({ id: x.id, categoryId: x.categoryId, leafCategoryId: x.leafCategoryId, subcategory: x.subcategory })));
       const root = idByPath.get(m.path[0]!)!;
       const isRoot = m.path.length === 1;
       await prisma.catalogProduct.updateMany({
@@ -91,6 +96,30 @@ async function main() {
     const left = c._count.catalogProducts;
     console.log(`retire root '${slug}'${left ? ` — SKIPPED, still has ${left} product(s)` : ""}`);
     if (APPLY && !left) await prisma.category.update({ where: { id: c.id }, data: { isActive: false, superCategoryId: null } });
+  }
+
+  // Roots that reuse an existing row (Root.slug) keep their OLD children from earlier backfills; once the products have been
+  // moved, deactivate any that this tree did not write and that no product points at any more (never deletes).
+  if (APPLY) {
+    const reused = tree.roots.filter((r) => r.slug).map((r) => idByPath.get(r.n)!.id!);
+    if (reused.length) {
+      const everything = await prisma.category.findMany({ select: { id: true, parentId: true, name: true, isActive: true } });
+      const rows = everything.map((c) => ({ id: c.id, parentId: c.parentId }));
+      const stale = new Set(reused.flatMap((id) => subtreeIds(rows, id)).filter((id) => !touched.has(id)));
+      for (const c of everything.filter((x) => stale.has(x.id) && x.isActive)) {
+        const n = await prisma.catalogProduct.count({ where: { leafCategoryId: c.id } });
+        console.log(`prune  '${c.name}'${n ? ` — SKIPPED, ${n} product(s) still on it` : ""}`);
+        if (!n) await prisma.category.update({ where: { id: c.id }, data: { isActive: false } });
+      }
+    }
+  }
+
+  // Safety net for product moves: the previous category / leaf / subcategory of every product moved, so it can be reverted.
+  if (APPLY && undo.length) {
+    mkdirSync("scripts/undo", { recursive: true });
+    const file = `scripts/undo/${treeName}-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+    writeFileSync(file, JSON.stringify(undo));
+    console.log(`undo file: ${file} (${undo.length} products' previous category, leaf and subcategory)`);
   }
 
   console.log(`\n${APPLY ? "Wrote" : "Would write"} ${nodes} category nodes (${withFields} with field templates) for '${treeName}'${APPLY ? `, moved ${moved} product(s)` : ""}.`);

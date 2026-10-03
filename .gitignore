@@ -4,3 +4,4 @@ dist/
 
 # Firebase service account key — never commit
 secrets/
+scripts/undo/

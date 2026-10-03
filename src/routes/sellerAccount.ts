@@ -4,6 +4,8 @@ import { Prisma } from "@prisma/client";
 import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
 import { memoCache } from "../lib/httpCache.js";
+import { TCS_RATE_PCT } from "../data/taxRates.js";
+import { notifySellerCallbackRequest } from "../services/fcmNotifier.js";
 import { SELLER_SALE } from "../services/sellerSales.js";
 import { isSellerBusy, isKitchenClosed, nextIstOccurrence } from "../services/foodMenu.js";
 import { firebaseAuthMiddleware, requireAppRole } from "../middleware/firebaseAuth.js";
@@ -509,6 +511,58 @@ router.put("/bank-details", async (req: SellerRequest, res: Response) => {
   }
 });
 
+// ─── Fee rates for the product editor's "You'll receive" estimate ──────────────────
+// GET /fees?category=<slug|id> → the commission this seller pays in that category (owner's per-category
+// rate, else their default) and the TCS rate withheld from payouts. Mirrors what orders.ts charges.
+router.get("/fees", async (req: SellerRequest, res: Response) => {
+  try {
+    const seller = await prisma.seller.findUnique({
+      where: { id: req.sellerId },
+      select: { commissionPct: true, isHouse: true },
+    });
+    if (!seller) throw new NotFoundError("Seller", req.sellerId ?? "");
+    const key = String(req.query.category ?? "");
+    let commissionPct = Number(seller.commissionPct);
+    if (key) {
+      const cat = await prisma.category.findFirst({ where: { OR: [{ slug: key }, { id: key }] }, select: { id: true } });
+      const row = cat
+        ? await prisma.sellerCategoryCommission.findUnique({
+            where: { sellerId_categoryId: { sellerId: req.sellerId!, categoryId: cat.id } },
+            select: { pct: true },
+          })
+        : null;
+      if (row) commissionPct = Number(row.pct);
+    }
+    res.json({ success: true, data: { commissionPct, tcsPct: seller.isHouse ? 0 : TCS_RATE_PCT } });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── Commission call-back request ────────────────────────────────────────────────
+// The seller wants to negotiate the rate they were given: tell the owner who to ring, and on what number.
+router.post("/commission-callback", async (req: SellerRequest, res: Response) => {
+  try {
+    const s = await prisma.seller.findUnique({
+      where: { id: req.sellerId },
+      select: { name: true, phone: true, ownerUserId: true, commissionPct: true },
+    });
+    if (!s) throw new NotFoundError("Seller", req.sellerId ?? "");
+    const owner = s.ownerUserId
+      ? await prisma.user.findUnique({ where: { id: s.ownerUserId }, select: { name: true } })
+      : null;
+    await notifySellerCallbackRequest({
+      sellerName: s.name,
+      contactName: owner?.name && owner.name !== "App User" ? owner.name : s.name,
+      phone: s.phone ?? "",
+      commissionPct: Number(s.commissionPct),
+    });
+    res.json({ success: true, message: "Request sent" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
 // ─── Onboarding KYC — submit for owner review + per-purpose consent (Phase 1) ─────
 // SELLER_DELIVERY_ONBOARDING_PLAN.md. The draft itself is just the Seller row (edited via PUT /
 // above); these two endpoints are the "submit" action and the consent-capture action.
@@ -945,7 +999,7 @@ async function buildSellerAnalytics(sellerId: string, range: string) {
         select: {
           id: true,
           name: true,
-          variants: { where: { isActive: true }, select: { id: true, stock: true, sellingPrice: true } },
+          variants: { where: { isActive: true }, select: { id: true, stock: true, trackStock: true, sellingPrice: true } },
         },
       }),
     ]);
@@ -1041,7 +1095,7 @@ async function buildSellerAnalytics(sellerId: string, range: string) {
     let units = 0, stock = 0, stockValue = 0;
     for (const v of p.variants) {
       const u = unitsByVariantMap.get(v.id) ?? 0;
-      const s = Number(v.stock);
+      const s = v.trackStock === false ? 0 : Number(v.stock); // untracked: no stock number to count
       units += u;
       stock += s;
       stockValue += s * Number(v.sellingPrice);

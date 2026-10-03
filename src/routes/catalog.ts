@@ -4,6 +4,7 @@ import prisma from "../lib/prisma.js";
 import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib/errors.js";
 import { requireRole } from "../middleware/auth.js";
 import { formatVariantForApp } from "../utils/looseUnitConverter.js";
+import { IN_STOCK, hasStock, stockLimitBase } from "../services/stockAvailability.js";
 import { cacheControl, memoCache } from "../lib/httpCache.js";
 import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
 import { resolveCategoryFields, subtreeIds } from "../services/categoryTree.js";
@@ -253,7 +254,7 @@ const suggestSelect = {
     where: { isActive: true },
     orderBy: { sellingPrice: "asc" as const },
     take: 1,
-    select: { sellingPrice: true, stock: true },
+    select: { sellingPrice: true, stock: true, trackStock: true },
   },
 };
 
@@ -265,7 +266,7 @@ function toSuggestion(p: any) {
     brand: p.brand,
     imageUrl: p.imageUrls?.[0] ?? null,
     price: v ? Number(v.sellingPrice) : null,
-    inStock: v ? Number(v.stock) > 0 : false,
+    inStock: v ? hasStock(v) : false,
   };
 }
 
@@ -401,7 +402,7 @@ publicCatalogRouter.get("/trending-products", cacheControl(DISCOVERY_TTL_SECONDS
     // Preserve the most-ordered ordering, keep only in-stock products, attach the count.
     return topProductIds
       .map((id) => byId.get(id))
-      .filter((p): p is NonNullable<typeof p> => !!p && p.variants.some((v: any) => Number(v.stock) > 0))
+      .filter((p): p is NonNullable<typeof p> => !!p && p.variants.some((v: any) => hasStock(v)))
       .map((p) => ({ product: formatProductForApp(p), count: qtyByProduct.get(p.id) ?? 0 }));
     });
     res.json({ success: true, data });
@@ -417,7 +418,7 @@ publicCatalogRouter.get("/deal-today", cacheControl(DISCOVERY_TTL_SECONDS), asyn
   try {
     const data = await memoCache.get("products:deal-today", DISCOVERY_TTL_MS, async () => {
       const products = await prisma.catalogProduct.findMany({
-        where: { isActive: true, ...SELLER_TRADING, variants: { some: { isActive: true, stock: { gt: 0 } } } },
+        where: { isActive: true, ...SELLER_TRADING, variants: { some: { isActive: true, ...IN_STOCK } } },
         include: {
           variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
           category: { select: { slug: true, name: true } },
@@ -430,7 +431,7 @@ publicCatalogRouter.get("/deal-today", cacheControl(DISCOVERY_TTL_SECONDS), asyn
           let best = 0;
           for (const v of p.variants) {
             const mrp = Number(v.mrp), sp = Number(v.sellingPrice);
-            if (mrp > sp && mrp > 0 && Number(v.stock) > 0) {
+            if (mrp > sp && mrp > 0 && hasStock(v)) {
               best = Math.max(best, Math.round(((mrp - sp) / mrp) * 100));
             }
           }
@@ -466,7 +467,7 @@ publicCatalogRouter.get("/under-99", cacheControl(CATALOG_LIST_TTL), async (_req
         isActive: true,
         ...SELLER_TRADING,
         featuredIn99Store: true,
-        variants: { some: { isActive: true, stock: { gt: 0 }, sellingPrice: { lte: 99 } } },
+        variants: { some: { isActive: true, ...IN_STOCK, sellingPrice: { lte: 99 } } },
       },
       include: {
         variants: { where: { isActive: true }, orderBy: { sellingPrice: "asc" } },
@@ -499,6 +500,8 @@ publicCatalogRouter.post("/stock-check", async (req: Request, res: Response) => 
       select: {
         id: true,
         stock: true,
+        trackStock: true,
+        maxOrderQty: true,
         isActive: true,
         packageSize: true,
         productId: true,
@@ -518,7 +521,7 @@ publicCatalogRouter.post("/stock-check", async (req: Request, res: Response) => 
     // Collect OOS product IDs → category IDs for batch alternatives fetch.
     const oosProducts = new Map<string, string>(); // productId → categoryId
     for (const v of variants) {
-      if (Number(v.stock) <= 0 && v.product.isActive) {
+      if (!hasStock(v) && v.product.isActive) {
         oosProducts.set(v.product.id, v.product.categoryId);
       }
     }
@@ -533,7 +536,7 @@ publicCatalogRouter.post("/stock-check", async (req: Request, res: Response) => 
           isActive: true,
           ...SELLER_TRADING,
           id: { notIn: [...oosProducts.keys()] },
-          variants: { some: { isActive: true, stock: { gt: 0 } } },
+          variants: { some: { isActive: true, ...IN_STOCK } },
         },
         include: {
           variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
@@ -571,8 +574,8 @@ publicCatalogRouter.post("/stock-check", async (req: Request, res: Response) => 
       const stock = !v.isActive || !v.product.isActive || sellerHalted
         ? 0
         : isLooseType(v.product.productType)
-          ? Math.round(Number(v.stock) / packageSize)
-          : Number(v.stock);
+          ? Math.round(stockLimitBase(v, true) / packageSize)
+          : stockLimitBase(v, false);
       const alts = stock <= 0 ? (altsByProduct.get(v.product.id) ?? []) : [];
       return {
         variantId: v.id,
@@ -608,7 +611,7 @@ publicCatalogRouter.get("/:id/alternatives", cacheControl(CATALOG_LIST_TTL), asy
         isActive: true,
         ...SELLER_TRADING,
         id: { not: product.id },
-        variants: { some: { isActive: true, stock: { gt: 0 } } },
+        variants: { some: { isActive: true, ...IN_STOCK } },
       },
       include: {
         variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },
@@ -634,7 +637,7 @@ publicCatalogRouter.get("/:id/recommendations", cacheControl(CATALOG_LIST_TTL), 
     const sections = await getRecommendations(id, {
       eligible: {
         isActive: true, approvalStatus: "APPROVED", deletedAt: null, ...SELLER_TRADING,
-        variants: { some: { isActive: true, stock: { gt: 0 } } },
+        variants: { some: { isActive: true, ...IN_STOCK } },
       },
       include: {
         variants: { where: { isActive: true }, orderBy: { packageSize: "asc" } },

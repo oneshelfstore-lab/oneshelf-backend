@@ -23,6 +23,7 @@ import { sumSellerLines, computeSellerSplit } from "./sellerSplit.js";
 import { loadCategoryRates } from "./categoryCommission.js";
 import { houseSellerIsSeparateEntity, isSameLegalEntity } from "./entitySplit.js";
 import { TCS_RATE_PCT } from "../data/taxRates.js";
+import { IN_STOCK } from "./stockAvailability.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Subscriptions engine (milk / newspaper / recurring deliveries).
@@ -389,7 +390,7 @@ async function applySubstitutions(
       {
         isActive: true,
         id: { notIn: [...taken] },
-        stock: { gt: 0 },
+        ...IN_STOCK,
         product: {
           categoryId: original.product.categoryId,
           sellerId: original.product.sellerId,

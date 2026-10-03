@@ -36,7 +36,7 @@ describe("buildCollectionWhere", () => {
     expect(and).toHaveLength(3); // brands, price, inStock
     expect(and[0].OR).toHaveLength(2);
     expect(and[1].variants.some.sellingPrice).toEqual({ gte: undefined, lte: 100 });
-    expect(and[2].variants.some.stock).toEqual({ gt: 0 });
+    expect(and[2].variants.some.OR).toEqual([{ trackStock: false }, { stock: { gt: 0 } }]);
   });
 });
 

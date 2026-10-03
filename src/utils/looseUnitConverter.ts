@@ -1,4 +1,5 @@
 import type { Decimal } from "@prisma/client/runtime/library";
+import { DEFAULT_UNTRACKED_CAP } from "../services/stockAvailability.js";
 
 /**
  * Loose unit conversion between API and Android app formats.
@@ -22,6 +23,8 @@ interface VariantLike {
   saleFloor?: Decimal | number | null;
   stock: Decimal | number;
   bulkPrice?: Decimal | number | null;
+  trackStock?: boolean | null;
+  maxOrderQty?: number | null;
 }
 
 function toNum(v: Decimal | number): number {
@@ -143,7 +146,10 @@ export function formatVariantForApp(
     packageUnit: variant.packageUnit,
     mrp: converted.mrp,
     sellingPrice: converted.sellingPrice,
-    stock: converted.stock,
+    // Untracked → the per-order cap, so the customer app (out-of-stock test, stepper ceiling) works unchanged.
+    stock: variant.trackStock === false ? (variant.maxOrderQty ?? DEFAULT_UNTRACKED_CAP) : converted.stock,
+    trackStock: variant.trackStock !== false,
+    maxOrderQty: variant.maxOrderQty ?? null,
     lowStockThreshold: variant.lowStockThreshold,
     bulkMinQty: variant.bulkMinQty,
     bulkPrice: converted.bulkPrice,

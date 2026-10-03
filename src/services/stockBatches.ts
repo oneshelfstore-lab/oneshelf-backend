@@ -4,6 +4,8 @@ import { notifyStockAlerts } from "./stockAlerts.js";
 import { notifyLowStock } from "./fcmNotifier.js";
 import { resolveActions } from "./notificationInbox.js";
 import { stockCrossing } from "./stockLevel.js";
+import { stockLimitBase } from "./stockAvailability.js";
+import { isLooseType } from "./routinePlan.js";
 
 // ─── FIFO batch costing engine ───────────────────────────────────────
 //
@@ -124,6 +126,19 @@ export async function consumeFifo(
   qtyNeeded: number,
 ): Promise<ConsumeResult> {
   if (qtyNeeded <= 0) return { consumed: [], totalQty: 0, weightedUnitCost: 0 };
+
+  // Untracked variant: nothing to draw down. Only the seller's per-order cap applies, so a runaway
+  // quantity still can't slip through at order time (the cart check alone misses add-to-cart increments).
+  const meta = await tx.productVariant.findUnique({
+    where: { id: variantId },
+    select: { trackStock: true, maxOrderQty: true, packageSize: true, product: { select: { productType: true } } },
+  });
+  if (meta && !meta.trackStock) {
+    if (qtyNeeded > stockLimitBase({ stock: 0, ...meta }, isLooseType(meta.product.productType))) {
+      throw new AppError(400, "INSUFFICIENT_STOCK", "Insufficient stock");
+    }
+    return { consumed: [], totalQty: qtyNeeded, weightedUnitCost: 0 };
+  }
 
   const batches = await tx.stockBatch.findMany({
     where: { variantId, qtyRemaining: { gt: 0 } },

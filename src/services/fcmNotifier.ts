@@ -680,6 +680,20 @@ export async function notifyPartnerRejected(
   });
 }
 
+/** A seller asked the owner to call them back about their commission rate. */
+export async function notifySellerCallbackRequest(info: {
+  sellerName: string;
+  contactName: string;
+  phone: string;
+  commissionPct: number;
+}) {
+  await toOwners({
+    type: "seller_callback",
+    title: "Seller wants a call back",
+    body: `${info.contactName} (${info.sellerName}) wants to discuss their ${info.commissionPct}% commission. Call ${info.phone || "— no phone on file"}.`,
+  });
+}
+
 export async function notifyProductDecision(userId: string, productName: string, approved: boolean, reason?: string) {
   await toUser(userId, {
     type: "product_decision",

@@ -5,6 +5,7 @@
 import type { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { subtreeIds, type TreeRow } from "./categoryTree.js";
+import { IN_STOCK } from "./stockAvailability.js";
 
 export const KINDS = ["COLLECTION", "OCCASION", "CONCERN"] as const;
 export const MODES = ["MANUAL", "SMART"] as const;
@@ -53,7 +54,7 @@ export function buildCollectionWhere(
     if (r.priceMin != null || r.priceMax != null) {
       and.push({ variants: { some: { isActive: true, sellingPrice: { gte: r.priceMin, lte: r.priceMax } } } });
     }
-    if (r.inStock) and.push({ variants: { some: { isActive: true, stock: { gt: 0 } } } });
+    if (r.inStock) and.push({ variants: { some: { isActive: true, ...IN_STOCK } } });
     base = { OR: [{ AND: and }, pins] };
   }
   return excluded.length ? { AND: [base, { id: { notIn: excluded } }] } : base;

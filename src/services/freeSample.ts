@@ -1,6 +1,7 @@
 import prisma from "../lib/prisma.js";
 import { consumeFifo } from "./stockBatches.js";
 import { AppError } from "../lib/errors.js";
+import { IN_STOCK } from "./stockAvailability.js";
 
 /**
  * Roll a free sample at order placement. Gated by ALL of:
@@ -40,7 +41,7 @@ export async function rollFreeSample(orderId: string): Promise<void> {
   const candidates = await prisma.productVariant.findMany({
     where: {
       isActive: true,
-      stock: { gt: 0 },
+      ...IN_STOCK,
       sellingPrice: { lte: maxValue },
       product: { isActive: true, isSampleEligible: true, productType: { notIn: ["LOOSE", "PRODUCE"] } },
     },

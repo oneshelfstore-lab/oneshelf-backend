@@ -7,6 +7,7 @@ import {
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { formatVariantForApp } from "../utils/looseUnitConverter.js";
+import { stockLimitBase } from "../services/stockAvailability.js";
 import { calculateCartTotals } from "../services/cartPricing.js";
 
 const router = Router();
@@ -189,7 +190,7 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
     if (!variant || !variant.isActive) throw new NotFoundError("Variant", variantId);
 
     const isLoose = isLooseType(variant.product.productType);
-    const stockNum = Number(variant.stock);
+    const stockNum = stockLimitBase(variant, isLoose);
     const packageSize = Number(variant.packageSize);
 
     // For loose: stock is in base units, check quantity (increments) × packageSize ≤ stock
@@ -251,7 +252,7 @@ router.put("/:itemId", async (req: FirebaseAuthRequest, res: Response) => {
 
     const variant = item.variant;
     const isLoose = isLooseType(variant.product.productType);
-    const stockNum = Number(variant.stock);
+    const stockNum = stockLimitBase(variant, isLoose);
     const packageSize = Number(variant.packageSize);
 
     if (isLoose) {
@@ -312,7 +313,7 @@ router.post("/:itemId/move-to-cart", async (req: FirebaseAuthRequest, res: Respo
 
     // Re-validate stock
     const isLoose = isLooseType(item.variant.product.productType);
-    const stockNum = Number(item.variant.stock);
+    const stockNum = stockLimitBase(item.variant, isLoose);
     const packageSize = Number(item.variant.packageSize);
 
     if (isLoose) {

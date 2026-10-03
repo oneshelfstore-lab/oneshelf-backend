@@ -1,5 +1,6 @@
 import prisma from "../lib/prisma.js";
 import { notifyAbandonedCart } from "./fcmNotifier.js";
+import { hasStock } from "./stockAvailability.js";
 
 const IDLE_HOURS = 4;
 const REMINDER_COOLDOWN_HOURS = 24;
@@ -48,7 +49,7 @@ export async function sweepAbandonedCarts(): Promise<number> {
   for (const user of candidates) {
     try {
       const inStockItems = user.cartItems.filter(
-        (ci) => Number(ci.variant.stock) > 0,
+        (ci) => hasStock(ci.variant),
       );
       if (inStockItems.length === 0) continue;
 

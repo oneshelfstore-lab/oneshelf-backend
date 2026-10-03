@@ -6,6 +6,7 @@ import { formatProductForApp, SELLER_SELECT } from "./catalog.js";
 import { VISIBLE, whereFor } from "./collections.js";
 import { loadSubcategories } from "./categories.js";
 import { liveCollectionWhere } from "../services/collections.js";
+import { IN_STOCK } from "../services/stockAvailability.js";
 
 // Customer category landing page (CATALOG_PLAN.md phase 7): one call returns everything the page shows —
 // the category, its sub-category tiles, what is popular in it, and the owner's collections that have products
@@ -31,7 +32,7 @@ const include = {
   category: { select: { slug: true, name: true } },
   seller: SELLER_SELECT,
 };
-const inStock = { variants: { some: { isActive: true, stock: { gt: 0 } } } };
+const inStock = { variants: { some: { isActive: true, ...IN_STOCK } } };
 
 async function loadCategoryPage(slugOrId: string) {
   const category = await prisma.category.findFirst({

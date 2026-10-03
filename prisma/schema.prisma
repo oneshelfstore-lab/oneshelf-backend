@@ -982,6 +982,11 @@ model ProductVariant {
   // services/stockBatches.ts. Do not write this field directly outside that service.
   stock             Decimal        @db.Decimal(12, 3)
   lowStockThreshold Int            @default(5)
+  // false = the seller does not commit stock: always orderable (up to maxOrderQty) until they hide it.
+  // Default true keeps every existing variant exactly as before. See services/stockAvailability.ts.
+  trackStock        Boolean        @default(true)
+  // Per-order cap for an UNTRACKED variant (null → DEFAULT_UNTRACKED_CAP). Ignored while trackStock.
+  maxOrderQty       Int?
   bulkMinQty        Int            @default(0)
   bulkPrice         Decimal?       @db.Decimal(10, 2)
   gstRateOverride   Decimal?       @db.Decimal(5, 2)

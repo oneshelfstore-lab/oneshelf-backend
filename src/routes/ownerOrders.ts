@@ -20,6 +20,7 @@ import { quoteMessageSchema, quoteMessagePreview } from "./appUser.js";
 import { getRiderOnboardingStatus, riderBlockedReason } from "./deliveryOnboarding.js";
 import { signOrderMedia } from "../lib/storageUrls.js";
 import { recordOrderEventAsync } from "../services/orderEvents.js";
+import { hasStock } from "../services/stockAvailability.js";
 
 const router = Router();
 router.use(firebaseAuthMiddleware as any);
@@ -414,7 +415,7 @@ router.post("/:orderId/items/:itemId/substitute", async (req: FirebaseAuthReques
     if (!subVariant || !subVariant.isActive || !subVariant.product.isActive) {
       throw new ValidationError("Substitute variant not found or inactive");
     }
-    if (Number(subVariant.stock) <= 0) {
+    if (!hasStock(subVariant)) {
       throw new ValidationError("Substitute variant is out of stock");
     }
 

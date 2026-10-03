@@ -105,7 +105,8 @@ function formatProductForApp(product: any) {
       // Private merchant fields — exposed ONLY on this seller-scoped serializer (never the customer one)
       // so the editor prefills costPrice/saleFloor on edit and a re-save doesn't wipe them.
       const app = toAppFormat(v, isLoose);
-      return { ...base, costPrice: app.costPrice, saleFloor: app.saleFloor };
+      // `stock` is the REAL tracked count here (the customer serializer reports the order cap for an untracked size).
+      return { ...base, stock: app.stock, trackStock: v.trackStock !== false, maxOrderQty: v.maxOrderQty ?? null, costPrice: app.costPrice, saleFloor: app.saleFloor };
     }) ?? [],
   };
 }
@@ -123,6 +124,9 @@ const variantSchema = z.object({
   saleFloor: z.number().min(0).optional().nullable(),
   stock: z.number().min(0),
   lowStockThreshold: z.number().int().min(0).default(5),
+  // Optional (not defaulted) so an older app that omits it can't flip an untracked size back to tracked.
+  trackStock: z.boolean().optional(),
+  maxOrderQty: z.number().int().min(1).max(10000).optional().nullable(),
   bulkMinQty: z.number().int().min(0).default(0),
   bulkPrice: z.number().positive().optional().nullable(),
   gstRateOverride: z.number().min(0).max(100).optional().nullable(),
@@ -272,7 +276,9 @@ router.post("/", async (req: SellerRequest, res: Response) => {
       return {
         sku: v.sku, barcode: v.barcode, imageUrl: v.imageUrl, packageSize: v.packageSize, packageUnit: v.packageUnit,
         mrp: c.mrp, sellingPrice: c.sellingPrice, saleFloor: c.saleFloor, stock: 0,
-        initialStock: c.stock, initialCost: c.costPrice ?? 0,
+        // Untracked sizes never get a stock batch — there is no number to commit.
+        initialStock: v.trackStock === false ? 0 : c.stock, initialCost: c.costPrice ?? 0,
+        trackStock: v.trackStock ?? true, maxOrderQty: v.trackStock === false ? (v.maxOrderQty ?? null) : null,
         lowStockThreshold: v.lowStockThreshold, bulkMinQty: v.bulkMinQty, bulkPrice: c.bulkPrice, gstRateOverride: v.gstRateOverride,
       };
     });
@@ -414,11 +420,11 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
             const before = await tx.productVariant.findUnique({ where: { id: vid }, select: { sellingPrice: true, mrp: true } });
             await tx.productVariant.update({ where: { id: vid }, data: { ...rest, mrp: c.mrp, sellingPrice: c.sellingPrice, saleFloor: c.saleFloor, bulkPrice: c.bulkPrice } });
             if (before) await recordPriceChange(tx, vid, { sellingPrice: Number(before.sellingPrice), mrp: Number(before.mrp) }, { sellingPrice: c.sellingPrice, mrp: c.mrp }, "EDITOR", req.appUser?.name);
-            await applyStockEdit(tx, vid, c.stock, c.costPrice, "Edited via product editor");
+            if (rest.trackStock !== false) await applyStockEdit(tx, vid, c.stock, c.costPrice, "Edited via product editor");
           } else {
             const { id: _unused, stock: _stock, costPrice: _costPrice, ...rest } = v as any;
             const createdVariant = await tx.productVariant.create({ data: { ...rest, mrp: c.mrp, sellingPrice: c.sellingPrice, saleFloor: c.saleFloor, stock: 0, bulkPrice: c.bulkPrice, productId } });
-            if (c.stock > 0) await receiveBatch(tx, createdVariant.id, c.stock, c.costPrice ?? 0, "Initial stock");
+            if (c.stock > 0 && rest.trackStock !== false) await receiveBatch(tx, createdVariant.id, c.stock, c.costPrice ?? 0, "Initial stock");
           }
         }
       }
@@ -446,6 +452,23 @@ router.delete("/:id", async (req: SellerRequest, res: Response) => {
     if (!existing) throw new NotFoundError("Product", productId);
     await prisma.catalogProduct.update({ where: { id: productId }, data: { isActive: false, deletedAt: new Date() } });
     res.json({ success: true, message: "Product removed" });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── PATCH /:id/visibility — seller hides / re-shows one of their own products ────
+// isActive is also what "pending approval" looks like, so only an APPROVED product can be toggled —
+// otherwise "Show" would publish something the owner never approved.
+router.patch("/:id/visibility", async (req: SellerRequest, res: Response) => {
+  try {
+    const productId = String(req.params.id);
+    const { visible } = z.object({ visible: z.boolean() }).parse(req.body);
+    const existing = await prisma.catalogProduct.findFirst({ where: { id: productId, sellerId: req.sellerId, deletedAt: null } });
+    if (!existing) throw new NotFoundError("Product", productId);
+    if (existing.approvalStatus !== "APPROVED") throw new ValidationError("This product isn't approved yet, so it can't be shown or hidden.");
+    await prisma.catalogProduct.update({ where: { id: productId }, data: { isActive: visible } });
+    res.json({ success: true, message: visible ? "Product is visible to customers" : "Product hidden from customers" });
   } catch (e) {
     sendError(res, e);
   }

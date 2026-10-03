@@ -15,17 +15,42 @@ import { cacheControl, memoCache, PUBLIC_TTL_MS, PUBLIC_TTL_SECONDS } from "../l
 const hex = z.string().regex(/^#[0-9a-fA-F]{6}$/);
 const url = z.string().max(600);
 
-/** CATEGORY_SHAPES — optional full-bleed artwork on top, then a grid of shaped tiles (cutout + caption). */
+const num = (d: number, min: number, max: number) => z.number().min(min).max(max).default(d);
+const gradient = (from: string, to: string) =>
+  z.object({ from: hex.default(from), to: hex.default(to), angle: z.number().int().min(0).max(360).default(180) }).default({});
+
+/**
+ * CATEGORY_SHAPES — one block of a page: optional heading, optional full-bleed artwork, then a grid of shaped
+ * tiles (cutout or photo + caption), optionally on a wavy-edged background. Every field has a default, so older
+ * saved configs keep parsing as fields are added. Web twin: frontend/src/lib/sections.ts.
+ */
 export const categoryShapesConfig = z.object({
-  bg: z.object({ from: hex, to: hex, angle: z.number().int().min(0).max(360) })
-    .default({ from: "#FFE6D0", to: "#FFE6D0", angle: 180 }),
-  header: z.object({ url, aspect: z.number().min(0.5).max(6) }).default({ url: "", aspect: 2.4 }),
+  bg: gradient("#FFE6D0", "#FFE6D0"),
+  edge: z.object({
+    waveTop: z.boolean().default(false), waveBottom: z.boolean().default(false),
+    amp: num(5.1, 0, 20), length: num(40.9, 10, 200), phase: num(19.6, 0, 200),
+  }).default({}),
+  title: z.object({
+    text: z.string().max(80).default(""), align: z.enum(["left", "center"]).default("left"),
+    size: num(20, 12, 40), weight: z.number().int().min(400).max(900).default(800), color: hex.default("#221F18"),
+    imageUrl: url.default(""), imageHeight: num(40, 16, 120), gap: num(8, 0, 40),
+  }).default({}),
+  header: z.object({ url: url.default(""), aspect: num(2.4, 0.5, 6) }).default({}),
   columns: z.number().int().min(2).max(4).default(3),
-  shape: z.enum(["pentagon", "arch", "rounded", "circle"]).default("pentagon"),
-  tile: z.object({ from: hex, to: hex }).default({ from: "#FE9365", to: "#FE9365" }),
-  caption: z.object({ color: hex, size: z.number().min(10).max(24), weight: z.number().int().min(400).max(900) })
-    .default({ color: "#070000", size: 14, weight: 600 }),
-  imageScale: z.number().min(0.4).max(1).default(0.8),
+  shape: z.enum(["pentagon", "arch", "rounded", "circle", "apple"]).default("pentagon"),
+  tile: z.object({
+    from: hex.default("#FE9365"), to: hex.default("#FE9365"),
+    strokeColor: hex.default("#F7B17E"), strokeWidth: num(0, 0, 6), aspect: num(1, 0.6, 1.6), radius: num(18, 0, 60),
+  }).default({}),
+  imageMode: z.enum(["contain", "cover"]).default("contain"),
+  imageAlign: z.enum(["center", "bottom"]).default("center"),
+  imageScale: num(0.8, 0.4, 1),
+  caption: z.object({ color: hex.default("#070000"), size: num(14, 10, 24), weight: z.number().int().min(400).max(900).default(600), lineHeight: num(1.25, 0.9, 1.8) }).default({}),
+  layout: z.object({
+    sidePad: num(14, 0, 40), gap: num(15, 0, 40), rowGap: num(22, 0, 60),
+    captionTop: num(10, 0, 30), topPad: num(13, 0, 80), bottomPad: num(33, 0, 80),
+    mode: z.enum(["grid", "scroll"]).default("grid"), tileWidth: num(109, 60, 220),
+  }).default({}),
   items: z.array(z.object({
     title: z.string().max(80).default(""),
     image: url.default(""),
@@ -34,7 +59,32 @@ export const categoryShapesConfig = z.object({
   })).max(24).default([]),
 });
 
-const CONFIG_BY_TYPE = { CATEGORY_SHAPES: categoryShapesConfig } as const;
+/** ARTWORK_BANNER — one full-width picture (heading and art baked in) that can open a category. */
+export const artworkBannerConfig = z.object({
+  image: z.object({ url: url.default(""), aspect: num(2.4, 0.5, 6) }).default({}),
+  target: z.object({ type: z.enum(["none", "category", "product"]), id: z.string().max(80) })
+    .default({ type: "none", id: "" }),
+});
+
+/**
+ * PRODUCT_ROW — an uploaded banner (the section's heading, art baked in) over a sideways row of the app's own
+ * product cards, filled live from a Collection or a Category. The optional see-all target shows the small ">" button
+ * on the banner's bottom-right corner.
+ */
+export const productRowConfig = z.object({
+  bg: gradient("#FFFFFF", "#FFFFFF"),
+  header: z.object({ url: url.default(""), aspect: num(2.23, 0.5, 6) }).default({}),
+  target: z.object({ type: z.enum(["none", "category", "product"]), id: z.string().max(80) })
+    .default({ type: "none", id: "" }),
+  source: z.object({ type: z.enum(["category", "collection"]).default("category"), id: z.string().max(80).default("") }).default({}),
+  limit: z.number().int().min(1).max(30).default(10),
+  cardWidth: num(132, 100, 220),
+  gap: num(10, 0, 40), bottomPad: num(16, 0, 80),
+});
+
+const CONFIG_BY_TYPE = {
+  CATEGORY_SHAPES: categoryShapesConfig, ARTWORK_BANNER: artworkBannerConfig, PRODUCT_ROW: productRowConfig,
+} as const;
 const TYPES = Object.keys(CONFIG_BY_TYPE) as [keyof typeof CONFIG_BY_TYPE];
 
 function parseConfig(type: keyof typeof CONFIG_BY_TYPE, raw: unknown) {

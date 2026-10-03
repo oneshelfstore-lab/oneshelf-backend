@@ -238,14 +238,6 @@ export const STATIONERY: Super[] = [
     name: "Gifts, Learning & More",
     roots: [
       {
-        n: "Greeting & Gifts",
-        k: [
-          { n: "Greeting cards", f: [pick("occasion", "Occasion", ["Birthday", "Wedding", "Thank you", "Anniversary", "Festival", "Other"], { filterable: true })] },
-          { n: "Invitation cards" },
-          { n: "Gift tags & bags" },
-        ],
-      },
-      {
         n: "Miscellaneous",
         k: leaves("Magnets", "Keychains", "Lanyards & badges", "ID card holders", "Magnifiers", "Sewing kits", "Locks"),
       },

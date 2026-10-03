@@ -9,6 +9,7 @@ import { HEALTH, HEALTH_MOVES } from "./healthCatalog.js";
 import { BOOKS } from "./booksCatalog.js";
 import { TOYS } from "./toysCatalog.js";
 import { ELECTRONICS, ELECTRONICS_MOVES } from "./electronicsCatalog.js";
+import { GIFTS } from "./giftsCatalog.js";
 import type { Root } from "./stationeryCatalog.js";
 
 export type TreeDef = {
@@ -34,4 +35,6 @@ export const TREES: Record<string, TreeDef> = {
   toys: { superSlug: "toys_games", prefix: "toy_", roots: TOYS },
   // Retires the stationery "Small Electronics" root: electronics now live here.
   electronics: { superSlug: "electronics_accessories", prefix: "el_", roots: ELECTRONICS, moves: ELECTRONICS_MOVES, retireRoots: ["stationery_small_electronics"] },
+  // Retires the stationery "Greeting & Gifts" root: cards, gift tags/bags and packaging live here.
+  gifts: { superSlug: "gifts_lifestyle", prefix: "gift_", roots: GIFTS, retireRoots: ["stationery_greeting_and_gifts"] },
 };

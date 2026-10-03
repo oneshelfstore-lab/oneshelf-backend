@@ -9,6 +9,7 @@ import {
 import { admin, isFirebaseInitialized } from "../lib/firebase.js";
 import { readGroceryList, takeOcrQuota, OcrNotConfiguredError } from "../lib/listOcr.js";
 import { formatProductForApp } from "./catalog.js";
+import { shapePartnerApplication } from "./partnerApplications.js";
 import { computeUserSavings } from "../services/savings.js";
 import { computeUserLoyalty } from "../services/loyalty.js";
 import { notifyNewComplaint, notifyNewQuoteRequest, notifyQuoteMessage, notifyComplaintMessage } from "../services/fcmNotifier.js";
@@ -57,6 +58,24 @@ router.get("/", async (req: FirebaseAuthRequest, res: Response) => {
     });
     if (!user) throw new NotFoundError("User", req.appUser!.id);
     res.json({ success: true, data: await signUserPhoto(user) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// GET /api/app/me/partner-application — this account's latest "Partner with us" application, or
+// data:null if it never applied. Applications are filed before sign-in, so the link is the phone
+// number: the Firebase-verified one on the token, else the one saved on the account.
+router.get("/partner-application", async (req: FirebaseAuthRequest, res: Response) => {
+  try {
+    const raw = req.appUser!.tokenPhone || req.appUser!.phone || "";
+    const phone = raw.replace(/\D/g, "").slice(-10);
+    if (phone.length !== 10) return void res.json({ success: true, data: null });
+    const app = await prisma.partnerApplication.findFirst({
+      where: { phone },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json({ success: true, data: app ? shapePartnerApplication(app) : null });
   } catch (e) {
     sendError(res, e);
   }

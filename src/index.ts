@@ -5,6 +5,7 @@ import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
 import rateLimit from "express-rate-limit";
+import { bearerBucket } from "./lib/rateLimitKeys.js";
 import authRoutes from "./routes/auth.js";
 import productRoutes from "./routes/products.js";
 import customerRoutes from "./routes/customers.js";
@@ -331,12 +332,36 @@ initFirebase();
 
 // ─── Rate Limiting ──────────────────────────────────────────────────
 
-const generalLimiter = rateLimit({
+// General /api limits — three layers, because a single 100/min-per-IP bucket made everyone behind a shared
+// address (mobile-carrier NAT, a shop's Wi-Fi, one emulator) fight over the same pool, and a busy Home load
+// alone could trip it ("Too many requests" on the shop screen).
+//   • anonymous callers (no bearer token): the old 100/min per IP — nothing was loosened for them.
+//   • signed-in callers: 300/min per TOKEN, so one person's burst is their own problem.
+//   • every caller: a 600/min per-IP backstop, so spraying made-up tokens from one machine still hits a wall.
+const RATE_LIMITED = { success: false, error: { code: "RATE_LIMITED", message: "Too many requests, try again later", details: [] } };
+const anonLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 100,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { success: false, error: { code: "RATE_LIMITED", message: "Too many requests, try again later", details: [] } },
+  skip: (req) => bearerBucket(req.headers.authorization) !== null,
+  message: RATE_LIMITED,
+});
+const userLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  skip: (req) => bearerBucket(req.headers.authorization) === null,
+  keyGenerator: (req) => bearerBucket(req.headers.authorization) ?? "none",
+  message: RATE_LIMITED,
+});
+const ipBackstopLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 600,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: RATE_LIMITED,
 });
 
 const authLimiter = rateLimit({
@@ -376,7 +401,7 @@ const writeLimiter = rateLimit({
   message: { success: false, error: { code: "RATE_LIMITED", message: "Too many write operations, slow down", details: [] } },
 });
 
-app.use("/api", generalLimiter);
+app.use("/api", anonLimiter, userLimiter, ipBackstopLimiter);
 
 // ─── Health (no auth) ───────────────────────────────────────────────
 
@@ -387,7 +412,7 @@ app.get("/api/health", (_req, res) => {
 // CSP violation reports land here in report-only mode (or if a future relaxation of the
 // policy ever misfires). Body is `application/csp-report` — a tiny dedicated json parser
 // (not the shared 10mb express.json() above) keeps this cheap and isolated. Registered
-// after generalLimiter (like every other /api route) so it can't be used to flood logs.
+// after the general limiters (like every other /api route) so it can't be used to flood logs.
 app.post("/api/csp-report", express.json({ type: ["application/csp-report", "application/json"] }), (req, res) => {
   console.log(JSON.stringify({ level: "warn", type: "csp-violation", report: req.body }));
   res.status(204).end();

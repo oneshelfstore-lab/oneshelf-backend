@@ -6,7 +6,8 @@
 //   npx tsx scripts/seedStationery.ts
 //   DATABASE_URL="<external URL>" npx tsx scripts/seedStationery.ts --apply
 import { PrismaClient } from "@prisma/client";
-import { STATIONERY, EXISTING_SUPER_DEPARTMENTS, type Node } from "../src/data/stationeryCatalog.js";
+import { STATIONERY, type Node } from "../src/data/stationeryCatalog.js";
+import { STATIONERY_SUPER } from "../src/data/superCategories.js";
 import { childSlug } from "../src/services/categoryTree.js";
 import { fieldSchemaSchema } from "../src/services/categoryFields.js";
 
@@ -41,26 +42,24 @@ async function main() {
     const kids = node.k ?? [];
     for (let i = 0; i < kids.length; i++) await writeNode(kids[i]!, uniqueSlug(slug, kids[i]!.n), id, null, i, depth + 1);
   }
-
-  for (let si = 0; si < STATIONERY.length; si++) {
-    const sup = STATIONERY[si]!;
-    console.log(`\n▌${sup.name}`);
-    let superId = `dry:${sup.slug}`;
-    if (APPLY) {
-      superId = (await prisma.superCategory.upsert({ where: { slug: sup.slug }, update: { name: sup.name, displayOrder: 100 + si, departments: sup.departments }, create: { slug: sup.slug, name: sup.name, displayOrder: 100 + si, departments: sup.departments } })).id;
-    }
-    for (let ri = 0; ri < sup.roots.length; ri++) {
-      const r = sup.roots[ri]!;
+  // Super-categories come from scripts/restructureSupers.ts; every stationery root sits on Stationery & Office.
+  let superId = `dry:${STATIONERY_SUPER}`;
+  if (APPLY) {
+    const row = await prisma.superCategory.findUnique({ where: { slug: STATIONERY_SUPER }, select: { id: true } });
+    if (!row) throw new Error(`Run scripts/restructureSupers.ts --apply first: super '${STATIONERY_SUPER}' does not exist`);
+    superId = row.id;
+  }
+  let order = 0;
+  for (const group of STATIONERY) {
+    console.log(`
+▌${group.name}`);
+    for (const r of group.roots) {
       taken.add(rootSlug(r.n));
-      await writeNode(r, rootSlug(r.n), null, superId, ri, 1);
+      await writeNode(r, rootSlug(r.n), null, superId, order++, 1);
     }
   }
-  console.log("\nDepartments on existing super-categories:");
-  for (const [slug, departments] of Object.entries(EXISTING_SUPER_DEPARTMENTS)) {
-    const n = APPLY ? (await prisma.superCategory.updateMany({ where: { slug }, data: { departments } })).count : null;
-    console.log(`  ${slug} → ${departments.join(", ")}${n === 0 ? "  (not in DB, skipped)" : ""}`);
-  }
-  console.log(`\n${APPLY ? "Wrote" : "Would write"} ${nodes} category nodes (${withFields} with field templates) under ${STATIONERY.length} super-categories.`);
+  console.log(`
+${APPLY ? "Wrote" : "Would write"} ${nodes} category nodes (${withFields} with field templates) under Stationery & Office.`);
   if (!APPLY) console.log("Dry run — re-run with --apply to write.");
 }
 

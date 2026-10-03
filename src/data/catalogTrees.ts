@@ -13,6 +13,7 @@ import { GIFTS } from "./giftsCatalog.js";
 import { HARDWARE } from "./hardwareCatalog.js";
 import { BABY_KIDS, BABY_KIDS_MOVES } from "./babyKidsCatalog.js";
 import { AUTOMOTIVE } from "./automotiveCatalog.js";
+import { PETS } from "./petCatalog.js";
 import type { Root } from "./stationeryCatalog.js";
 
 export type TreeDef = {
@@ -43,4 +44,5 @@ export const TREES: Record<string, TreeDef> = {
   hardware: { superSlug: "hardware_electrical", prefix: "hdw_", roots: HARDWARE },
   baby_kids: { superSlug: "baby_kids", prefix: "bk_", roots: BABY_KIDS, moves: BABY_KIDS_MOVES, retireRoots: ["baby_care"] },
   automotive: { superSlug: "automotive", prefix: "auto_", roots: AUTOMOTIVE },
+  pets: { superSlug: "pet_supplies", prefix: "pet_", roots: PETS },
 };

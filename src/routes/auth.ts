@@ -205,8 +205,11 @@ router.post("/change-password", authMiddleware, async (req: AuthRequest, res: Re
     // flag changes, and it avoids re-introducing this file's nullable-`user.email` type wart.
     // Must carry the NEW tokenVersion, or the token we just handed back would be invalidated by
     // the very bump above and the user would be signed out the moment they used it.
+    // Explicit fields, NOT `...req.user`: that object is the decoded token and carries iat/exp, and
+    // jwt.sign refuses `expiresIn` when the payload already has `exp` (this 500'd every password change).
+    const { userId, email, role, name } = req.user!;
     const payload: JwtPayload = {
-      ...req.user!,
+      userId, email, role, name,
       mustChangePassword: false,
       tokenVersion: updated.tokenVersion,
     };

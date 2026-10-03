@@ -5,6 +5,7 @@ import { FRESH_DAIRY, FRESH_DAIRY_MOVES } from "./freshDairyCatalog.js";
 import { PERSONAL_CARE, PERSONAL_CARE_MOVES } from "./personalCareCatalog.js";
 import { HOME_KITCHEN, HOME_KITCHEN_MOVES } from "./homeKitchenCatalog.js";
 import { CLEANING, CLEANING_MOVES } from "./cleaningCatalog.js";
+import { HEALTH, HEALTH_MOVES } from "./healthCatalog.js";
 import type { Root } from "./stationeryCatalog.js";
 
 export type TreeDef = {
@@ -24,4 +25,5 @@ export const TREES: Record<string, TreeDef> = {
   personal_care: { superSlug: "personal_care_beauty", prefix: "care_", roots: PERSONAL_CARE, moves: PERSONAL_CARE_MOVES, retireRoots: ["beauty"] },
   home_kitchen: { superSlug: "home_kitchen", prefix: "hk_", roots: HOME_KITCHEN, moves: HOME_KITCHEN_MOVES, retireRoots: ["crockery"] },
   cleaning: { superSlug: "cleaning_household", prefix: "cl_", roots: CLEANING, moves: CLEANING_MOVES, retireRoots: ["insect_killer"] },
+  health: { superSlug: "health_wellness", prefix: "hw_", roots: HEALTH, moves: HEALTH_MOVES, retireRoots: ["herbs_ayurvedic_products"] },
 };

@@ -2260,6 +2260,12 @@ model Seller {
   // data/shopTypes.ts), so grocery + pharmacy owes a drug licence. String[] of registry keys for the
   // same no-migration-per-trade reason as shopType. Empty for every pre-existing seller.
   alsoSellCategories String[] @default([])
+  // The super-categories this seller sells in (names, e.g. "Stationery & Office") — what the add-product picker offers.
+  // Separate from shopType/alsoSell on purpose: those are KYC-locked paperwork keys, this is just their shelf choice and
+  // can be re-picked any time. NULL confirmedAt = never chosen/confirmed (every seller before the 16-super picker) → the
+  // app asks once; until then the list is derived from their shop-type keys.
+  sellsSuperCategories  String[] @default([])
+  categoriesConfirmedAt DateTime?
   // What the seller OFFERED to give Oneshelf at onboarding (slider, 3–30%). A proposal only —
   // ⚠️ NEVER read at order time and never copied into `commissionPct` automatically. The owner reads
   // it, then sets the real rates (default + SellerCategoryCommission rows) when approving.

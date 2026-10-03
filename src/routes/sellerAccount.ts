@@ -16,6 +16,7 @@ import {
   ifscSchema,
 } from "../validators/index.js";
 import { PARTNER_AGREEMENT_VERSION } from "../data/onboardingAgreements.js";
+import { SELLABLE_SUPERS, departmentsOf, effectiveSupers } from "../services/sellerCategories.js";
 import { signDocFields, SELLER_KYC_DOC_FIELDS } from "../lib/storageUrls.js";
 import {
   effectiveProfile,
@@ -153,6 +154,11 @@ async function shapeSellerProfile(s: any, agreementCurrent: boolean) {
     ownerName: owner?.name && owner.name !== "App User" ? owner.name : null,
     ownerEmail: owner?.email ?? null,
     alsoSellCategories: (s.alsoSellCategories ?? []) as string[],
+    // The super-categories this seller sells in (drives their add-product picker). `categoriesConfirmed` false = the seller
+    // has never chosen/confirmed them (every seller from before the 16-super picker): the app asks once. Kitchens (FOOD
+    // vertical) have no shelf to pick, so they read as confirmed.
+    sellsSuperCategories: effectiveSupers(s),
+    categoriesConfirmed: s.vertical === "FOOD" || Boolean(s.categoriesConfirmedAt),
     offeredCommissionPct: s.offeredCommissionPct != null ? Number(s.offeredCommissionPct) : null,
     shopTypeLabel: profile.label,
     department: profile.department,
@@ -556,9 +562,35 @@ router.post("/onboarding/submit", async (req: SellerRequest, res: Response) => {
 
     const updated = await prisma.seller.update({
       where: { id: seller.id },
-      data: { onboardingStatus: "PENDING_REVIEW", onboardingRejectionReason: null },
+      data: {
+        onboardingStatus: "PENDING_REVIEW",
+        onboardingRejectionReason: null,
+        // They picked their trades in step 0 of this very wizard, so that IS their confirmed category choice.
+        ...(seller.categoriesConfirmedAt ? {} : { sellsSuperCategories: departmentsOf(seller.shopType, seller.alsoSellCategories), categoriesConfirmedAt: new Date() }),
+      },
     });
     res.json({ success: true, data: await shapeSellerProfile(updated, true) });
+  } catch (e) {
+    sendError(res, e);
+  }
+});
+
+// ─── PUT /categories — the seller (re)picks which super-categories they sell in ───────────────────
+// Deliberately NOT part of PUT / : shopType / alsoSellCategories are KYC-locked after approval (changing them can add a
+// licensed trade the review never saw). This is only the shelf choice for the add-product picker, so it is free to change.
+router.put("/categories", async (req: SellerRequest, res: Response) => {
+  try {
+    const parsed = z.object({
+      superCategories: z.array(z.string().max(60)).min(1, "Pick at least one category").max(16)
+        .refine((v) => v.every((n) => SELLABLE_SUPERS.includes(n)), { message: "Unknown category" }),
+    }).safeParse(req.body);
+    if (!parsed.success) throw new ValidationError(parsed.error.errors[0]?.message ?? "Invalid categories", parsed.error.errors);
+    const picked = SELLABLE_SUPERS.filter((n) => parsed.data.superCategories.includes(n)); // canonical order, deduped
+    const updated = await prisma.seller.update({
+      where: { id: req.sellerId },
+      data: { sellsSuperCategories: picked, categoriesConfirmedAt: new Date() },
+    });
+    res.json({ success: true, data: await shapeSellerProfile(updated, await isAgreementCurrent(updated.id)) });
   } catch (e) {
     sendError(res, e);
   }

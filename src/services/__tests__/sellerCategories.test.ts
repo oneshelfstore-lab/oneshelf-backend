@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { allowedRoots, departmentsOf, type PickerRoot } from "../sellerCategories.js";
+import { SELLABLE_SUPERS, allowedRoots, departmentsOf, effectiveSupers, type PickerRoot } from "../sellerCategories.js";
 
 const sup = (name: string, isActive = true) => ({ id: name, slug: name, name, isActive });
 const root = (id: string, superCategory: PickerRoot["superCategory"]): PickerRoot =>
@@ -38,5 +38,20 @@ describe("allowedRoots", () => {
   it("fails open: no picks, or none matching an active super → everything sellable, never an inactive super", () => {
     expect(allowedRoots(roots, []).map((r) => r.id)).toEqual(["pens", "staples", "textbooks", "orphan"]);
     expect(allowedRoots(roots, ["Pet Supplies"]).map((r) => r.id)).toEqual(["pens", "staples", "textbooks", "orphan"]);
+  });
+});
+
+describe("effectiveSupers / SELLABLE_SUPERS", () => {
+  const base = { shopType: "STATIONERY", alsoSellCategories: ["GENERAL_STORE"], sellsSuperCategories: ["Pet Supplies"], categoriesConfirmedAt: null as Date | null };
+  it("until the seller confirms, the list is derived from their registration keys", () => {
+    expect(effectiveSupers(base).sort()).toEqual(["Grocery & Food", "Stationery & Office"]);
+  });
+  it("once confirmed, their own pick wins — even over what their shop-type keys say", () => {
+    expect(effectiveSupers({ ...base, categoriesConfirmedAt: new Date() })).toEqual(["Pet Supplies"]);
+  });
+  it("offers the 16 supers, never Food", () => {
+    expect(SELLABLE_SUPERS).toHaveLength(16);
+    expect(SELLABLE_SUPERS).not.toContain("Food");
+    expect(SELLABLE_SUPERS).not.toContain("Fashion");
   });
 });

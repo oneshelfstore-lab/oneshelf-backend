@@ -7,7 +7,7 @@
 
 import type { Prisma } from "@prisma/client";
 import { ValidationError } from "../lib/errors.js";
-import { HIDDEN_DEPARTMENTS, SHOP_TYPES } from "../data/shopTypes.js";
+import { DEPARTMENT_ORDER, HIDDEN_DEPARTMENTS, SHOP_TYPES } from "../data/shopTypes.js";
 
 type Db = Pick<Prisma.TransactionClient, "seller" | "category">;
 
@@ -23,6 +23,14 @@ export function departmentsOf(shopType: string | null | undefined, alsoSell: rea
     if (name && name !== "Food" && !HIDDEN_DEPARTMENTS.has(name)) out.add(name);
   }
   return [...out];
+}
+
+/** The 16 super-categories a shop seller can pick (Food, the menu-based side, is not one of them). */
+export const SELLABLE_SUPERS: string[] = DEPARTMENT_ORDER.filter((n) => n !== "Food");
+
+/** What a seller's picker is built from: their own confirmed choice, else what their registration shop-type keys imply. */
+export function effectiveSupers(s: { shopType: string | null; alsoSellCategories: string[]; sellsSuperCategories: string[]; categoriesConfirmedAt: Date | null }): string[] {
+  return s.categoriesConfirmedAt ? s.sellsSuperCategories : departmentsOf(s.shopType, s.alsoSellCategories);
 }
 
 export type PickerRoot = {
@@ -45,7 +53,7 @@ export function allowedRoots<T extends PickerRoot>(roots: T[], picked: string[])
 /** The seller's allowed top-level categories, each carrying its super-category (null = not on any shelf yet). */
 export async function loadAllowedRoots(db: Db, sellerId: string) {
   const [seller, roots] = await Promise.all([
-    db.seller.findUnique({ where: { id: sellerId }, select: { shopType: true, alsoSellCategories: true } }),
+    db.seller.findUnique({ where: { id: sellerId }, select: { shopType: true, alsoSellCategories: true, sellsSuperCategories: true, categoriesConfirmedAt: true } }),
     db.category.findMany({
       where: { isActive: true, parentId: null },
       orderBy: { displayOrder: "asc" },
@@ -56,7 +64,7 @@ export async function loadAllowedRoots(db: Db, sellerId: string) {
     }),
   ]);
   const ordered = [...roots].sort((a, b) => (a.superCategory?.displayOrder ?? 1e9) - (b.superCategory?.displayOrder ?? 1e9) || a.displayOrder - b.displayOrder);
-  return allowedRoots(ordered, departmentsOf(seller?.shopType, seller?.alsoSellCategories));
+  return allowedRoots(ordered, seller ? effectiveSupers(seller) : []);
 }
 
 /** Throws if this seller may not file a product under top-level category `rootId`. */

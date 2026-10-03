@@ -1,14 +1,14 @@
 // Moves the catalogue onto the 18 super-categories (src/data/superCategories.ts):
 //   1. upsert the 18 supers with their departments;
 //   2. stationery roots (slug "stationery_*")  → Stationery & Office;
-//   3. every other root except the seasonal Diwali ones → Grocery & Food;
+//   3. every other active root → Grocery & Food;
 //   4. deactivate the retired old supers (never deleted, so it's reversible: set isActive back).
 // Products are untouched (they point at categories, not supers). Idempotent.
 //
 // DRY RUN BY DEFAULT. Add --apply to write.
 //   DATABASE_URL="<external URL>" npx tsx scripts/restructureSupers.ts --apply
 import { PrismaClient } from "@prisma/client";
-import { SUPER_CATEGORIES, RETIRED_SUPERS, DIWALI_ROOTS, STATIONERY_SUPER, DEFAULT_SUPER } from "../src/data/superCategories.js";
+import { SUPER_CATEGORIES, RETIRED_SUPERS, STATIONERY_SUPER, DEFAULT_SUPER } from "../src/data/superCategories.js";
 
 const prisma = new PrismaClient();
 const APPLY = process.argv.includes("--apply");
@@ -27,12 +27,12 @@ async function main() {
     }
   }
 
-  const roots = await prisma.category.findMany({ where: { parentId: null }, select: { id: true, slug: true, superCategory: { select: { slug: true } } } });
-  const target = (slug: string) => (slug.startsWith("stationery_") ? STATIONERY_SUPER : DIWALI_ROOTS.includes(slug) ? null : DEFAULT_SUPER);
+  const roots = await prisma.category.findMany({ where: { parentId: null, isActive: true }, select: { id: true, slug: true, superCategory: { select: { slug: true } } } });
+  const target = (slug: string) => (slug.startsWith("stationery_") ? STATIONERY_SUPER : DEFAULT_SUPER);
   let moved = 0;
   for (const r of roots) {
     const to = target(r.slug);
-    if (!to || r.superCategory?.slug === to) continue;
+    if (r.superCategory?.slug === to) continue;
     moved++;
     console.log(`root   ${r.slug.padEnd(34)} ${r.superCategory?.slug ?? "(none)"} → ${to}`);
     if (APPLY) await prisma.category.update({ where: { id: r.id }, data: { superCategoryId: ids.get(to)! } });

@@ -3,7 +3,7 @@
 // sellers may list in it. Applied by scripts/restructureSupers.ts; edit here or via the owner super-category PUT.
 //
 // Deliberate gaps: "Bakery & sweets" has no super (it gets its own section in the food interface); "Food"
-// (restaurants) runs on a menu; the seasonal "diwali" super is left alone and has no departments.
+// (restaurants) runs on a menu. Festivals (Diwali…) are COLLECTIONS the admin fills, never supers or categories.
 
 export const SUPER_CATEGORIES: { slug: string; name: string; departments: string[] }[] = [
   { slug: "grocery_food", name: "Grocery & Food", departments: ["Grocery"] },
@@ -30,10 +30,8 @@ export const SUPER_CATEGORIES: { slug: string; name: string; departments: string
 export const RETIRED_SUPERS = [
   "grocery", "grocery_kitchen", "snacks_drinks", "household_care", "fresh_and_dairy", "electronics",
   "stationery_school_writing", "stationery_art_craft", "stationery_office_business", "stationery_gifts_learning",
+  "diwali",
 ];
-
-/** Root categories that stay on the seasonal Diwali shelf instead of moving to Grocery & Food. */
-export const DIWALI_ROOTS = ["diwali", "spiritual_pooja_essential"];
 
 export const STATIONERY_SUPER = "stationery_office";
 export const DEFAULT_SUPER = "grocery_food"; // every non-stationery root that isn't seasonal

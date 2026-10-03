@@ -1,15 +1,15 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
 import prisma from "../lib/prisma.js";
-import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
+import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib/errors.js";
 import {
   firebaseAuthMiddleware,
   requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
 import { shapePartnerApplication } from "./partnerApplications.js";
-import { notifyPartnerApproved } from "../services/fcmNotifier.js";
-import { categoriesFromLead } from "../data/shopTypes.js";
+import { notifyPartnerApproved, notifyPartnerRejected } from "../services/fcmNotifier.js";
+import { sellerSetupFromLead } from "../data/shopTypes.js";
 
 // Owner inbox for "Partner with us" applications. Mounted at
 // /api/app/owner/partner-applications (Firebase-auth + OWNER, mirrors ownerQuotes).
@@ -56,7 +56,7 @@ async function emailIfFree(db: Pick<typeof prisma, "user">, email: string | null
   return clash && clash.id !== selfId ? null : e;
 }
 
-async function provisionSeller(app: { businessName: string; contactName: string; phone: string; email: string | null; gstin: string | null; category: string | null }): Promise<string | null> {
+export async function provisionSeller(app: { kind: string; businessName: string; contactName: string; phone: string; email: string | null; gstin: string | null; category: string | null }): Promise<string | null> {
   const phone = normalizePhone(app.phone);
   if (phone.length !== 10) return null; // shouldn't happen (already validated at submission), be defensive
 
@@ -81,7 +81,7 @@ async function provisionSeller(app: { businessName: string; contactName: string;
   }
 
   // What they ticked on the lead form becomes the wizard's starting selection (null = free text).
-  const cats = categoriesFromLead(app.category);
+  const setup = sellerSetupFromLead(app.kind, app.category);
   const slug = await uniqueSlug(slugify(app.businessName || app.contactName));
   return prisma.$transaction(async (tx) => {
     let userId: string;
@@ -106,7 +106,7 @@ async function provisionSeller(app: { businessName: string; contactName: string;
         status: "PENDING",
         onboardingStatus: "NOT_STARTED",
         gstin: app.gstin ?? null,
-        ...(cats ? { shopType: cats.shopType, alsoSellCategories: cats.alsoSell } : {}),
+        ...(setup ? { shopType: setup.shopType, alsoSellCategories: setup.alsoSell, vertical: setup.vertical } : {}),
       },
     });
     return userId;
@@ -192,30 +192,48 @@ async function review(
     const existing = await prisma.partnerApplication.findUnique({ where: { id } });
     if (!existing) throw new NotFoundError("Partner application", id);
 
+    // An approved lead already has a login + Seller/DeliveryProfile behind it; flipping the lead to
+    // REJECTED would leave the two disagreeing. Acting on the account is the seller queue's job.
+    if (status === "REJECTED" && existing.status === "APPROVED") {
+      throw new ConflictError("This application is already approved. Reject or suspend the seller from the KYC list instead.");
+    }
+
+    // RESTAURANT is a seller as far as accounts, pushes and wording go; only provisioning cares which.
+    const kind = existing.kind === "DELIVERY" ? "DELIVERY" : "SELLER";
     if (status === "APPROVED" && existing.status !== "APPROVED") {
-      // Best-effort — a provisioning hiccup must never block the owner from at least triaging the
-      // lead. If this throws, the lead still gets marked approved; the owner can create the
-      // seller/agent manually via the existing ownerSellers/ownerStaff screens as a fallback.
-      try {
-        const kind = existing.kind === "DELIVERY" ? "DELIVERY" : "SELLER";
-        const provisionedUserId = kind === "DELIVERY"
-          ? await provisionDeliveryRider({ contactName: existing.contactName, phone: existing.phone, email: existing.email })
-          : await provisionSeller({
-            businessName: existing.businessName,
-            contactName: existing.contactName,
-            phone: existing.phone,
-            email: existing.email,
-            gstin: existing.gstin,
-            category: existing.category,
-          });
-        // Fire-and-forget: a push must never fail the approval (same convention as every other
-        // notify* call here). Reaches them only if they already have the app — see the notifier.
-        if (provisionedUserId) {
-          notifyPartnerApproved(provisionedUserId, kind, "PROVISIONED")
-            .catch((e: unknown) => console.error("[background task failed]", e));
-        }
-      } catch (provisionErr) {
-        console.error("Partner application approval — provisioning failed:", provisionErr);
+      // ⚠️ NOT best-effort any more. This used to swallow a provisioning failure and still mark the
+      // lead APPROVED, so the applicant saw "You're approved" with no Seller row behind it. Now a
+      // failure returns an error and the lead stays PENDING, so the owner can simply tap Approve again
+      // (provisioning is idempotent: an already-provisioned phone returns null, nothing duplicated).
+      const provisionedUserId = kind === "DELIVERY"
+        ? await provisionDeliveryRider({ contactName: existing.contactName, phone: existing.phone, email: existing.email })
+        : await provisionSeller({
+          kind: existing.kind,
+          businessName: existing.businessName,
+          contactName: existing.contactName,
+          phone: existing.phone,
+          email: existing.email,
+          gstin: existing.gstin,
+          category: existing.category,
+        });
+      // Fire-and-forget: a push must never fail the approval (same convention as every other
+      // notify* call here). Reaches them only if they already have the app — see the notifier.
+      if (provisionedUserId) {
+        notifyPartnerApproved(provisionedUserId, kind, "PROVISIONED")
+          .catch((e: unknown) => console.error("[background task failed]", e));
+      }
+    }
+
+    if (status === "REJECTED" && existing.status !== "REJECTED") {
+      // The applicant signed in with this phone to file the lead, so an account normally exists. Tell
+      // them why — the status screen promises a notification on any update.
+      const phone = normalizePhone(existing.phone);
+      const applicant = phone.length === 10
+        ? await prisma.user.findFirst({ where: { phone: { in: [phone, `+91${phone}`, `91${phone}`] } }, select: { id: true } })
+        : null;
+      if (applicant) {
+        notifyPartnerRejected(applicant.id, kind, "LEAD", parsed.data.note)
+          .catch((e: unknown) => console.error("[background task failed]", e));
       }
     }
 

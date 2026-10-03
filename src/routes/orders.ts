@@ -36,6 +36,7 @@ import { loadCategoryRates } from "../services/categoryCommission.js";
 import { houseSellerIsSeparateEntity, isSameLegalEntity } from "../services/entitySplit.js";
 import { TCS_RATE_PCT } from "../data/taxRates.js";
 import { haversineKm } from "../lib/distance.js";
+import { intraStateCheck, GST_STATE_NAMES } from "../lib/stateCodes.js";
 import { getRiderRoute } from "../services/riderRoute.js";
 import { recordOrderEventAsync } from "../services/orderEvents.js";
 import { redeemCouponInTx } from "../services/coupons.js";
@@ -147,6 +148,25 @@ router.post("/", async (req: FirebaseAuthRequest, res: Response) => {
       const pincodeCfg = await prisma.storeConfig.findFirst({ select: { allowedPincodes: true } });
       if (pincodeCfg?.allowedPincodes.length && !pincodeCfg.allowedPincodes.includes(address.pincode)) {
         throw new ValidationError(`We don't deliver to pincode ${address.pincode} yet.`);
+      }
+    }
+
+    // A composition seller may not make inter-State supplies (Sec 10 CGST Act; the marketplace is told not to
+    // allow it either). Refuse a delivery outside the seller's own State, naming the seller so the customer can
+    // drop just those items. If either State can't be resolved the order goes through and is logged — a
+    // wrong block on made-up data is worse than a missed one (ponytail: a required address State closes it).
+    if (fulfillmentType === "DELIVERY" && address) {
+      const sellerIds = [...new Set(cartItems.map((c) => c.variant.product.sellerId).filter((x): x is string => !!x))];
+      const composition = sellerIds.length
+        ? await prisma.seller.findMany({ where: { id: { in: sellerIds }, gstScheme: "COMPOSITION" }, select: { name: true, gstin: true } })
+        : [];
+      for (const c of composition) {
+        const verdict = intraStateCheck(c.gstin, address.state);
+        if (verdict === "DIFFERENT") {
+          const home = GST_STATE_NAMES[(c.gstin ?? "").slice(0, 2)] ?? "their own state";
+          throw new ValidationError(`${c.name} can only deliver within ${home}. Remove their items from your cart, or choose an address in ${home}.`);
+        }
+        if (verdict === "UNKNOWN") console.warn(`[interstate] could not verify State for composition seller "${c.name}" vs address state "${address.state ?? ""}"`);
       }
     }
 

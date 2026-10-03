@@ -38,6 +38,8 @@ const completeCore = {
   name: "Raghav General Store",
   shopAddress: "12 Main Bazaar",
   gstin: "09ABCDE1234F2ZX",
+  // A real Seller row always carries this (column default REGULAR), so a "complete" fixture does too.
+  gstScheme: "REGULAR",
   pan: "ABCDE1234F",
   grievanceOfficerName: "Raghav",
   grievanceOfficerPhone: "9876543210",
@@ -359,5 +361,24 @@ describe("mergeCategoryData", () => {
       pharmacistName: "S. Verma",
     });
     expect(mergeCategoryData(null, null, PHARMACY).merged).toBeNull();
+  });
+});
+
+
+describe("GST scheme question + bakery split", () => {
+  const fieldKeys = (key: string, vertical: "SHOP" | "FOOD") =>
+    stepsFor(effectiveProfile(key, vertical, [])).flatMap((st) => st.fields.map((f) => f.key));
+
+  it("shops are asked how they pay GST; kitchens are not (restaurant tax is a separate, CA-gated call)", () => {
+    expect(fieldKeys("GENERAL_STORE", "SHOP")).toContain("gstScheme");
+    expect(fieldKeys("RESTAURANT", "FOOD")).not.toContain("gstScheme");
+    expect(fieldKeys("BAKERY", "FOOD")).not.toContain("gstScheme");
+  });
+
+  it("bakery, cake shop and sweet shop are kitchens; prepacked confectionery is a shop under Grocery", () => {
+    for (const k of ["BAKERY", "CAKE_SHOP", "SWEET_SHOP"]) {
+      expect(profileFor(k, "SHOP")).toMatchObject({ vertical: "FOOD", catalogueModel: "MENU", department: "Food" });
+    }
+    expect(profileFor("CONFECTIONERY", "SHOP")).toMatchObject({ vertical: "SHOP", catalogueModel: "STANDARD", department: "Grocery & Food" });
   });
 });

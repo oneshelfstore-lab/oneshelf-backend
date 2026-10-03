@@ -1,13 +1,13 @@
 import { Router, type Response } from "express";
 import { z } from "zod";
 import prisma from "../lib/prisma.js";
-import { sendError, ValidationError, NotFoundError } from "../lib/errors.js";
+import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib/errors.js";
 import {
   firebaseAuthMiddleware,
   requireAppRole,
   type FirebaseAuthRequest,
 } from "../middleware/firebaseAuth.js";
-import { notifyPartnerApproved } from "../services/fcmNotifier.js";
+import { notifyPartnerApproved, notifyPartnerRejected } from "../services/fcmNotifier.js";
 import { signDocFields, SELLER_KYC_DOC_FIELDS, DELIVERY_KYC_DOC_FIELDS } from "../lib/storageUrls.js";
 
 // Owner's onboarding review queue (Phase 1, SELLER_DELIVERY_ONBOARDING_PLAN.md). Mounted at
@@ -43,13 +43,18 @@ async function shapeSellerRow(s: {
   grievanceOfficerPhone: string | null; grievanceOfficerEmail: string | null; shopAddress: string | null;
   city: string | null; onboardingStatus: string; onboardingRejectionReason: string | null;
   createdAt: Date; ownerUser: { name: string; phone: string | null } | null;
-  commissionPct?: unknown; offeredCommissionPct?: unknown; alsoSellCategories?: string[];
+  commissionPct?: unknown; offeredCommissionPct?: unknown; alsoSellCategories?: string[]; gstScheme?: string;
 }) {
   const consents = await prisma.consentRecord.findMany({
     where: { subjectType: "SELLER", subjectId: s.id },
     orderBy: { grantedAt: "desc" },
     select: { consentType: true, version: true, granted: true, grantedAt: true },
   });
+  // GSTIN isn't unique in the schema (branches of one firm can legitimately share it), so surface a
+  // shared one to the reviewer instead of blocking: two unrelated shops on one GSTIN is the case to catch.
+  const gstinSharedWith = s.gstin
+    ? (await prisma.seller.findMany({ where: { gstin: s.gstin, id: { not: s.id } }, select: { name: true } })).map((o) => o.name)
+    : [];
   return {
     type: "seller" as const,
     id: s.id,
@@ -57,6 +62,9 @@ async function shapeSellerRow(s: {
     contactName: s.ownerUser?.name ?? null,
     contactPhone: s.ownerUser?.phone ?? s.phone,
     gstin: s.gstin,
+    // The owner confirms this against the GST portal before approving: composition = no GST on their bills.
+    gstScheme: s.gstScheme === "COMPOSITION" ? "Composition" : "Regular",
+    gstinSharedWith,
     pan: s.pan,
     fssaiNumber: s.fssaiNumber,
     fssaiExpiry: s.fssaiExpiry,
@@ -330,22 +338,36 @@ router.post("/:type/:id/reject", async (req: FirebaseAuthRequest, res: Response)
     if (!parsed.success) throw new ValidationError("A rejection reason is required", parsed.error.errors);
 
     if (type === "seller") {
-      const seller = await prisma.seller.findUnique({ where: { id }, select: { id: true } });
+      const seller = await prisma.seller.findUnique({ where: { id }, select: { id: true, onboardingStatus: true, ownerUserId: true } });
       if (!seller) throw new NotFoundError("Seller", id);
+      // Rejecting an APPROVED seller only flips onboardingStatus: status stays APPROVED and every
+      // product stays live, so the label and reality would disagree. Suspending is the real "stop".
+      if (seller.onboardingStatus === "APPROVED") {
+        throw new ConflictError("This seller is already approved. Suspend them from the Sellers screen instead of rejecting.");
+      }
       const updated = await prisma.seller.update({
         where: { id },
         data: { onboardingStatus: "REJECTED", onboardingRejectionReason: parsed.data.reason.trim() },
       });
+      if (seller.ownerUserId) {
+        notifyPartnerRejected(seller.ownerUserId, "SELLER", "KYC", parsed.data.reason)
+          .catch((e: unknown) => console.error("[background task failed]", e));
+      }
       return res.json({ success: true, data: { id: updated.id, onboardingStatus: updated.onboardingStatus } });
     }
 
     if (type === "delivery") {
       const profile = await prisma.deliveryProfile.findUnique({ where: { id } });
       if (!profile) throw new NotFoundError("Delivery profile", id);
+      if (profile.onboardingStatus === "APPROVED") {
+        throw new ConflictError("This rider is already approved. Remove them from the delivery team instead of rejecting.");
+      }
       const updated = await prisma.deliveryProfile.update({
         where: { id },
         data: { onboardingStatus: "REJECTED", rejectionReason: parsed.data.reason.trim() },
       });
+      notifyPartnerRejected(profile.userId, "DELIVERY", "KYC", parsed.data.reason)
+        .catch((e: unknown) => console.error("[background task failed]", e));
       return res.json({ success: true, data: { id: updated.id, onboardingStatus: updated.onboardingStatus } });
     }
 

@@ -82,6 +82,7 @@ export const CATALOG: Record<string, CatalogEntry> = {
 
   // ── Account / onboarding / catalog ──
   tier_up: { category: "ACCOUNT", kind: "INFO", topic: "loyalty" },
+  partner_rejected: { category: "ACCOUNT", kind: "INFO", severity: "HIGH", action: "OPEN_ONBOARDING" },
   partner_approved: { category: "ACCOUNT", kind: (d) => (d.stage === "PROVISIONED" ? "ACTION" : "INFO"), severity: "HIGH", action: "OPEN_ONBOARDING" },
   product_decision: { category: "INVENTORY", kind: (d) => (d.approved === "false" ? "ACTION" : "INFO"), action: "OPEN_PRODUCTS" },
   back_in_stock: { category: "INVENTORY", kind: "INFO", topic: "back_in_stock" },

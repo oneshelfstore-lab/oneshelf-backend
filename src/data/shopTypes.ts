@@ -38,6 +38,8 @@ export interface RequirementField {
   type: FieldType;
   /** Hard-blocks POST /seller/me/onboarding/submit when blank. */
   required: boolean;
+  /** Asked of shops only — dropped for a kitchen (restaurant tax is a separate, CA-gated question). */
+  shopOnly?: boolean;
   /** Shown under the input. Format hints and — for the fields people hesitate over — why we ask. */
   helper?: string;
   /** Required when `type` is "choice"; the allowed answers, in display order. */
@@ -167,6 +169,19 @@ export const CORE_STEPS: RequirementStep[] = [
         // document a GSTIN-less seller's sales go out under), not an onboarding one. Separate call.
         helper: "15 characters, as printed on your GST certificate.",
         sellerColumn: "gstin",
+      },
+      // Maps to Seller.gstScheme (REGULAR | COMPOSITION). The answer decides the invoice a customer gets: a
+      // composition dealer MAY NOT charge GST, so a wrong default is an illegal tax invoice, not a typo.
+      // Locked after approval (KYC_SENSITIVE_FIELDS) and shown to the owner on the approval card.
+      {
+        key: "gstScheme",
+        label: "How do you pay GST?",
+        type: "choice",
+        required: true,
+        shopOnly: true,
+        options: ["Regular", "Composition"],
+        helper: "Regular: you charge GST on your bills. Composition: a flat-rate scheme, and you can't charge GST on bills. Not sure? Ask your CA. We check it against the GST portal.",
+        sellerColumn: "gstScheme",
       },
       { key: "pan", label: "PAN", type: "text", required: true, helper: "10 characters, e.g. ABCDE1234F.", sellerColumn: "pan" },
       { key: "gstinDocUrl", label: "GST certificate", type: "doc", required: false, sellerColumn: "gstinDocUrl" },
@@ -341,17 +356,21 @@ export const SHOP_TYPES: ShopTypeProfile[] = [
   shop("EGGS", "Egg shop", "Fresh & Dairy", { extraSteps: [FSSAI_STEP, FRESH_STEP] }),
   shop("MEAT_FISH", "Meat, fish & poultry", "Fresh & Dairy", { variableWeight: true, extraSteps: [FSSAI_STEP, FRESH_STEP] }),
 
-  // Bakery & sweets
-  shop("BAKERY", "Bakery", "Food", { extraSteps: [FSSAI_STEP] }),
-  shop("CAKE_SHOP", "Cake shop", "Food", { extraSteps: [FSSAI_STEP] }),
-  shop("SWEET_SHOP", "Mithai / sweet shop", "Food", { variableWeight: true, extraSteps: [FSSAI_STEP] }),
-  shop("CONFECTIONERY", "Confectionery", "Food", { extraSteps: [FSSAI_STEP] }),
+  // Packaged bakery & sweets: only PREPACKED goods are sold as a shop (standard catalogue, under Grocery).
+  // Anything baked or made to order is a kitchen — see the Food block below.
+  shop("CONFECTIONERY", "Packaged bakery & confectionery", "Grocery & Food", { extraSteps: [FSSAI_STEP] }),
 
-  // Food (menu-based — these route to the Food vertical's MenuItem catalogue, not CatalogProduct)
+  // Food (menu-based — these route to the Food vertical's MenuItem catalogue, not CatalogProduct).
+  // Owner decision Oct 3 2026: bakeries, cake shops and sweet shops are FOOD, not shop.
+  // ⚠️ BAKERY / CAKE_SHOP / SWEET_SHOP used to be shop() types. A seller stored with one of those keys and
+  // vertical SHOP now resolves to a FOOD profile — flip `vertical` for any such test seller (owner Sellers screen).
   kitchen("RESTAURANT", "Restaurant"),
   kitchen("FAST_FOOD", "Fast food"),
   kitchen("CAFE", "Café"),
   kitchen("JUICE_BAR", "Juice & beverages"),
+  kitchen("BAKERY", "Bakery"),
+  kitchen("CAKE_SHOP", "Cake shop"),
+  kitchen("SWEET_SHOP", "Mithai / sweet shop"),
 
   // Beauty
   shop("COSMETICS", "Cosmetics store", "Personal Care & Beauty"),
@@ -492,6 +511,29 @@ export function categoriesFromLead(raw: string | null | undefined): { shopType: 
 }
 
 /**
+ * What a partner-application lead becomes at approval: the trade, the extra trades, and — the part that
+ * used to be missing — the `vertical`. A "Food" lead stored shopType=RESTAURANT but left vertical=SHOP, so a
+ * self-onboarded restaurant landed in the shop dashboard instead of the menu one. The vertical now comes
+ * from the resolved trade's own profile, so a legacy SELLER lead that ticked Food gets it right too.
+ *
+ * RESTAURANT leads carry a kitchen type (key or label: "BAKERY", "Café") in `category`; anything else
+ * falls back to a plain restaurant. null = a shop lead that named no usable category (the wizard asks).
+ */
+export function sellerSetupFromLead(
+  kind: string,
+  raw: string | null | undefined,
+): { shopType: string; alsoSell: string[]; vertical: "SHOP" | "FOOD" } | null {
+  if (kind === "RESTAURANT") {
+    const word = String(raw ?? "").trim().toLowerCase();
+    const picked = SHOP_TYPES.find((t) => t.vertical === "FOOD" && (t.key.toLowerCase() === word || t.label.toLowerCase() === word));
+    return { shopType: picked?.key ?? "RESTAURANT", alsoSell: [], vertical: "FOOD" };
+  }
+  const cats = categoriesFromLead(raw);
+  if (!cats) return null;
+  return { ...cats, vertical: profileFor(cats.shopType, "SHOP").vertical };
+}
+
+/**
  * The profile for a seller's stored shopType.
  *
  * ⚠️ Falls back on `vertical` when shopType is null, which is every seller that existed before this
@@ -515,7 +557,11 @@ export function isKnownShopType(key: string): boolean {
  */
 export function stepsFor(profile: ShopTypeProfile): RequirementStep[] {
   return [...CORE_STEPS, ...(profile.extraSteps ?? [])]
-    .map((s) => ({ ...s, stage: s.stage ?? ("verification" as StepStage) }))
+    .map((s) => ({
+      ...s,
+      stage: s.stage ?? ("verification" as StepStage),
+      fields: s.fields.filter((f) => !(f.shopOnly && profile.vertical === "FOOD")),
+    }))
     .sort((a, b) => STAGE_ORDER.indexOf(a.stage) - STAGE_ORDER.indexOf(b.stage));
 }
 

@@ -100,6 +100,8 @@ async function shapeSellerProfile(s: any, agreementCurrent: boolean) {
     lng: s.lng != null ? Number(s.lng) : null,
     phone: s.phone,
     gstin: s.gstin,
+    // Shown as the wizard's chip label ("Regular" | "Composition"); the column is the REGULAR | COMPOSITION enum.
+    gstScheme: s.gstScheme === "COMPOSITION" ? "Composition" : "Regular",
     pan: s.pan,
     bankDetails: s.bankDetails ?? null,
     // Settlement bank account for payouts (§ PUT /bank-details below). Masked here — the raw
@@ -221,6 +223,8 @@ const updateSchema = z.object({
   lng: z.number().optional().nullable(),
   phone: z.string().max(15).optional().nullable(),
   gstin: optionalGstin,
+  // Chip label in, enum out. A composition dealer may not charge GST, so this picks the invoice type.
+  gstScheme: z.enum(["Regular", "Composition"]).optional().transform((v) => (v === undefined ? undefined : v === "Composition" ? ("COMPOSITION" as const) : ("REGULAR" as const))),
   pan: optionalPanSchema,
   bankDetails: z.any().optional().nullable(),
   // Onboarding KYC (Phase 1) — document fields are Firebase Storage URLs, uploaded client-side
@@ -270,7 +274,7 @@ const updateSchema = z.object({
 // things the owner reviewed to approve them. Silently letting these change post-approval defeats
 // the point of the review (see overwritesVerifiedField() below).
 const KYC_SENSITIVE_FIELDS = [
-  "gstin", "pan", "fssaiNumber", "fssaiExpiry",
+  "gstin", "gstScheme", "pan", "fssaiNumber", "fssaiExpiry",
   "gstinDocUrl", "panDocUrl", "fssaiDocUrl", "bankProofUrl", "bankDetails",
   // Switching trade post-approval is the sharpest version of this problem: a shop approved as a
   // general store could otherwise re-badge itself a pharmacy and start listing medicines under an
@@ -354,7 +358,7 @@ router.put("/", async (req: SellerRequest, res: Response) => {
       where: { id: req.sellerId },
       select: {
         onboardingStatus: true, everApproved: true, kycEditUnlocked: true,
-        gstin: true, pan: true, fssaiNumber: true, fssaiExpiry: true,
+        gstin: true, gstScheme: true, pan: true, fssaiNumber: true, fssaiExpiry: true,
         gstinDocUrl: true, panDocUrl: true, fssaiDocUrl: true, bankProofUrl: true, bankDetails: true,
         shopType: true, categoryData: true, vertical: true, alsoSellCategories: true, phone: true,
       },
@@ -429,6 +433,9 @@ router.put("/", async (req: SellerRequest, res: Response) => {
       where: { id: req.sellerId },
       data: {
         ...scalarUpdates,
+        // The trade decides the vertical (shop dashboard vs menu dashboard). Left alone, picking a kitchen
+        // type here changed shopType but not vertical, so the seller kept the wrong dashboard.
+        ...(nextShopType && profile.vertical !== current.vertical ? { vertical: profile.vertical } : {}),
         ...(parsed.data.categoryData !== undefined
           ? { categoryData: categoryDataWrite(mergedCategoryData) }
           : {}),

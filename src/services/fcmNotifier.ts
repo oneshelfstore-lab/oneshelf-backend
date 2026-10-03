@@ -658,6 +658,28 @@ export async function notifyPartnerApproved(
   });
 }
 
+/**
+ * A partner application (stage LEAD) or their KYC documents (stage KYC) were turned down. The reason is
+ * in the body so the applicant isn't left guessing — the app also shows it on their status screen.
+ */
+export async function notifyPartnerRejected(
+  userId: string,
+  kind: "SELLER" | "DELIVERY",
+  stage: "LEAD" | "KYC",
+  reason: string,
+) {
+  const role = kind === "DELIVERY" ? "delivery partner" : "seller";
+  await toUser(userId, {
+    type: "partner_rejected",
+    kind,
+    stage,
+    title: stage === "LEAD" ? "Your application wasn't approved" : "Your documents need changes",
+    body: reason.trim()
+      ? `${reason.trim()} Open the app to ${stage === "LEAD" ? "apply again" : "fix it and resubmit"}.`
+      : `Open the app to see what to change for your ${role} account.`,
+  });
+}
+
 export async function notifyProductDecision(userId: string, productName: string, approved: boolean, reason?: string) {
   await toUser(userId, {
     type: "product_decision",

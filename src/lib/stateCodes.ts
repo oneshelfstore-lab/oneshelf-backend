@@ -53,6 +53,39 @@ export const GST_STATE_NAMES: Record<string, string> = {
 /** Legacy fallback used only when the Company GSTIN is unset/placeholder (preserves pre-P0-1 output). */
 export const DEFAULT_STATE_CODE = "09";
 
+const normState = (s: string) => s.toLowerCase().replace(/&/g, "and").replace(/[^a-z]/g, "");
+// Names people actually have on an address that differ from the GST list (old names, short forms).
+const STATE_ALIASES: Record<string, string> = {
+  orissa: "21", uttaranchal: "05", pondicherry: "34", nctofdelhi: "07", newdelhi: "07",
+  jammuandkashmir: "01", jammukashmir: "01", andamanandnicobar: "35", andamannicobarislands: "35",
+  dadraandnagarhaveli: "26", damananddiu: "26", dadranagarhavelianddamandiu: "26",
+};
+const STATE_BY_NAME = new Map<string, string>([
+  ...Object.entries(GST_STATE_NAMES)
+    .filter(([code, name]) => !name.includes("(old)") && code !== "97" && code !== "99")
+    .map(([code, name]) => [normState(name), code] as [string, string]),
+  ...Object.entries(STATE_ALIASES),
+]);
+
+/** GST state code for a free-text state name off an address ("Uttar Pradesh", "orissa"); null = not recognised. */
+export function stateCodeFromName(name?: string | null): string | null {
+  return STATE_BY_NAME.get(normState(name ?? "")) ?? null;
+}
+
+/**
+ * Is a delivery to [addressState] in the SAME state as a seller registered under [sellerGstin]?
+ * "UNKNOWN" when either side can't be resolved (no/invalid GSTIN, blank or unrecognised address state) —
+ * callers decide whether unknown passes. Unlike [stateCodeFromGstin] this never falls back to the store's
+ * default state, because a guess here would block or allow a real order on made-up data.
+ */
+export function intraStateCheck(sellerGstin: string | null | undefined, addressState: string | null | undefined): "SAME" | "DIFFERENT" | "UNKNOWN" {
+  const code = (sellerGstin ?? "").trim().slice(0, 2);
+  const sellerState = /^\d{2}$/.test(code) && GST_STATE_NAMES[code] ? code : null;
+  const buyerState = stateCodeFromName(addressState);
+  if (!sellerState || !buyerState) return "UNKNOWN";
+  return sellerState === buyerState ? "SAME" : "DIFFERENT";
+}
+
 /** The 2-digit GST state code carried by a GSTIN's first two characters. */
 export function stateCodeFromGstin(gstin?: string | null): string {
   const code = (gstin ?? "").trim().slice(0, 2);

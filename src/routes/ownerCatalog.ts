@@ -460,8 +460,16 @@ router.patch("/:id/toggle", async (req: FirebaseAuthRequest, res: Response) => {
   try {
     const productId = String(req.params.id);
     const { isActive } = z.object({ isActive: z.boolean() }).parse(req.body);
-    const existing = await prisma.catalogProduct.findUnique({ where: { id: productId }, include: { seller: { select: { ownerUserId: true } } } });
+    const existing = await prisma.catalogProduct.findUnique({ where: { id: productId }, include: { seller: { select: { ownerUserId: true, name: true, onboardingStatus: true, everApproved: true } } } });
     if (!existing) throw new NotFoundError("Product", productId);
+
+    // A product can only go live for a seller whose KYC the owner has approved (or who was approved
+    // once and is mid a change-request review — those stay live). Without this, approving a product
+    // from a rejected / not-yet-verified seller put it straight in front of customers.
+    const s = existing.seller;
+    if (isActive && s && s.onboardingStatus !== "APPROVED" && !s.everApproved) {
+      throw new ValidationError(`${s.name} hasn't been approved as a seller yet. Approve their application first, then this product.`);
+    }
 
     // Turning a submitted product ON is the approval (this is what the app's Approve button calls).
     const approving = isActive && existing.approvalStatus !== "APPROVED";

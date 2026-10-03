@@ -11,7 +11,9 @@ import {
 } from "../data/onboardingAgreements.js";
 import {
   SHOP_TYPES,
+  DEPARTMENT_ORDER,
   DEPARTMENT_REP,
+  HIDDEN_DEPARTMENTS,
   DEPARTMENT_EXTRAS,
   EXCLUSIVE_DEPARTMENTS,
   isKnownShopType,
@@ -55,6 +57,7 @@ router.get("/shop-types", (_req: Request, res: Response) => {
   // lines inside the department, asked as plain yes/no.
   const departments: { department: string; repKey: string; exclusive: boolean; extras: unknown[]; shopTypes: unknown[] }[] = [];
   for (const s of SHOP_TYPES) {
+    if (HIDDEN_DEPARTMENTS.has(s.department)) continue; // retired trades (fashion) stay in the registry for old sellers but are not offered
     let group = departments.find((d) => d.department === s.department);
     if (!group) {
       group = {
@@ -75,6 +78,8 @@ router.get("/shop-types", (_req: Request, res: Response) => {
       regulated: Boolean(s.regulated),
     });
   }
+  // The 16 super-categories in their fixed order, Food last.
+  departments.sort((a, b) => DEPARTMENT_ORDER.indexOf(a.department) - DEPARTMENT_ORDER.indexOf(b.department));
   res.json({ success: true, data: { departments } });
 });
 

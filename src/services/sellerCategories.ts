@@ -1,48 +1,44 @@
 // Which top-level categories a seller may list in. A seller ticks departments at registration ("Grocery",
-// "Books & stationery"…); the server keeps them as shopType + alsoSellCategories (data/shopTypes.ts). A
-// super-category lists the departments allowed to sell in it (SuperCategory.departments, set from the backend),
-// so adding a new super later needs no code change.
+// "Books & Education"…) — the 16 super-categories; the server keeps them as shopType + alsoSellCategories
+// (data/shopTypes.ts, DEPARTMENT_REP). A seller sees exactly the roots on the supers they picked.
 //
 // Fail-open on purpose: a seller whose departments match no super-category (a trade nobody has built a shelf for
 // yet, or an old seller with no shopType) sees everything rather than an empty, un-saveable picker.
 
 import type { Prisma } from "@prisma/client";
 import { ValidationError } from "../lib/errors.js";
-import { DEPARTMENT_REP } from "../data/shopTypes.js";
+import { HIDDEN_DEPARTMENTS, SHOP_TYPES } from "../data/shopTypes.js";
 
 type Db = Pick<Prisma.TransactionClient, "seller" | "category">;
 
-// Licensed lines are asked inside the Health department (DEPARTMENT_EXTRAS), so they map back to it.
-const KEY_TO_DEPARTMENT: Record<string, string> = {
-  ...Object.fromEntries(Object.entries(DEPARTMENT_REP).map(([dept, key]) => [key, dept])),
-  PHARMACY: "Health",
-  MEDICAL_DEVICE: "Health",
-};
+// Every registry shop type belongs to one super-category (its `department`, which since the 16-super picker IS the
+// super-category's name). Retired ones (fashion) and the menu-based Food trades match no super and are simply ignored.
+const KEY_TO_SUPER = new Map(SHOP_TYPES.map((s) => [s.key, s.department]));
 
-/** Registration departments a seller ticked, recovered from the stored shop type + also-sell keys. */
+/** Super-category names a seller registered for, recovered from their stored shop type + also-sell keys. */
 export function departmentsOf(shopType: string | null | undefined, alsoSell: readonly string[] | null | undefined): string[] {
   const out = new Set<string>();
   for (const key of [shopType, ...(alsoSell ?? [])]) {
-    const dept = key ? KEY_TO_DEPARTMENT[key] : undefined;
-    if (dept) out.add(dept);
+    const name = key ? KEY_TO_SUPER.get(key) : undefined;
+    if (name && name !== "Food" && !HIDDEN_DEPARTMENTS.has(name)) out.add(name);
   }
   return [...out];
 }
 
 export type PickerRoot = {
   id: string; slug: string; name: string; nameHi: string | null; imageUrl: string | null; displayOrder: number;
-  superCategory: { id: string; slug: string; name: string; departments: string[]; isActive: boolean } | null;
+  superCategory: { id: string; slug: string; name: string; isActive: boolean } | null;
 };
 
 /**
- * Pure: the roots a seller with these departments may use. A super with no departments (a seasonal "Diwali" shelf) or
- * an inactive one is never sellable, not even by the fail-open fallback. Empty departments, or no match at all →
- * every sellable root (including ones on no shelf yet).
+ * Pure: the roots a seller who registered for these super-categories may use — those on a picked, active super. No picks,
+ * or none matching any active super → every root on an active super plus roots on no super yet (fail open, so the picker
+ * is never empty).
  */
-export function allowedRoots<T extends PickerRoot>(roots: T[], departments: string[]): T[] {
-  const sellable = roots.filter((r) => !r.superCategory || (r.superCategory.isActive && r.superCategory.departments.length > 0));
-  if (departments.length === 0) return sellable;
-  const allowed = sellable.filter((r) => r.superCategory?.departments.some((d) => departments.includes(d)));
+export function allowedRoots<T extends PickerRoot>(roots: T[], picked: string[]): T[] {
+  const sellable = roots.filter((r) => !r.superCategory || r.superCategory.isActive);
+  if (picked.length === 0) return sellable;
+  const allowed = sellable.filter((r) => r.superCategory && picked.includes(r.superCategory.name));
   return allowed.length > 0 ? allowed : sellable;
 }
 
@@ -55,7 +51,7 @@ export async function loadAllowedRoots(db: Db, sellerId: string) {
       orderBy: { displayOrder: "asc" },
       select: {
         id: true, slug: true, name: true, nameHi: true, imageUrl: true, displayOrder: true,
-        superCategory: { select: { id: true, slug: true, name: true, departments: true, isActive: true, displayOrder: true } },
+        superCategory: { select: { id: true, slug: true, name: true, isActive: true, displayOrder: true } },
       },
     }),
   ]);

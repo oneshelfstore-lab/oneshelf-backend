@@ -332,20 +332,20 @@ function kitchen(key: string, label: string): ShopTypeProfile {
 
 export const SHOP_TYPES: ShopTypeProfile[] = [
   // Grocery
-  shop("GENERAL_STORE", "Kirana / general store", "Grocery", { extraSteps: [FSSAI_STEP] }),
-  shop("SUPERMARKET", "Supermarket", "Grocery", { extraSteps: [FSSAI_STEP] }),
+  shop("GENERAL_STORE", "Kirana / general store", "Grocery & Food", { extraSteps: [FSSAI_STEP] }),
+  shop("SUPERMARKET", "Supermarket", "Grocery & Food", { extraSteps: [FSSAI_STEP] }),
 
   // Fresh
-  shop("FRUIT_VEG", "Fruit & vegetable shop", "Fresh", { variableWeight: true, extraSteps: [FSSAI_STEP, FRESH_STEP] }),
-  shop("DAIRY", "Dairy shop", "Fresh", { extraSteps: [FSSAI_STEP, FRESH_STEP] }),
-  shop("EGGS", "Egg shop", "Fresh", { extraSteps: [FSSAI_STEP, FRESH_STEP] }),
-  shop("MEAT_FISH", "Meat, fish & poultry", "Fresh", { variableWeight: true, extraSteps: [FSSAI_STEP, FRESH_STEP] }),
+  shop("FRUIT_VEG", "Fruit & vegetable shop", "Fresh & Dairy", { variableWeight: true, extraSteps: [FSSAI_STEP, FRESH_STEP] }),
+  shop("DAIRY", "Dairy shop", "Fresh & Dairy", { extraSteps: [FSSAI_STEP, FRESH_STEP] }),
+  shop("EGGS", "Egg shop", "Fresh & Dairy", { extraSteps: [FSSAI_STEP, FRESH_STEP] }),
+  shop("MEAT_FISH", "Meat, fish & poultry", "Fresh & Dairy", { variableWeight: true, extraSteps: [FSSAI_STEP, FRESH_STEP] }),
 
   // Bakery & sweets
-  shop("BAKERY", "Bakery", "Bakery & sweets", { extraSteps: [FSSAI_STEP] }),
-  shop("CAKE_SHOP", "Cake shop", "Bakery & sweets", { extraSteps: [FSSAI_STEP] }),
-  shop("SWEET_SHOP", "Mithai / sweet shop", "Bakery & sweets", { variableWeight: true, extraSteps: [FSSAI_STEP] }),
-  shop("CONFECTIONERY", "Confectionery", "Bakery & sweets", { extraSteps: [FSSAI_STEP] }),
+  shop("BAKERY", "Bakery", "Food", { extraSteps: [FSSAI_STEP] }),
+  shop("CAKE_SHOP", "Cake shop", "Food", { extraSteps: [FSSAI_STEP] }),
+  shop("SWEET_SHOP", "Mithai / sweet shop", "Food", { variableWeight: true, extraSteps: [FSSAI_STEP] }),
+  shop("CONFECTIONERY", "Confectionery", "Food", { extraSteps: [FSSAI_STEP] }),
 
   // Food (menu-based — these route to the Food vertical's MenuItem catalogue, not CatalogProduct)
   kitchen("RESTAURANT", "Restaurant"),
@@ -354,62 +354,62 @@ export const SHOP_TYPES: ShopTypeProfile[] = [
   kitchen("JUICE_BAR", "Juice & beverages"),
 
   // Beauty
-  shop("COSMETICS", "Cosmetics store", "Beauty"),
-  shop("PERSONAL_CARE", "Beauty & personal care", "Beauty"),
+  shop("COSMETICS", "Cosmetics store", "Personal Care & Beauty"),
+  shop("PERSONAL_CARE", "Beauty & personal care", "Personal Care & Beauty"),
 
   // Fashion
   shop("CLOTHING", "Clothing store", "Fashion"),
   shop("FOOTWEAR", "Footwear store", "Fashion"),
-  shop("ACCESSORIES", "Fashion accessories", "Fashion"),
-  shop("BAGS", "Bags & luggage", "Fashion"),
+  shop("ACCESSORIES", "Fashion accessories", "Gifts & Lifestyle"),
+  shop("BAGS", "Bags & luggage", "Gifts & Lifestyle"),
 
   // Books & stationery
-  shop("STATIONERY", "Stationery shop", "Books & stationery"),
-  shop("BOOKS", "Book store", "Books & stationery"),
+  shop("STATIONERY", "Stationery shop", "Stationery & Office"),
+  shop("BOOKS", "Book store", "Books & Education"),
 
   // Toys & gifts
-  shop("TOYS", "Toy store", "Toys & gifts"),
-  shop("GIFTS", "Gift shop", "Toys & gifts"),
-  shop("PARTY", "Party supplies", "Toys & gifts"),
+  shop("TOYS", "Toy store", "Toys & Games"),
+  shop("GIFTS", "Gift shop", "Gifts & Lifestyle"),
+  shop("PARTY", "Party supplies", "Gifts & Lifestyle"),
 
   // Electronics — no extra paperwork; warranty/IMEI are per-product, not per-seller.
-  shop("MOBILE", "Mobile shop", "Electronics"),
-  shop("COMPUTER", "Computer store", "Electronics"),
-  shop("ELECTRONICS", "Electronics store", "Electronics"),
+  shop("MOBILE", "Mobile shop", "Electronics & Accessories"),
+  shop("COMPUTER", "Computer store", "Electronics & Accessories"),
+  shop("ELECTRONICS", "Electronics store", "Electronics & Accessories"),
 
   // Health
-  shop("PHARMACY", "Pharmacy", "Health", { regulated: true, extraSteps: [PHARMACY_STEP] }),
-  shop("MEDICAL_DEVICE", "Medical device store", "Health", { regulated: true, extraSteps: [MEDICAL_DEVICE_STEP] }),
-  shop("OPTICAL", "Optical shop", "Health"),
-  shop("MEDICAL_SUPPLIES", "Medical supplies", "Health"),
+  shop("PHARMACY", "Pharmacy", "Health & Wellness", { regulated: true, extraSteps: [PHARMACY_STEP] }),
+  shop("MEDICAL_DEVICE", "Medical device store", "Health & Wellness", { regulated: true, extraSteps: [MEDICAL_DEVICE_STEP] }),
+  shop("OPTICAL", "Optical shop", "Health & Wellness"),
+  shop("MEDICAL_SUPPLIES", "Medical supplies", "Health & Wellness"),
 
   // Baby & kids
-  shop("BABY_STORE", "Baby store", "Baby & kids"),
-  shop("BABY_FOOD", "Baby food", "Baby & kids", { extraSteps: [FSSAI_STEP] }),
-  shop("KIDS", "Kids store", "Baby & kids"),
+  shop("BABY_STORE", "Baby store", "Baby & Kids"),
+  shop("BABY_FOOD", "Baby food", "Baby & Kids", { extraSteps: [FSSAI_STEP] }),
+  shop("KIDS", "Kids store", "Baby & Kids"),
 
   // Home
-  shop("HOME_KITCHEN", "Home & kitchen", "Home"),
-  shop("HOME_DECOR", "Home decor", "Home"),
-  shop("FURNITURE", "Furniture store", "Home"),
-  shop("HOUSEHOLD", "Plastic & household", "Home"),
+  shop("HOME_KITCHEN", "Home & kitchen", "Home & Kitchen"),
+  shop("HOME_DECOR", "Home decor", "Home & Kitchen"),
+  shop("FURNITURE", "Furniture store", "Home & Kitchen"),
+  shop("HOUSEHOLD", "Plastic & household", "Cleaning & Household"),
 
   // Hardware
-  shop("HARDWARE", "Hardware store", "Hardware"),
-  shop("ELECTRICAL", "Electrical store", "Hardware"),
-  shop("PLUMBING", "Plumbing store", "Hardware"),
-  shop("PAINT", "Paint store", "Hardware"),
+  shop("HARDWARE", "Hardware store", "Hardware & Electrical"),
+  shop("ELECTRICAL", "Electrical store", "Hardware & Electrical"),
+  shop("PLUMBING", "Plumbing store", "Hardware & Electrical"),
+  shop("PAINT", "Paint store", "Hardware & Electrical"),
 
   // Sports, pet, garden
-  shop("SPORTS", "Sports store", "Sports"),
-  shop("FITNESS", "Gym & fitness", "Sports"),
-  shop("PET", "Pet store", "Pet"),
-  shop("PET_FOOD", "Pet food", "Pet", { extraSteps: [FSSAI_STEP] }),
-  shop("NURSERY", "Nursery & plants", "Garden"),
-  shop("GARDENING", "Gardening supplies", "Garden"),
+  shop("SPORTS", "Sports store", "Sports & Fitness"),
+  shop("FITNESS", "Gym & fitness", "Sports & Fitness"),
+  shop("PET", "Pet store", "Pet Supplies"),
+  shop("PET_FOOD", "Pet food", "Pet Supplies", { extraSteps: [FSSAI_STEP] }),
+  shop("NURSERY", "Nursery & plants", "Home & Kitchen"),
+  shop("GARDENING", "Gardening supplies", "Home & Kitchen"),
 
   // Other
-  shop("JEWELLERY", "Jewellery store", "Jewellery", { extraSteps: [JEWELLERY_STEP] }),
+  shop("JEWELLERY", "Jewellery store", "Gifts & Lifestyle", { extraSteps: [JEWELLERY_STEP] }),
   shop("AUTO_PARTS", "Auto parts", "Automotive"),
 ];
 
@@ -425,24 +425,38 @@ const BY_KEY = new Map(SHOP_TYPES.map((s) => [s.key, s]));
 // the unlicensed MEDICAL_SUPPLIES and the licensed lines are explicit yes/no extras below. Make
 // "Health" imply PHARMACY instead and every optician is asked for a drug licence they cannot have.
 export const DEPARTMENT_REP: Record<string, string> = {
-  Grocery: "GENERAL_STORE",
-  Fresh: "FRUIT_VEG",
-  "Bakery & sweets": "BAKERY",
-  Food: "RESTAURANT",
-  Beauty: "PERSONAL_CARE",
-  Fashion: "CLOTHING",
-  "Books & stationery": "STATIONERY",
-  "Toys & gifts": "TOYS",
-  Electronics: "ELECTRONICS",
-  Health: "MEDICAL_SUPPLIES",
-  "Baby & kids": "BABY_STORE",
-  Home: "HOME_KITCHEN",
-  Hardware: "HARDWARE",
-  Sports: "SPORTS",
-  Pet: "PET",
-  Garden: "NURSERY",
-  Jewellery: "JEWELLERY",
+  "Grocery & Food": "GENERAL_STORE",
+  "Fresh & Dairy": "FRUIT_VEG",
+  "Personal Care & Beauty": "PERSONAL_CARE",
+  "Health & Wellness": "MEDICAL_SUPPLIES",
+  "Home & Kitchen": "HOME_KITCHEN",
+  "Cleaning & Household": "HOUSEHOLD",
+  "Electronics & Accessories": "ELECTRONICS",
+  "Stationery & Office": "STATIONERY",
+  "Books & Education": "BOOKS",
+  "Baby & Kids": "BABY_STORE",
+  "Toys & Games": "TOYS",
+  "Sports & Fitness": "SPORTS",
   Automotive: "AUTO_PARTS",
+  "Hardware & Electrical": "HARDWARE",
+  "Pet Supplies": "PET",
+  "Gifts & Lifestyle": "GIFTS",
+  // Restaurants, cafés, bakeries and sweet shops: the food-delivery side, a menu not the shop catalogue.
+  Food: "RESTAURANT",
+};
+
+/** Order the picker shows them in: the 16 super-categories, then Food. */
+export const DEPARTMENT_ORDER = Object.keys(DEPARTMENT_REP);
+
+/** Registry departments that exist only for old sellers/leads and are NOT offered any more (no fashion/footwear sold). */
+export const HIDDEN_DEPARTMENTS = new Set(["Fashion"]);
+
+/** Department names used before the 16 super-categories became the picker → their current name (old leads still parse). */
+const OLD_DEPARTMENT_NAMES: Record<string, string> = {
+  Grocery: "Grocery & Food", Fresh: "Fresh & Dairy", Beauty: "Personal Care & Beauty", Health: "Health & Wellness",
+  Home: "Home & Kitchen", Garden: "Home & Kitchen", Electronics: "Electronics & Accessories", "Books & stationery": "Stationery & Office",
+  "Baby & kids": "Baby & Kids", "Toys & gifts": "Toys & Games", Sports: "Sports & Fitness", Pet: "Pet Supplies",
+  Hardware: "Hardware & Electrical", Jewellery: "Gifts & Lifestyle", "Bakery & sweets": "Food",
 };
 
 /** A restaurant runs on a menu, not the standard catalogue, so it can't be combined with a shop. */
@@ -450,14 +464,14 @@ export const EXCLUSIVE_DEPARTMENTS = new Set(["Food"]);
 
 /** Licensed lines inside a department, asked as plain yes/no — they add that trade's licence step. */
 export const DEPARTMENT_EXTRAS: Record<string, { key: string; label: string }[]> = {
-  Health: [
+  "Health & Wellness": [
     { key: "PHARMACY", label: "I sell medicines (needs a drug licence)" },
     { key: "MEDICAL_DEVICE", label: "I sell medical devices (needs a licence)" },
   ],
 };
 
 /**
- * Lead-form category string ("Grocery,Fresh") → registry keys: first = shopType, rest = also-sell.
+ * Lead-form category string ("Grocery & Food,Fresh & Dairy"; old names like "Grocery,Fresh" still parse) → registry keys: first = shopType, rest = also-sell.
  * Unknown tokens are dropped (the old free-text leads contain things like "kirana"); an exclusive
  * department wins alone, since it can't be mixed. Returns null when nothing usable was found.
  */
@@ -465,7 +479,9 @@ export function categoriesFromLead(raw: string | null | undefined): { shopType: 
   const keys: string[] = [];
   let exclusive: string | null = null;
   for (const token of String(raw ?? "").split(",")) {
-    const dept = Object.keys(DEPARTMENT_REP).find((d) => d.toLowerCase() === token.trim().toLowerCase());
+    const word = token.trim().toLowerCase();
+    const old = Object.keys(OLD_DEPARTMENT_NAMES).find((d) => d.toLowerCase() === word);
+    const dept = Object.keys(DEPARTMENT_REP).find((d) => d.toLowerCase() === (old ? OLD_DEPARTMENT_NAMES[old]! : word).toLowerCase());
     if (!dept) continue;
     if (EXCLUSIVE_DEPARTMENTS.has(dept)) exclusive = DEPARTMENT_REP[dept]!;
     else if (!keys.includes(DEPARTMENT_REP[dept]!)) keys.push(DEPARTMENT_REP[dept]!);

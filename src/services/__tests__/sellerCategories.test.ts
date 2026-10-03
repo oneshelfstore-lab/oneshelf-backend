@@ -1,37 +1,42 @@
 import { describe, it, expect } from "vitest";
 import { allowedRoots, departmentsOf, type PickerRoot } from "../sellerCategories.js";
 
-const sup = (slug: string, departments: string[], isActive = true) => ({ id: slug, slug, name: slug, departments, isActive });
+const sup = (name: string, isActive = true) => ({ id: name, slug: name, name, isActive });
 const root = (id: string, superCategory: PickerRoot["superCategory"]): PickerRoot =>
   ({ id, slug: id, name: id, nameHi: null, imageUrl: null, displayOrder: 0, superCategory });
 const roots = [
-  root("pens", sup("school", ["Books & stationery"])),
-  root("staples", sup("grocery", ["Grocery"])),
-  root("diwali", sup("diwali", [])),
+  root("pens", sup("Stationery & Office")),
+  root("staples", sup("Grocery & Food")),
+  root("textbooks", sup("Books & Education")),
+  root("hidden", sup("Retired", false)),
   root("orphan", null),
 ];
 
 describe("departmentsOf", () => {
-  it("recovers registration departments from shop type + also-sell, incl. licensed Health lines", () => {
-    expect(departmentsOf("STATIONERY", ["GENERAL_STORE"]).sort()).toEqual(["Books & stationery", "Grocery"]);
-    expect(departmentsOf("GENERAL_STORE", ["PHARMACY"]).sort()).toEqual(["Grocery", "Health"]);
+  it("recovers the super-categories a seller registered for from shop type + also-sell", () => {
+    expect(departmentsOf("STATIONERY", ["GENERAL_STORE"]).sort()).toEqual(["Grocery & Food", "Stationery & Office"]);
+    expect(departmentsOf("GENERAL_STORE", ["PHARMACY"]).sort()).toEqual(["Grocery & Food", "Health & Wellness"]);
+    expect(departmentsOf("BOOKS", [])).toEqual(["Books & Education"]);
+  });
+  it("uses the shop type's own super, not just the representative", () => {
+    expect(departmentsOf("DAIRY", ["PET_FOOD", "NURSERY"]).sort()).toEqual(["Fresh & Dairy", "Home & Kitchen", "Pet Supplies"]);
+  });
+  it("ignores restaurants/bakeries (food layer) and retired fashion trades", () => {
+    expect(departmentsOf("RESTAURANT", ["CLOTHING", "BAKERY"])).toEqual([]);
     expect(departmentsOf(null, [])).toEqual([]);
   });
 });
 
 describe("allowedRoots", () => {
-  it("shows only the roots under supers whose departments match", () => {
-    expect(allowedRoots(roots, ["Books & stationery"]).map((r) => r.id)).toEqual(["pens"]);
-    expect(allowedRoots(roots, ["Books & stationery", "Grocery"]).map((r) => r.id)).toEqual(["pens", "staples"]);
+  it("shows only the roots on the supers the seller picked", () => {
+    expect(allowedRoots(roots, ["Stationery & Office"]).map((r) => r.id)).toEqual(["pens"]);
+    expect(allowedRoots(roots, ["Stationery & Office", "Grocery & Food"]).map((r) => r.id)).toEqual(["pens", "staples"]);
   });
-  it("fails open: no departments, or none matching any super → everything", () => {
-    expect(allowedRoots(roots, []).map((r) => r.id)).toEqual(["pens", "staples", "orphan"]);
-    expect(allowedRoots(roots, ["Pet"]).map((r) => r.id)).toEqual(["pens", "staples", "orphan"]);
+  it("Stationery and Books are separate picks now", () => {
+    expect(allowedRoots(roots, ["Books & Education"]).map((r) => r.id)).toEqual(["textbooks"]);
   });
-  it("never offers a super with no departments (Diwali), even when failing open", () => {
-    expect(allowedRoots(roots, []).some((r) => r.id === "diwali")).toBe(false);
-  });
-  it("ignores inactive supers", () => {
-    expect(allowedRoots([root("a", sup("s", ["Grocery"], false)), root("b", null)], ["Grocery"])).toHaveLength(1);
+  it("fails open: no picks, or none matching an active super → everything sellable, never an inactive super", () => {
+    expect(allowedRoots(roots, []).map((r) => r.id)).toEqual(["pens", "staples", "textbooks", "orphan"]);
+    expect(allowedRoots(roots, ["Pet Supplies"]).map((r) => r.id)).toEqual(["pens", "staples", "textbooks", "orphan"]);
   });
 });

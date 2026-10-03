@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   SHOP_TYPES,
+  HIDDEN_DEPARTMENTS,
   profileFor,
   isKnownShopType,
   stepsFor,
@@ -137,6 +138,7 @@ describe("category-specific fields", () => {
 describe("departments (what the seller picks)", () => {
   it("gives every department a representative that exists and belongs to it", () => {
     for (const dept of new Set(SHOP_TYPES.map((s) => s.department))) {
+      if (HIDDEN_DEPARTMENTS.has(dept)) continue; // retired (fashion): kept in the registry for old sellers, never offered
       const rep = SHOP_TYPES.find((s) => s.key === DEPARTMENT_REP[dept]);
       expect(rep, dept).toBeDefined();
       expect(rep!.department).toBe(dept);
@@ -149,16 +151,21 @@ describe("departments (what the seller picks)", () => {
     for (const rep of Object.values(DEPARTMENT_REP)) {
       expect(SHOP_TYPES.find((s) => s.key === rep)!.regulated).toBeFalsy();
     }
-    expect(DEPARTMENT_EXTRAS.Health!.map((e) => e.key)).toEqual(["PHARMACY", "MEDICAL_DEVICE"]);
+    expect(DEPARTMENT_EXTRAS["Health & Wellness"]!.map((e) => e.key)).toEqual(["PHARMACY", "MEDICAL_DEVICE"]);
   });
 
   it("turns a lead-form category string into primary + also-sell", () => {
+    expect(categoriesFromLead("Grocery & Food,Fresh & Dairy,Electronics & Accessories")).toEqual({
+      shopType: "GENERAL_STORE",
+      alsoSell: ["FRUIT_VEG", "ELECTRONICS"],
+    });
+    // Leads written before the super-category picker used the old department names; they still parse.
     expect(categoriesFromLead("Grocery,Fresh,Electronics")).toEqual({
       shopType: "GENERAL_STORE",
       alsoSell: ["FRUIT_VEG", "ELECTRONICS"],
     });
     // Case-insensitive, tolerates old free text and gaps, dedupes.
-    expect(categoriesFromLead(" fresh , kirana ,, Fresh")).toEqual({ shopType: "FRUIT_VEG", alsoSell: [] });
+    expect(categoriesFromLead(" fresh , kirana ,, Fresh & Dairy")).toEqual({ shopType: "FRUIT_VEG", alsoSell: [] });
     expect(categoriesFromLead("kirana store")).toBeNull();
     expect(categoriesFromLead(null)).toBeNull();
   });

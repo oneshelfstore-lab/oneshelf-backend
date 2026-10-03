@@ -5,6 +5,7 @@ import { sendError, ValidationError, NotFoundError, ConflictError } from "../lib
 import { requireRole } from "../middleware/auth.js";
 import { formatVariantForApp } from "../utils/looseUnitConverter.js";
 import { IN_STOCK, hasStock, stockLimitBase } from "../services/stockAvailability.js";
+import { labelForApp } from "../services/productLabel.js";
 import { cacheControl, memoCache } from "../lib/httpCache.js";
 import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
 import { resolveCategoryFields, subtreeIds } from "../services/categoryTree.js";
@@ -44,6 +45,8 @@ export function formatProductForApp(product: any) {
     description: product.description,
     descriptionHi: product.descriptionHi ?? null,
     highlights: product.highlights ?? [],
+    // Customers only ever get pack-label facts the seller confirmed (labelVerifiedAt); the table is plain text.
+    ...labelForApp(product, "customer"),
     attributes: product.attributes ?? {},
     hsnCode: product.hsnCode,
     gstRate: product.gstRate != null ? Number(product.gstRate) : null,

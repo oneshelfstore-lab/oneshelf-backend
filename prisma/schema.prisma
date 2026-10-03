@@ -618,6 +618,15 @@ model CatalogProduct {
   // Intelligence" assistant only after the seller taps Apply (CATALOG_PLAN.md phase 6). Blank = not set.
   descriptionHi         String?
   highlights            String[]    @default([])
+  // "At a glance" table the editor's AI proposes from the seller's own details: [{ label, value }].
+  descriptionTable      Json?
+  // Pack-label facts (NUTRITION_PLAN.md). Only returned to customers once labelVerifiedAt is set — the seller
+  // ticked "I checked this against the pack". See services/productLabel.ts.
+  ingredients           String?
+  allergens             String[]    @default([])
+  dietMark              String?     // VEG | NON_VEG | VEGAN | EGG
+  nutrition             Json?
+  labelVerifiedAt       DateTime?
   // Category-specific spec values keyed by CategoryField.key, all stored as strings ({"tip_size":"0.5"}).
   attributes            Json?
   hsnCode               String?     @db.VarChar(8)

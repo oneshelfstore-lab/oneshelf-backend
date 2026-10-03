@@ -7,6 +7,7 @@ import { resolveSeller, type SellerRequest } from "../middleware/sellerScope.js"
 import { formatVariantForApp, fromAppFormat, toAppFormat, assertVariantFloors } from "../utils/looseUnitConverter.js";
 import { receiveBatch, applyStockEdit } from "../services/stockBatches.js";
 import { recordPriceChange } from "../services/priceHistory.js";
+import { labelFields, labelWrite, labelForApp } from "../services/productLabel.js";
 import { SELLER_SALE } from "../services/sellerSales.js";
 import { resolveCategoryFields } from "../services/categoryTree.js";
 import { fieldsForCategory, cleanAttributes } from "../services/categoryFields.js";
@@ -75,6 +76,7 @@ function formatProductForApp(product: any) {
     description: product.description,
     descriptionHi: product.descriptionHi ?? null,
     highlights: product.highlights ?? [],
+    ...labelForApp(product, "editor"),
     attributes: product.attributes ?? {},
     hsnCode: product.hsnCode,
     gstRate: product.gstRate != null ? Number(product.gstRate) : null,
@@ -168,6 +170,7 @@ const productSchema = z.object({
   isActive: z.boolean().optional(),
   imageUrls: z.array(z.string()).default([]),
   searchKeywords: z.array(z.string()).default([]),
+  ...labelFields,
   variants: z.array(variantSchema).min(1).max(20),
 });
 
@@ -217,7 +220,9 @@ router.post("/", async (req: SellerRequest, res: Response) => {
   try {
     const parsed = productSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid product data", parsed.error.errors);
-    const { variants, categorySlug, leafCategoryId, isActive, isSampleEligible, featuredIn99Store, isBuyOneGetOne, attributes: rawAttributes, ...productData } = parsed.data;
+    const { variants, categorySlug, leafCategoryId, isActive, isSampleEligible, featuredIn99Store, isBuyOneGetOne, attributes: rawAttributes, descriptionTable, ingredients, allergens, dietMark, nutrition, labelVerified, ...productData } = parsed.data;
+    // Throws unless the "checked against the pack" tick came with any ingredients/allergens/nutrition.
+    const labelData = labelWrite({ descriptionTable, ingredients, allergens, dietMark, nutrition, labelVerified });
 
     const resolved = await resolveCategoryFields(prisma, { categorySlug, subcategory: productData.subcategory, leafCategoryId });
     if (!resolved.categoryId) throw new ValidationError("categorySlug or leafCategoryId is required");
@@ -291,6 +296,7 @@ router.post("/", async (req: SellerRequest, res: Response) => {
           attributes,
           handle,
           sellerId: req.sellerId!,
+          ...labelData,
           ...merchandising, // house → live now (+toggles); third-party → inactive pending approval
           variants: { create: convertedVariants.map(({ initialStock, initialCost, ...rest }) => rest) },
         },
@@ -338,7 +344,8 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
     const updateSchema = productSchema.partial().omit({ variants: true }).extend({ variants: z.array(variantSchema).min(1).max(20).optional() });
     const parsed = updateSchema.safeParse(req.body);
     if (!parsed.success) throw new ValidationError("Invalid product data", parsed.error.errors);
-    const { variants: variantUpdates, categorySlug, leafCategoryId, attributes: rawAttributes, ...productFields } = parsed.data;
+    const { variants: variantUpdates, categorySlug, leafCategoryId, attributes: rawAttributes, descriptionTable, ingredients, allergens, dietMark, nutrition, labelVerified, ...productFields } = parsed.data;
+    const labelData = labelWrite({ descriptionTable, ingredients, allergens, dietMark, nutrition, labelVerified });
 
     const catFields = await resolveCategoryFields(prisma, { categorySlug, subcategory: productFields.subcategory, leafCategoryId }, existing.categoryId);
     if (catFields.categoryId && catFields.categoryId !== existing.categoryId) await assertSellerMayUseCategory(prisma, req.sellerId!, catFields.categoryId);
@@ -352,7 +359,7 @@ router.put("/:id", async (req: SellerRequest, res: Response) => {
     const isLoose = isLooseType(productFields.productType ?? existing.productType);
 
     await prisma.$transaction(async (tx) => {
-      const updateData: any = { ...productFields, ...catFields };
+      const updateData: any = { ...productFields, ...catFields, ...labelData };
       if (attributes !== undefined) updateData.attributes = attributes;
       // NEVER re-write the handle on update. Create (above) auto-suffixes a colliding handle, but the
       // app can't know that — it recomputes `slugify(name)` and sends it on every save, so a product

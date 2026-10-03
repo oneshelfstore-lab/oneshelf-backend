@@ -3,7 +3,8 @@ import { describe, it, expect, vi } from "vitest";
 vi.mock("../../lib/prisma.js", () => ({ default: {} }));
 vi.mock("../../lib/firebase.js", () => ({ admin: {}, isFirebaseInitialized: () => false }));
 
-import { analyzeSchema, buildPrompt, claimWarnings, describeChoice, isAllowedImageUrl, sanitizeAnalysis } from "../productIntelligence.js";
+import { analyzeSchema, buildPrompt, claimWarnings, describeChoice, sanitizeAnalysis, sanitizeLabel } from "../productIntelligence.js";
+import { labelWrite, labelForApp } from "../productLabel.js";
 
 const input = analyzeSchema.parse({ name: "Amul Taaza Milk", brand: "Amul", packSize: "500 ml" });
 const ids = new Set(["milk", "curd", "shampoo"]);
@@ -23,8 +24,9 @@ describe("claimWarnings", () => {
 describe("sanitizeAnalysis", () => {
   const ok = {
     categoryId: "milk", alternativeCategoryId: "curd", confidence: "HIGH", brand: "Amul",
-    description: "Amul Taaza Milk is a 500 ml milk pack.", descriptionHi: "अमूल ताज़ा मिल्क 500 मिली का पैक है।",
-    highlights: ["500 ml pack", "Amul", "Premium quality", "Milk", "extra"], searchKeywords: ["Milk", "milk", "amul milk"],
+    description: "Amul Taaza Milk is a 500 ml milk pack.",
+    highlights: ["500 ml pack", "Amul", "Premium quality", "Milk", "extra", "sixth"], searchKeywords: ["Milk", "milk", "amul milk"],
+    table: [], knownProduct: false, ingredients: "", allergens: [], dietMark: "", nutrition: { basis: "NONE" },
   };
 
   it("keeps a valid proposal and drops risky highlights", () => {
@@ -32,9 +34,10 @@ describe("sanitizeAnalysis", () => {
     expect(a.categoryId).toBe("milk");
     expect(a.alternativeCategoryId).toBe("curd");
     expect(a.highlights).not.toContain("Premium quality");
-    expect(a.highlights.length).toBeLessThanOrEqual(4);
+    expect(a.highlights.length).toBeLessThanOrEqual(5);
     expect(a.searchKeywords).toEqual(["milk", "amul milk"]); // lowercased + de-duplicated
     expect(a.warnings.some((w) => w.includes("premium"))).toBe(true);
+    expect(a.label).toBeNull();
   });
 
   it("rejects a category id we did not offer", () => {
@@ -45,33 +48,112 @@ describe("sanitizeAnalysis", () => {
     expect(a.alternativeCategoryId).toBe("milk");
   });
 
+  it("does not ask the seller to pick a category when they already chose one", () => {
+    const chosen = analyzeSchema.parse({ name: "Cello Pen", category: "Stationery › Pens" });
+    expect(sanitizeAnalysis({ ...ok, categoryId: "" }, chosen, new Set()).warnings.join(" ")).not.toMatch(/choose it yourself/);
+  });
+
   it("alternative may not equal the main category", () => {
     expect(sanitizeAnalysis({ ...ok, alternativeCategoryId: "milk" }, input, ids).alternativeCategoryId).toBeNull();
   });
 
-  it("language EN returns no Hindi; HI returns no English", () => {
-    expect(sanitizeAnalysis(ok, { ...input, language: "EN" }, ids).descriptionHi).toBe("");
-    expect(sanitizeAnalysis(ok, { ...input, language: "HI" }, ids).description).toBe("");
+  it("returns English only — no Hindi field exists any more", () => {
+    expect(sanitizeAnalysis(ok, input, ids)).not.toHaveProperty("descriptionHi");
   });
 
   it("survives garbage from the model", () => {
-    const a = sanitizeAnalysis({ highlights: "nope", searchKeywords: 5, confidence: "SURE" }, input, ids);
-    expect(a).toMatchObject({ categoryId: null, confidence: "LOW", highlights: [], searchKeywords: [], description: "" });
+    const a = sanitizeAnalysis({ highlights: "nope", searchKeywords: 5, confidence: "SURE", table: "x" }, input, ids);
+    expect(a).toMatchObject({ categoryId: null, confidence: "LOW", highlights: [], searchKeywords: [], description: "", table: [], label: null });
+  });
+});
+
+describe("table rows", () => {
+  const pen = analyzeSchema.parse({
+    name: "Cello Butterflow Pen", brand: "Cello", category: "Stationery › Pens",
+    attributes: [{ label: "Colour", value: "blue" }, { label: "Tip size", value: "0.7 mm" }, { label: "Pack of", value: "5" }],
+  });
+  it("keeps rows whose value the seller typed and drops invented ones", () => {
+    const a = sanitizeAnalysis({
+      table: [{ label: "Colour", value: "Blue" }, { label: "Tip size", value: "0.7 mm" }, { label: "Warranty", value: "2 years" }],
+    }, pen, new Set());
+    expect(a.table).toEqual([{ label: "Colour", value: "Blue" }, { label: "Tip size", value: "0.7 mm" }]);
+  });
+});
+
+describe("label proposal (AI suggestion from general knowledge)", () => {
+  const known = {
+    knownProduct: true, ingredients: "Milk solids, sugar, wheat flour.", allergens: ["MILK", "WHEAT", "GOLD"], dietMark: "VEG",
+    nutrition: { basis: "PER_100G", servingSize: "", energyKcal: 480, proteinG: 7, carbsG: 70, sugarG: 25, addedSugarG: null, fatG: 20, satFatG: null, transFatG: null, fibreG: null, sodiumMg: 300 },
+  };
+  it("is only proposed for a known, packaged product", () => {
+    expect(sanitizeLabel({ ...known, knownProduct: false }, true)).toBeNull();
+    expect(sanitizeLabel(known, false)).toBeNull();
+  });
+  it("keeps only allergens from the fixed list", () => {
+    expect(sanitizeLabel(known, true)?.allergens).toEqual(["MILK", "WHEAT"]);
+  });
+  it("drops a 'free from' claim and an out-of-range nutrition table", () => {
+    expect(sanitizeLabel({ ...known, ingredients: "Gluten free wheat starch" }, true)?.ingredients).toBe("");
+    expect(sanitizeLabel({ ...known, ingredients: "", allergens: [], dietMark: "", nutrition: { ...known.nutrition, proteinG: 5000 } }, true)).toBeNull();
+  });
+  it("adds a warning telling the seller to check the pack", () => {
+    const a = sanitizeAnalysis({ ...known, categoryId: "milk", confidence: "HIGH", description: "x" }, input, ids);
+    expect(a.label?.dietMark).toBe("VEG");
+    expect(a.warnings.join(" ")).toMatch(/check|Compare/i);
+  });
+});
+
+describe("labelWrite — the seller's tick", () => {
+  it("refuses regulated data without the tick", () => {
+    expect(() => labelWrite({ ingredients: "Sugar", labelVerified: false })).toThrow(/Tick/);
+    expect(() => labelWrite({ allergens: ["MILK"] })).toThrow(/Tick/);
+  });
+  it("stamps labelVerifiedAt when ticked, and leaves the label alone when nothing is sent", () => {
+    expect(labelWrite({ ingredients: "Sugar", labelVerified: true }).labelVerifiedAt).toBeInstanceOf(Date);
+    expect(labelWrite({})).toEqual({});
+  });
+  it("clears the stamp when everything is emptied", () => {
+    expect(labelWrite({ ingredients: "", allergens: [], dietMark: null, nutrition: null })).toMatchObject({ ingredients: null, allergens: [], labelVerifiedAt: null });
+  });
+});
+
+describe("labelForApp — customers only see verified data", () => {
+  const p = { ingredients: "Sugar", allergens: ["MILK"], dietMark: "VEG", nutrition: { basis: "PER_100G" }, descriptionTable: [{ label: "a", value: "b" }], labelVerifiedAt: null };
+  it("hides the label from customers until verified, but not the table", () => {
+    const c = labelForApp(p, "customer");
+    expect(c).toMatchObject({ ingredients: null, allergens: [], dietMark: null, nutrition: null, labelVerified: false });
+    expect(c.descriptionTable).toHaveLength(1);
+  });
+  it("shows it once verified, and always to the editor", () => {
+    expect(labelForApp({ ...p, labelVerifiedAt: new Date() }, "customer").ingredients).toBe("Sugar");
+    expect(labelForApp(p, "editor").ingredients).toBe("Sugar");
   });
 });
 
 describe("buildPrompt", () => {
-  it("lists categories by id and carries the facts", () => {
-    const p = buildPrompt(input, [{ id: "milk", path: "Grocery › Dairy › Milk", categorySlug: "grocery", subcategory: "Milk" }]);
-    expect(p).toContain("milk | Grocery › Dairy › Milk");
-    expect(p).toContain("Pack size: 500 ml");
+  it("lists categories by id and carries every fact the seller entered", () => {
+    const full = analyzeSchema.parse({
+      name: "Cello Butterflow Pen", brand: "Cello", packSize: "5 pieces", sizes: ["5 pieces"],
+      attributes: [{ label: "Tip size", value: "0.7 mm" }, { label: "Ink type", value: "Ball" }], countryOfOrigin: "India",
+    });
+    const p = buildPrompt(full, [{ id: "pens", path: "Stationery › Pens", categorySlug: "stationery", subcategory: "Pens" }]);
+    for (const needle of ["pens | Stationery › Pens", "Brand: Cello", "Pack size: 5 pieces", "Tip size: 0.7 mm", "Ink type: Ball", "Country of origin: India"]) {
+      expect(p).toContain(needle);
+    }
+  });
+  it("skips the category list when the seller already picked one", () => {
+    const p = buildPrompt(analyzeSchema.parse({ name: "Cello Pen", category: "Stationery › Pens" }), [{ id: "x", path: "X", categorySlug: "x", subcategory: "" }]);
+    expect(p).not.toContain("CATEGORIES");
+    expect(p).toContain("Category: Stationery › Pens");
   });
 });
 
 describe("analyzeSchema", () => {
-  it("defaults to both languages and rejects a one-letter name", () => {
-    expect(input.language).toBe("BOTH");
+  it("rejects a one-letter name and ignores the old language/image fields", () => {
     expect(analyzeSchema.safeParse({ name: "a" }).success).toBe(false);
+    const old = analyzeSchema.parse({ name: "Amul Milk", language: "BOTH", imageBase64: "x".repeat(200) });
+    expect(old).not.toHaveProperty("language");
+    expect(old).not.toHaveProperty("imageBase64");
   });
 });
 
@@ -85,17 +167,5 @@ describe("describeChoice", () => {
     expect(describeChoice(opts, "g")?.subcategory).toBe("");
     expect(describeChoice(opts, "x")).toBeNull();
     expect(describeChoice(opts, null)).toBeNull();
-  });
-});
-
-describe("isAllowedImageUrl", () => {
-  it("allows only https Firebase/Google Storage hosts", () => {
-    expect(isAllowedImageUrl("https://firebasestorage.googleapis.com/v0/b/x/o/a.jpg?alt=media")).toBe(true);
-    expect(isAllowedImageUrl("https://storage.googleapis.com/bucket/a.png")).toBe(true);
-  });
-  it("rejects other hosts, plain http, internal addresses and junk", () => {
-    for (const u of ["http://firebasestorage.googleapis.com/a.jpg", "https://evil.com/a.jpg", "https://169.254.169.254/latest", "https://firebasestorage.googleapis.com.evil.com/a.jpg", "not a url"]) {
-      expect(isAllowedImageUrl(u)).toBe(false);
-    }
   });
 });

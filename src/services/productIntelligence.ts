@@ -1,30 +1,42 @@
-// "Product Intelligence" (CATALOG_PLAN.md phase 6): given what a seller typed (name, brand, pack size) and
-// optionally a photo, Gemini PROPOSES a category, an English + Hindi description, highlights and search
-// keywords. The proposal is never saved here — the editor shows it and the seller taps Apply.
+// "Product Intelligence" (CATALOG_PLAN.md phase 6): given everything the seller filled in (name, brand, category,
+// the category's own fields, sizes…), OpenAI PROPOSES a category, an English description, highlights, search
+// keywords, an "At a glance" table and — for widely sold branded products only — pack-label facts
+// (ingredients, allergens, veg mark, nutrition). The proposal is never saved here: the editor shows it and the
+// seller taps Apply, and the label facts additionally need the "I checked this against the pack" tick
+// (services/productLabel.ts enforces that server-side).
 //
-// Hard rule: AI proposes, the catalog decides. The category must be one of the ids WE sent (anything
-// else is dropped), and copy may only use facts the seller gave or text printed on the pack photo.
+// Hard rules: AI proposes, the catalog decides. The category must be one of the ids WE sent, table values must
+// come from what the seller typed, allergens come from a fixed list, and nothing says a product is "free from"
+// anything. English only for now.
 
 import type { Response } from "express";
 import { z } from "zod";
 import prisma from "../lib/prisma.js";
-import { geminiJson, GeminiNotConfiguredError } from "../lib/gemini.js";
+import { openaiJson, OpenAINotConfiguredError } from "../lib/openai.js";
 import { ValidationError, sendError } from "../lib/errors.js";
 import { pathTo } from "./categoryTree.js";
-import { sniffImage } from "../routes/uploads.js";
+import { ALLERGENS, DIET_MARKS, nutritionSchema, type Nutrition } from "./productLabel.js";
 
 export const DAILY_CAP = 40;
 const FEATURE = "product-intel";
+
+const labelled = z.object({ label: z.string().trim().min(1).max(60), value: z.string().trim().min(1).max(100) });
 
 export const analyzeSchema = z.object({
   name: z.string().trim().min(2).max(200),
   brand: z.string().trim().max(100).optional(),
   packSize: z.string().trim().max(40).optional(), // free text as typed, e.g. "500 ml"
-  language: z.enum(["EN", "HI", "BOTH"]).default("BOTH"),
-  imageBase64: z.string().min(100).max(2_800_000).optional(),
-  mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]).default("image/jpeg"),
-  // An already-uploaded product photo (editing an existing product). Only our Firebase Storage hosts are fetched.
-  imageUrl: z.string().url().max(700).optional(),
+  productType: z.string().trim().max(20).optional(), // PACKAGED | LOOSE | PRODUCE …
+  isPackaged: z.boolean().optional(),
+  /** The category the seller already picked, as text ("Stationery › Pens"). When present we don't ask for one. */
+  category: z.string().trim().max(200).optional(),
+  /** The category's own fields exactly as shown in the editor: Colour: blue, Tip size: 0.7 mm … */
+  attributes: z.array(labelled).max(25).optional(),
+  /** One line per size card: "5 pieces", "500 g" … */
+  sizes: z.array(z.string().trim().max(60)).max(20).optional(),
+  countryOfOrigin: z.string().trim().max(80).optional(),
+  /** What the seller already wrote — improved, not discarded. */
+  existingDescription: z.string().trim().max(800).optional(),
 });
 export type AnalyzeInput = z.infer<typeof analyzeSchema>;
 
@@ -32,15 +44,25 @@ export type AnalyzeInput = z.infer<typeof analyzeSchema>;
  *  name to the child node), so only top-level categories and their direct children are offered for now. */
 export type CategoryOption = { id: string; path: string; categorySlug: string; subcategory: string };
 
+export type LabelProposal = {
+  ingredients: string;
+  allergens: string[];
+  dietMark: string | null;
+  nutrition: Nutrition | null;
+};
+
 export type Analysis = {
   categoryId: string | null;
   alternativeCategoryId: string | null;
   confidence: "HIGH" | "MEDIUM" | "LOW";
   brand: string | null;
   description: string;
-  descriptionHi: string;
   highlights: string[];
   searchKeywords: string[];
+  /** "At a glance" rows, every value traceable to something the seller typed. */
+  table: { label: string; value: string }[];
+  /** Pack-label facts from the model's general knowledge — null unless it recognised a mainstream product. */
+  label: LabelProposal | null;
   /** Plain-language notes for the seller to double-check before applying. */
   warnings: string[];
 };
@@ -59,97 +81,162 @@ export function claimWarnings(text: string, supplied: string): string[] {
   return RISKY.filter((w) => new RegExp(`\\b${w}\\b`).test(t) && !s.includes(w));
 }
 
-export function buildPrompt(input: AnalyzeInput, categories: CategoryOption[]): string {
-  const facts = [`Name: ${input.name}`, input.brand && `Brand: ${input.brand}`, input.packSize && `Pack size: ${input.packSize}`]
-    .filter(Boolean).join("\n");
+/** Every fact the seller gave, as one lowercase blob — what claims and table values are checked against. */
+export function suppliedText(input: AnalyzeInput): string {
   return [
-    "You help a shop owner in India list a grocery/household product. Use ONLY the facts below and, if a photo is attached, text visibly printed on the pack.",
+    input.name, input.brand, input.packSize, input.category, input.countryOfOrigin, input.existingDescription,
+    ...(input.attributes ?? []).flatMap((a) => [a.label, a.value]),
+    ...(input.sizes ?? []),
+  ].filter(Boolean).join(" ");
+}
+
+export function buildPrompt(input: AnalyzeInput, categories: CategoryOption[]): string {
+  const facts = [
+    `Name: ${input.name}`,
+    input.brand && `Brand: ${input.brand}`,
+    input.category && `Category: ${input.category}`,
+    input.productType && `Product type: ${input.productType}`,
+    input.isPackaged != null && `Packaged product: ${input.isPackaged ? "yes" : "no"}`,
+    input.packSize && `Pack size: ${input.packSize}`,
+    input.sizes?.length && `Sizes sold: ${input.sizes.join("; ")}`,
+    ...(input.attributes ?? []).map((a) => `${a.label}: ${a.value}`),
+    input.countryOfOrigin && `Country of origin: ${input.countryOfOrigin}`,
+    input.existingDescription && `Seller's own description (improve it, keep its facts): ${input.existingDescription}`,
+  ].filter(Boolean).join("\n");
+
+  const pickCategory = !input.category && categories.length > 0;
+  return [
+    "You help a shop owner in India list a product on an online store. Write in English only.",
+    "Use ONLY the FACTS below, plus ordinary common knowledge of what this kind of product is and what it is used for.",
     "",
     "FACTS:", facts, "",
-    "CATEGORIES (choose by exact id):",
-    ...categories.map((c) => `${c.id} | ${c.path}`), "",
+    ...(pickCategory ? ["CATEGORIES (choose by exact id):", ...categories.map((c) => `${c.id} | ${c.path}`), ""] : []),
     "Return JSON:",
-    "- categoryId: the single best category id from the list above. alternativeCategoryId: a second plausible id, or empty.",
+    pickCategory
+      ? "- categoryId: the single best category id from the list above. alternativeCategoryId: a second plausible id, or empty."
+      : "- categoryId and alternativeCategoryId: empty strings (the category is already chosen).",
     "- confidence: HIGH only if the category is obvious from the name; LOW if guessing.",
-    "- brand: the brand if clear from the facts or pack, else empty.",
-    "- description: 1 to 2 plain sentences in English describing what the product is and its pack size.",
-    "- descriptionHi: the same in natural Hindi (Devanagari), not a word-for-word translation.",
-    "- highlights: up to 4 short factual bullets (pack size, brand, product type) in English.",
+    "- brand: the brand if clear from the facts, else empty.",
+    "- description: 2 to 4 plain sentences describing what the product is, what it is for, and its pack size or variant. Mention the seller's details (colour, size, type…) where they matter.",
+    "- highlights: up to 5 short factual bullets taken from the facts.",
     "- searchKeywords: up to 8 lowercase search terms a shopper might type (English or Hinglish).",
+    "- table: 3 to 8 rows of {label, value} summarising the key facts. Copy each value EXACTLY as given in the FACTS; never add a row for something not listed there.",
+    "- knownProduct: true ONLY if this is a widely sold, nationally known branded PACKAGED FOOD/DRINK/PERSONAL-CARE product whose label you genuinely know. Otherwise false (loose items, local brands, anything unsure).",
+    "- ingredients / allergens / dietMark / nutrition: fill ONLY when knownProduct is true, from the product's usual pack label. Otherwise leave them empty (empty string, empty list, dietMark empty, nutrition basis NONE).",
+    "  allergens: only items that the ingredients clearly contain, chosen from the allowed list. NEVER state that a product is free from anything.",
+    "  nutrition: values per 100 g or 100 ml when you know them, else null for each unknown number.",
     "",
-    "RULES: never state ingredients, nutrition, health or medical benefits, certifications, origin, freshness, shelf life, quality words (premium, best, pure, natural, organic) or anything not given above. If unsure, say less.",
+    "RULES: no health or medical benefits, certifications, freshness, shelf life, or quality words (premium, best, pure, natural, organic) unless they appear in the FACTS. If unsure, say less.",
   ].join("\n");
 }
 
-/** Only https URLs on Firebase/Google Storage hosts: the server must never be pointable at arbitrary addresses (SSRF). Pure. */
-export function isAllowedImageUrl(raw: string): boolean {
-  try {
-    const u = new URL(raw);
-    return u.protocol === "https:" && ["firebasestorage.googleapis.com", "storage.googleapis.com"].includes(u.hostname);
-  } catch {
-    return false;
-  }
-}
-
-/** Downloads an allowed image (≤ 2.5 MB, 8 s) and returns it base64-encoded with its real type, or null on any problem. */
-async function fetchImage(url: string): Promise<{ data: string; mime: string } | null> {
-  if (!isAllowedImageUrl(url)) return null;
-  try {
-    const r = await fetch(url, { signal: AbortSignal.timeout(8_000), redirect: "error" });
-    if (!r.ok) return null;
-    const buf = Buffer.from(await r.arrayBuffer());
-    const kind = buf.length <= 2_500_000 ? sniffImage(buf) : null;
-    return kind ? { data: buf.toString("base64"), mime: kind.mime } : null;
-  } catch {
-    return null;
-  }
-}
-
 const clip = (s: unknown, n: number) => String(s ?? "").trim().slice(0, n);
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9.%]+/g, " ").trim();
 
 /** Turns the raw model JSON into a safe Analysis. Pure — unit tested. */
 export function sanitizeAnalysis(raw: any, input: AnalyzeInput, allowedIds: Set<string>): Analysis {
-  const supplied = [input.name, input.brand, input.packSize].filter(Boolean).join(" ");
+  const supplied = suppliedText(input);
+  const suppliedNorm = norm(supplied);
   const warnings: string[] = [];
 
   const categoryId = allowedIds.has(raw?.categoryId) ? String(raw.categoryId) : null;
   const alt = allowedIds.has(raw?.alternativeCategoryId) && raw.alternativeCategoryId !== categoryId ? String(raw.alternativeCategoryId) : null;
   const conf = ["HIGH", "MEDIUM", "LOW"].includes(raw?.confidence) ? raw.confidence : "LOW";
 
-  const description = input.language === "HI" ? "" : clip(raw?.description, 400);
-  const descriptionHi = input.language === "EN" ? "" : clip(raw?.descriptionHi, 500);
+  const description = clip(raw?.description, 700);
   const risky = claimWarnings(`${description} ${raw?.highlights?.join?.(" ") ?? ""}`, supplied);
   if (risky.length) warnings.push(`The text mentions "${risky.join('", "')}", which you didn't enter. Check it is true or remove it.`);
 
   const highlights: string[] = (Array.isArray(raw?.highlights) ? raw.highlights : [])
     .map((h: unknown) => clip(h, 60))
     .filter((h: string) => h && claimWarnings(h, supplied).length === 0)
-    .slice(0, 4);
+    .slice(0, 5);
 
   const searchKeywords: string[] = [...new Set<string>(
     (Array.isArray(raw?.searchKeywords) ? raw.searchKeywords : []).map((k: unknown) => clip(k, 30).toLowerCase()).filter(Boolean),
   )].slice(0, 8);
 
-  if (!categoryId) warnings.push("Couldn't pick a category from your list; choose it yourself.");
+  // A table row survives only if its value is something the seller actually gave us.
+  const table = (Array.isArray(raw?.table) ? raw.table : [])
+    .map((r: any) => ({ label: clip(r?.label, 40), value: clip(r?.value, 80) }))
+    .filter((r: { label: string; value: string }) => r.label && r.value && suppliedNorm.includes(norm(r.value)))
+    .slice(0, 8);
+
+  const label = sanitizeLabel(raw, input.isPackaged !== false);
+  if (label) warnings.push("Ingredients, allergens and nutrition are AI suggestions from general knowledge — not read from your pack. Compare each with the pack, then tick the box to confirm.");
+
+  if (!categoryId && !input.category) warnings.push("Couldn't pick a category from your list; choose it yourself.");
   return {
     categoryId, alternativeCategoryId: alt, confidence: categoryId ? conf : "LOW",
-    brand: clip(raw?.brand, 100) || null, description, descriptionHi, highlights, searchKeywords, warnings,
+    brand: clip(raw?.brand, 100) || null, description, highlights, searchKeywords, table, label, warnings,
   };
 }
 
-const RESPONSE_SCHEMA = {
-  type: "OBJECT",
+/** Pack-label facts the model may suggest. Null unless it flagged a known product AND something valid survives. Pure. */
+export function sanitizeLabel(raw: any, packaged: boolean): LabelProposal | null {
+  if (!packaged || raw?.knownProduct !== true) return null;
+
+  let ingredients = clip(raw?.ingredients, 1500);
+  // "free from X" is a safety claim we never let the model make.
+  if (/\bfree\b|-free\b/i.test(ingredients)) ingredients = "";
+
+  const allowed = new Set<string>(ALLERGENS);
+  const allergens = [...new Set<string>((Array.isArray(raw?.allergens) ? raw.allergens : []).map(String))].filter((a) => allowed.has(a));
+  const dietMark = (DIET_MARKS as readonly string[]).includes(raw?.dietMark) ? String(raw.dietMark) : null;
+
+  let nutrition: Nutrition | null = null;
+  const n = raw?.nutrition;
+  if (n && n.basis && n.basis !== "NONE") {
+    const parsed = nutritionSchema.safeParse({ ...n, servingSize: n.servingSize ? String(n.servingSize) : null });
+    // Needs at least energy or one macro, or it is an empty table.
+    if (parsed.success && [parsed.data.energyKcal, parsed.data.proteinG, parsed.data.carbsG, parsed.data.fatG].some((v) => v != null)) {
+      nutrition = parsed.data;
+    }
+  }
+
+  if (!ingredients && allergens.length === 0 && !dietMark && !nutrition) return null;
+  return { ingredients, allergens, dietMark, nutrition };
+}
+
+const nullableNum = { type: ["number", "null"] };
+export const RESPONSE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
   properties: {
-    categoryId: { type: "STRING" },
-    alternativeCategoryId: { type: "STRING" },
-    confidence: { type: "STRING", enum: ["HIGH", "MEDIUM", "LOW"] },
-    brand: { type: "STRING" },
-    description: { type: "STRING" },
-    descriptionHi: { type: "STRING" },
-    highlights: { type: "ARRAY", items: { type: "STRING" } },
-    searchKeywords: { type: "ARRAY", items: { type: "STRING" } },
+    categoryId: { type: "string" },
+    alternativeCategoryId: { type: "string" },
+    confidence: { type: "string", enum: ["HIGH", "MEDIUM", "LOW"] },
+    brand: { type: "string" },
+    description: { type: "string" },
+    highlights: { type: "array", items: { type: "string" } },
+    searchKeywords: { type: "array", items: { type: "string" } },
+    table: {
+      type: "array",
+      items: {
+        type: "object", additionalProperties: false,
+        properties: { label: { type: "string" }, value: { type: "string" } },
+        required: ["label", "value"],
+      },
+    },
+    knownProduct: { type: "boolean" },
+    ingredients: { type: "string" },
+    allergens: { type: "array", items: { type: "string", enum: [...ALLERGENS] } },
+    dietMark: { type: "string", enum: ["", ...DIET_MARKS] },
+    nutrition: {
+      type: "object", additionalProperties: false,
+      properties: {
+        basis: { type: "string", enum: ["NONE", "PER_100G", "PER_100ML", "PER_SERVING"] },
+        servingSize: { type: "string" },
+        energyKcal: nullableNum, proteinG: nullableNum, carbsG: nullableNum, sugarG: nullableNum, addedSugarG: nullableNum,
+        fatG: nullableNum, satFatG: nullableNum, transFatG: nullableNum, fibreG: nullableNum, sodiumMg: nullableNum,
+      },
+      required: ["basis", "servingSize", "energyKcal", "proteinG", "carbsG", "sugarG", "addedSugarG", "fatG", "satFatG", "transFatG", "fibreG", "sodiumMg"],
+    },
   },
-  required: ["categoryId", "confidence", "description", "descriptionHi", "highlights", "searchKeywords"],
+  required: [
+    "categoryId", "alternativeCategoryId", "confidence", "brand", "description", "highlights", "searchKeywords",
+    "table", "knownProduct", "ingredients", "allergens", "dietMark", "nutrition",
+  ],
 };
 
 /** Active categories as `Grocery › Dairy`, so the model picks by id and the seller reads names. Depth ≤ 2. */
@@ -177,7 +264,7 @@ export function describeChoice(options: CategoryOption[], id: string | null) {
   return o ? { path: o.path, categorySlug: o.categorySlug, subcategory: o.subcategory } : null;
 }
 
-/** Counts the attempt first (a failed Gemini call still costs us). true = within today's cap. */
+/** Counts the attempt first (a failed call still costs us). true = within today's cap. */
 export async function takeAiQuota(userId: string): Promise<boolean> {
   const day = new Date().toISOString().slice(0, 10);
   const row = await prisma.aiUsage.upsert({
@@ -197,19 +284,14 @@ export async function analyzeProductHandler(req: any, res: Response) {
       return void res.status(429).json({ success: false, error: "Daily AI limit reached. You can still fill the details yourself." });
     }
     const input = parsed.data;
-    const options = await categoryOptions();
-    const parts: any[] = [{ text: buildPrompt(input, options) }];
-    if (input.imageBase64) parts.push({ inline_data: { mime_type: input.mimeType, data: input.imageBase64 } });
-    else if (input.imageUrl) {
-      const img = await fetchImage(input.imageUrl); // a failed fetch just means text-only analysis
-      if (img) parts.push({ inline_data: { mime_type: img.mime, data: img.data } });
-    }
+    // The category list is only sent when the seller hasn't picked a category yet.
+    const options = input.category ? [] : await categoryOptions();
     try {
-      const raw = await geminiJson(parts, RESPONSE_SCHEMA, "product-intel", { temperature: 0.2, timeoutMs: 25_000 });
+      const raw = await openaiJson(buildPrompt(input, options), RESPONSE_SCHEMA, "product-intel", { timeoutMs: 45_000 });
       const a = sanitizeAnalysis(raw, input, new Set(options.map((o) => o.id)));
       res.json({ success: true, data: { ...a, category: describeChoice(options, a.categoryId), alternativeCategory: describeChoice(options, a.alternativeCategoryId) } });
     } catch (e) {
-      if (e instanceof GeminiNotConfiguredError) {
+      if (e instanceof OpenAINotConfiguredError) {
         return void res.status(503).json({ success: false, error: "AI suggestions aren't available right now." });
       }
       console.warn("product-intel failed:", e);

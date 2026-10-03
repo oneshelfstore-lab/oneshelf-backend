@@ -1,4 +1,4 @@
-// The 18 super-categories every product lives under (the Home tabs, and the first step of the seller's
+// The 16 super-categories every product lives under (the Home tabs, and the first step of the seller's
 // add-product picker). `departments` = registration departments (keys of DEPARTMENT_REP in shopTypes.ts) whose
 // sellers may list in it. Applied by scripts/restructureSupers.ts; edit here or via the owner super-category PUT.
 //
@@ -15,8 +15,6 @@ export const SUPER_CATEGORIES: { slug: string; name: string; departments: string
   { slug: "electronics_accessories", name: "Electronics & Accessories", departments: ["Electronics"] },
   { slug: "stationery_office", name: "Stationery & Office", departments: ["Books & stationery"] },
   { slug: "books_education", name: "Books & Education", departments: ["Books & stationery"] },
-  { slug: "fashion_clothing", name: "Fashion & Clothing", departments: ["Fashion"] },
-  { slug: "footwear_accessories", name: "Footwear & Accessories", departments: ["Fashion"] },
   { slug: "baby_kids", name: "Baby & Kids", departments: ["Baby & kids"] },
   { slug: "toys_games", name: "Toys & Games", departments: ["Toys & gifts"] },
   { slug: "sports_fitness", name: "Sports & Fitness", departments: ["Sports"] },
@@ -26,7 +24,10 @@ export const SUPER_CATEGORIES: { slug: string; name: string; departments: string
   { slug: "gifts_lifestyle", name: "Gifts & Lifestyle", departments: ["Toys & gifts", "Jewellery"] },
 ];
 
-/** Old super-categories replaced by the 18 above. Deactivated (never deleted) so the change is reversible. */
+/** Super-categories dropped on purpose (Oct 3 2026: no fashion/footwear in the catalogue). Deleted by restructureSupers.ts when empty. */
+export const DELETED_SUPERS = ["fashion_clothing", "footwear_accessories"];
+
+/** Old super-categories replaced by the list above. Deactivated (never deleted) so the change is reversible. */
 export const RETIRED_SUPERS = [
   "grocery", "grocery_kitchen", "snacks_drinks", "household_care", "fresh_and_dairy", "electronics",
   "stationery_school_writing", "stationery_art_craft", "stationery_office_business", "stationery_gifts_learning",

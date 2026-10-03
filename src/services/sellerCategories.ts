@@ -34,11 +34,16 @@ export type PickerRoot = {
   superCategory: { id: string; slug: string; name: string; departments: string[]; isActive: boolean } | null;
 };
 
-/** Pure: the roots a seller with these departments may use. Empty departments, or no match at all → every root. */
+/**
+ * Pure: the roots a seller with these departments may use. A super with no departments (a seasonal "Diwali" shelf) or
+ * an inactive one is never sellable, not even by the fail-open fallback. Empty departments, or no match at all →
+ * every sellable root (including ones on no shelf yet).
+ */
 export function allowedRoots<T extends PickerRoot>(roots: T[], departments: string[]): T[] {
-  if (departments.length === 0) return roots;
-  const allowed = roots.filter((r) => r.superCategory?.isActive && r.superCategory.departments.some((d) => departments.includes(d)));
-  return allowed.length > 0 ? allowed : roots;
+  const sellable = roots.filter((r) => !r.superCategory || (r.superCategory.isActive && r.superCategory.departments.length > 0));
+  if (departments.length === 0) return sellable;
+  const allowed = sellable.filter((r) => r.superCategory?.departments.some((d) => departments.includes(d)));
+  return allowed.length > 0 ? allowed : sellable;
 }
 
 /** The seller's allowed top-level categories, each carrying its super-category (null = not on any shelf yet). */

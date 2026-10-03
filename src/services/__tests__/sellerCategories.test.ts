@@ -25,10 +25,13 @@ describe("allowedRoots", () => {
     expect(allowedRoots(roots, ["Books & stationery", "Grocery"]).map((r) => r.id)).toEqual(["pens", "staples"]);
   });
   it("fails open: no departments, or none matching any super → everything", () => {
-    expect(allowedRoots(roots, [])).toHaveLength(4);
-    expect(allowedRoots(roots, ["Pet"])).toHaveLength(4);
+    expect(allowedRoots(roots, []).map((r) => r.id)).toEqual(["pens", "staples", "orphan"]);
+    expect(allowedRoots(roots, ["Pet"]).map((r) => r.id)).toEqual(["pens", "staples", "orphan"]);
+  });
+  it("never offers a super with no departments (Diwali), even when failing open", () => {
+    expect(allowedRoots(roots, []).some((r) => r.id === "diwali")).toBe(false);
   });
   it("ignores inactive supers", () => {
-    expect(allowedRoots([root("a", sup("s", ["Grocery"], false)), root("b", null)], ["Grocery"])).toHaveLength(2);
+    expect(allowedRoots([root("a", sup("s", ["Grocery"], false)), root("b", null)], ["Grocery"])).toHaveLength(1);
   });
 });

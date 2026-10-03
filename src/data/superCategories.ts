@@ -1,6 +1,6 @@
-// The 16 super-categories every product lives under (the Home tabs, and the first step of the seller's
-// add-product picker). `departments` = registration departments (keys of DEPARTMENT_REP in shopTypes.ts) whose
-// sellers may list in it. Applied by scripts/restructureSupers.ts; edit here or via the owner super-category PUT.
+// The 16 super-categories every product lives under (the Home tabs, the registration pick list, and the first step of the
+// seller's add-product picker). Registration offers these same names (DEPARTMENT_REP in shopTypes.ts); the legacy
+// `departments` column below is NO LONGER READ — the seller picker matches on the super's NAME. Applied by scripts/restructureSupers.ts; edit here or via the owner super-category PUT.
 //
 // Deliberate gaps: "Bakery & sweets" has no super (it gets its own section in the food interface); "Food"
 // (restaurants) runs on a menu. Festivals (Diwali…) are COLLECTIONS the admin fills, never supers or categories.

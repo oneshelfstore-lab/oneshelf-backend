@@ -10,6 +10,7 @@ import { BOOKS } from "./booksCatalog.js";
 import { TOYS } from "./toysCatalog.js";
 import { ELECTRONICS, ELECTRONICS_MOVES } from "./electronicsCatalog.js";
 import { GIFTS } from "./giftsCatalog.js";
+import { HARDWARE } from "./hardwareCatalog.js";
 import type { Root } from "./stationeryCatalog.js";
 
 export type TreeDef = {
@@ -37,4 +38,5 @@ export const TREES: Record<string, TreeDef> = {
   electronics: { superSlug: "electronics_accessories", prefix: "el_", roots: ELECTRONICS, moves: ELECTRONICS_MOVES, retireRoots: ["stationery_small_electronics"] },
   // Retires the stationery "Greeting & Gifts" root: cards, gift tags/bags and packaging live here.
   gifts: { superSlug: "gifts_lifestyle", prefix: "gift_", roots: GIFTS, retireRoots: ["stationery_greeting_and_gifts"] },
+  hardware: { superSlug: "hardware_electrical", prefix: "hdw_", roots: HARDWARE },
 };

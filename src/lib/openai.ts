@@ -11,8 +11,9 @@ const model = () => process.env.OPENAI_MODEL || "gpt-5-nano";
  * Chat Completions with Structured Outputs: the reply is guaranteed to match `schema`
  * (every property required, additionalProperties false — see productIntelligence's RESPONSE_SCHEMA).
  *
- * ⚠️ gpt-5 models are reasoning models: no custom temperature, and the reasoning tokens count against
- * `max_completion_tokens`, so the cap is generous. `reasoning_effort: "minimal"` keeps it fast and cheap.
+ * ⚠️ gpt-5 and later are reasoning models: no custom temperature, and the reasoning tokens count against
+ * `max_completion_tokens`, so the cap is generous. `reasoning_effort: "low"` keeps it fast and cheap — "low" rather
+ * than "minimal" because it is accepted across the whole family (a model that rejects it gets one retry without).
  */
 export async function openaiJson(
   prompt: string,
@@ -33,7 +34,7 @@ export async function openaiJson(
         messages: [{ role: "user", content: prompt }],
         response_format: { type: "json_schema", json_schema: { name: "result", strict: true, schema } },
         max_completion_tokens: opts.maxTokens ?? 4000,
-        ...(withEffort && m.startsWith("gpt-5") ? { reasoning_effort: "minimal" } : {}),
+        ...(withEffort && /^gpt-[5-9]/.test(m) ? { reasoning_effort: "low" } : {}),
       }),
       signal: AbortSignal.timeout(opts.timeoutMs ?? 40_000),
     });

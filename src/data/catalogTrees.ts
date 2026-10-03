@@ -8,6 +8,7 @@ import { CLEANING, CLEANING_MOVES } from "./cleaningCatalog.js";
 import { HEALTH, HEALTH_MOVES } from "./healthCatalog.js";
 import { BOOKS } from "./booksCatalog.js";
 import { TOYS } from "./toysCatalog.js";
+import { ELECTRONICS, ELECTRONICS_MOVES } from "./electronicsCatalog.js";
 import type { Root } from "./stationeryCatalog.js";
 
 export type TreeDef = {
@@ -31,4 +32,6 @@ export const TREES: Record<string, TreeDef> = {
   // Retires the stationery "Educational Products" root: charts, maps, globes and workbooks now live here.
   books: { superSlug: "books_education", prefix: "edu_", roots: BOOKS, retireRoots: ["stationery_educational_products"] },
   toys: { superSlug: "toys_games", prefix: "toy_", roots: TOYS },
+  // Retires the stationery "Small Electronics" root: electronics now live here.
+  electronics: { superSlug: "electronics_accessories", prefix: "el_", roots: ELECTRONICS, moves: ELECTRONICS_MOVES, retireRoots: ["stationery_small_electronics"] },
 };

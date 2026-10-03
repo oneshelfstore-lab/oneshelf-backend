@@ -246,18 +246,6 @@ export const STATIONERY: Super[] = [
         ],
       },
       {
-        n: "Small Electronics",
-        f: [t("warranty", "Warranty", { showOnCard: true })],
-        k: [
-          withF("USB drives & memory cards", [num("capacity", "Capacity", { unit: "GB", filterable: true, showOnCard: true })]),
-          { n: "Cables & adapters" },
-          { n: "Earphones & headphones" },
-          withF("Batteries & chargers", [pick("battery_size", "Battery size", ["AA", "AAA", "9V", "Coin cell", "Other"], { filterable: true }), packOf]),
-          withF("Power banks", [num("capacity", "Capacity", { unit: "mAh", filterable: true, showOnCard: true })]),
-          { n: "Timers & presentation remotes" },
-        ],
-      },
-      {
         n: "Miscellaneous",
         k: leaves("Magnets", "Keychains", "Lanyards & badges", "ID card holders", "Magnifiers", "Sewing kits", "Locks"),
       },

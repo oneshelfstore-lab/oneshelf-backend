@@ -1213,6 +1213,10 @@ model DealCollage {
   ctaEmoji          String  @default("🛒") // decorative emoji on the right of the CTA footer
   ctaTargetCategory String? // category slug the footer links to (optional)
   ctaTargetProduct  String? // product id the footer links to (wins over category)
+  // Promo-card style. COLLAGE = original look (header + CTA); PROMO = gradient box of pill-label tiles.
+  template          String  @default("COLLAGE") // COLLAGE | PROMO
+  columns           Int     @default(2) // tiles per row (2 or 3)
+  bgAngle           Int     @default(135) // gradient angle in degrees
 
   cards     DealCollageCard[]
   createdAt DateTime          @default(now())
@@ -1235,6 +1239,9 @@ model DealCollageCard {
   targetCategory String? // category slug this card links to
   targetProduct  String? // product id this card links to (wins over category)
   displayOrder   Int         @default(0)
+  label          String? // PROMO pill text under the image ("From ₹29,999*", "Wishlist now")
+  caption        String? // PROMO text below the tile ("OPPO K14x")
+  bgColorTo      String? // optional 2nd tile colour → light gradient (null = solid bgColor)
 
   @@index([collageId, displayOrder])
 }

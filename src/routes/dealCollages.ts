@@ -54,6 +54,9 @@ const collageSchema = z.object({
   ctaEmoji: z.string().max(16).default("🛒"),
   ctaTargetCategory: z.string().max(60).optional().nullable(),
   ctaTargetProduct: z.string().max(60).optional().nullable(),
+  template: z.enum(["COLLAGE", "PROMO"]).default("COLLAGE"),
+  columns: z.number().int().min(2).max(3).default(2),
+  bgAngle: z.number().int().min(0).max(360).default(135),
 });
 
 const cardSchema = z.object({
@@ -67,6 +70,9 @@ const cardSchema = z.object({
   targetCategory: z.string().max(60).optional().nullable(),
   targetProduct: z.string().max(60).optional().nullable(),
   displayOrder: z.number().int().min(0).default(0),
+  label: z.string().max(60).optional().nullable(),
+  caption: z.string().max(80).optional().nullable(),
+  bgColorTo: z.string().max(20).optional().nullable(),
 });
 
 ownerDealCollageRouter.get("/", async (_req: Request, res: Response) => {

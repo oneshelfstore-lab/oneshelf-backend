@@ -14,7 +14,7 @@ import { requireRole } from "../middleware/auth.js";
 export const adminUploadRouter = Router();
 
 const MAX_BYTES = 2_000_000;
-const FOLDERS = ["categories", "collections"] as const;
+const FOLDERS = ["categories", "collections", "sections"] as const;
 
 /** The real type of an image from its first bytes (never trust the declared type). Pure. */
 export function sniffImage(b: Buffer): { mime: string; ext: string } | null {

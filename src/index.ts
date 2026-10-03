@@ -32,6 +32,7 @@ import ownerSuperCategoryRoutes from "./routes/ownerSuperCategories.js";
 import { publicCatalogRouter, adminCatalogRouter } from "./routes/catalog.js";
 import { publicBannerRouter, adminBannerRouter, ownerBannerRouter } from "./routes/banners.js";
 import { publicDealCollageRouter, ownerDealCollageRouter } from "./routes/dealCollages.js";
+import { publicHomeSectionRouter, adminHomeSectionRouter } from "./routes/homeSections.js";
 import { publicBrandRouter, ownerBrandRouter, sellerBrandRouter } from "./routes/brands.js";
 import cartRoutes from "./routes/cart.js";
 import { appCouponRouter, adminCouponRouter, ownerCouponRouter } from "./routes/coupons.js";
@@ -434,6 +435,7 @@ app.use("/api/app/products", publicCatalogRouter);
 app.use("/api/app/banners", publicBannerRouter);
 app.use("/api/app/deal-collages", publicDealCollageRouter);
 app.use("/api/app/brands", publicBrandRouter);
+app.use("/api/app/home-sections", publicHomeSectionRouter);
 // Food browse is PUBLIC, like the grocery catalog — a customer looks at restaurants before signing
 // in. Gated internally by StoreConfig.foodEnabled (returns an empty list while off).
 app.use("/api/app/food", foodRoutes);
@@ -541,6 +543,7 @@ app.use("/api/company", companyRoutes);
 app.use("/api/categories", adminCategoryRouter);
 app.use("/api/collections", adminCollectionRouter);
 app.use("/api/uploads", adminUploadRouter);
+app.use("/api/home-sections", adminHomeSectionRouter);
 app.use("/api/catalog", adminCatalogRouter);
 app.use("/api/banners", adminBannerRouter);
 app.use("/api/coupons", adminCouponRouter);

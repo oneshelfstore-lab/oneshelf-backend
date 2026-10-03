@@ -1246,6 +1246,24 @@ model DealCollageCard {
   @@index([collageId, displayOrder])
 }
 
+// Studio-built section on a page. `page` = "HOME" or "dept:<super-category slug>"; `type` picks the app
+// renderer (CATEGORY_SHAPES today). The Studio edits draftConfig; Publish copies it to publishedConfig,
+// which is all the customer app ever reads. Unknown types are skipped by the app, so new types are safe.
+model HomeSection {
+  id              String    @id @default(cuid())
+  page            String    @default("HOME")
+  type            String
+  displayOrder    Int       @default(0)
+  isActive        Boolean   @default(true)
+  draftConfig     Json      @default("{}")
+  publishedConfig Json?
+  publishedAt     DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([page, isActive, displayOrder])
+}
+
 // ─── 6b. Brand ───────────────────────────────────────────────────────
 // Owner-managed company/brand with an optional logo. CatalogProduct.brand stays the brand NAME
 // (a string), so products reference a brand by name and the logo is looked up here — no product
